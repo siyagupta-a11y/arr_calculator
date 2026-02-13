@@ -69,6 +69,7 @@ export type ReportRow = {
   territory?: string;
   country?: string;
   industry?: string;
+  lineItemDescription?: string;
 
 };
 

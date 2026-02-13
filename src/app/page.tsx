@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import React, { useMemo, useState } from "react";
 import type { ReportRequest, ReportResponse, ReportRow, Grain, ReportMode } from "@/lib/types";
 
@@ -332,7 +333,10 @@ export default function Home() {
 
   return (
     <div style={{ padding: 24, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" }}>
-      <h1 style={{ fontSize: 24, marginBottom: 8 }}>ARR Report</h1>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <h1 style={{ fontSize: 24, marginBottom: 8 }}>ARR Report</h1>
+        <Link href="/stripe">Open Stripe ARR report</Link>
+      </div>
       <p style={{ marginTop: 0, color: "#666" }}>
         Select a date range and mode. Top shows totals by period; below is the breakdown.
       </p>

@@ -62,6 +62,9 @@ using present-day ARR and C-ARR values.
 - `CRON_SECRET` (recommended; protects the endpoint)
 - `HUBSPOT_CURRENT_ARR_PROP` (optional; defaults to `current_arr`)
 - `HUBSPOT_CURRENT_CARR_PROP` (optional; defaults to `current_carr`)
+- `STRIPE_SECRET_KEY` (required for `/stripe` page and `/api/stripe-report`)
+- `STRIPE_INVOICE_STATUS` (optional; defaults to `paid`)
+- `STRIPE_TARGET_CURRENCY` (optional; defaults to `USD`)
 
 ### Schedule
 
