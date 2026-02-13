@@ -1,6 +1,10 @@
 {
   "crons": [
     {
+      "path": "/api/stripe-sync",
+      "schedule": "0 * * * *"
+    },
+    {
       "path": "/api/daily-sync",
       "schedule": "0 9 * * *"
     },

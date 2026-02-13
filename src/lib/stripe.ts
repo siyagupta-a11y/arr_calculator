@@ -1,6 +1,7 @@
 const STRIPE_BASE = "https://api.stripe.com/v1";
 const STRIPE_MAX_RETRIES = 4;
 const STRIPE_BASE_BACKOFF_MS = 300;
+const STRIPE_LINE_FETCH_CONCURRENCY = Number(process.env.STRIPE_LINE_FETCH_CONCURRENCY || "12");
 
 export type StripeCustomer = {
   id: string;
@@ -41,6 +42,12 @@ export type StripeInvoiceWithLines = {
   customerId: string;
   customerName: string;
   lineItems: StripeInvoiceLineItem[];
+};
+
+export type StripeInvoiceQuery = {
+  status?: string;
+  createdGte?: number;
+  createdLte?: number;
 };
 
 type StripeListResponse<T> = {
@@ -94,6 +101,25 @@ async function stripeFetch<T>(path: string, params: URLSearchParams) {
   throw new Error("Stripe API request failed unexpectedly");
 }
 
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T, idx: number) => Promise<R>) {
+  if (!items.length) return [] as R[];
+  const safeLimit = Math.max(1, Math.min(limit, items.length));
+  const out: R[] = new Array(items.length);
+  let next = 0;
+
+  async function worker() {
+    while (true) {
+      const idx = next;
+      next++;
+      if (idx >= items.length) return;
+      out[idx] = await fn(items[idx], idx);
+    }
+  }
+
+  await Promise.all(Array.from({ length: safeLimit }, () => worker()));
+  return out;
+}
+
 function normalizeCustomer(invoice: StripeInvoice) {
   const customerRaw = invoice.customer;
   if (!customerRaw) {
@@ -109,8 +135,27 @@ function normalizeCustomer(invoice: StripeInvoice) {
   return { customerId, customerName };
 }
 
-export async function listInvoicesWithLineItems(status?: string): Promise<StripeInvoiceWithLines[]> {
-  const invoiceStatus = status || process.env.STRIPE_INVOICE_STATUS || "paid";
+async function listInvoiceLines(invoiceId: string) {
+  const lineItems: StripeInvoiceLineItem[] = [];
+  let lineStartingAfter: string | null = null;
+
+  while (true) {
+    const params = new URLSearchParams();
+    params.set("limit", "100");
+    params.append("expand[]", "data.price");
+    if (lineStartingAfter) params.set("starting_after", lineStartingAfter);
+
+    const page = await stripeFetch<StripeListResponse<StripeInvoiceLineItem>>(`/invoices/${invoiceId}/lines`, params);
+    lineItems.push(...(page.data || []));
+    if (!page.has_more || !page.data.length) break;
+    lineStartingAfter = page.data[page.data.length - 1].id;
+  }
+
+  return lineItems;
+}
+
+export async function listInvoicesWithLineItems(query?: StripeInvoiceQuery): Promise<StripeInvoiceWithLines[]> {
+  const invoiceStatus = query?.status || process.env.STRIPE_INVOICE_STATUS || "paid";
   const invoices: StripeInvoice[] = [];
   let startingAfter: string | null = null;
 
@@ -119,6 +164,8 @@ export async function listInvoicesWithLineItems(status?: string): Promise<Stripe
     params.set("limit", "100");
     params.set("status", invoiceStatus);
     params.append("expand[]", "data.customer");
+    if (query?.createdGte) params.set("created[gte]", String(query.createdGte));
+    if (query?.createdLte) params.set("created[lte]", String(query.createdLte));
     if (startingAfter) params.set("starting_after", startingAfter);
 
     const page = await stripeFetch<StripeListResponse<StripeInvoice>>("/invoices", params);
@@ -128,37 +175,16 @@ export async function listInvoicesWithLineItems(status?: string): Promise<Stripe
     startingAfter = page.data[page.data.length - 1].id;
   }
 
-  const results: StripeInvoiceWithLines[] = [];
-
-  for (const invoice of invoices) {
-    const lineItems: StripeInvoiceLineItem[] = [];
-    let lineStartingAfter: string | null = null;
-
-    while (true) {
-      const params = new URLSearchParams();
-      params.set("limit", "100");
-      params.append("expand[]", "data.price");
-      if (lineStartingAfter) params.set("starting_after", lineStartingAfter);
-
-      const page = await stripeFetch<StripeListResponse<StripeInvoiceLineItem>>(
-        `/invoices/${invoice.id}/lines`,
-        params,
-      );
-
-      lineItems.push(...(page.data || []));
-      if (!page.has_more || !page.data.length) break;
-      lineStartingAfter = page.data[page.data.length - 1].id;
-    }
-
+  const results = await mapWithConcurrency(invoices, STRIPE_LINE_FETCH_CONCURRENCY, async (invoice) => {
+    const [lineItems] = await Promise.all([listInvoiceLines(invoice.id)]);
     const { customerId, customerName } = normalizeCustomer(invoice);
-
-    results.push({
+    return {
       invoice,
       customerId,
       customerName,
       lineItems,
-    });
-  }
+    };
+  });
 
   return results;
 }

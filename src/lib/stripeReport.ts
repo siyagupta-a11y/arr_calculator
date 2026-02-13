@@ -6,13 +6,21 @@ import {
   round2,
 } from "@/lib/logic";
 import type { Grain, ReportResponse, ReportRow } from "@/lib/types";
-import { listInvoicesWithLineItems } from "@/lib/stripe";
+import { ensureStripeSyncForRange, getSyncedStripeLineItemsForRange } from "@/lib/stripeSyncStore";
 
 export type StripeReportRequest = {
   startDate: string;
   endDate: string;
   grain: Grain;
 };
+
+type CacheEntry = {
+  expiresAt: number;
+  value: ReportResponse;
+};
+
+const REPORT_CACHE_TTL_MS = Number(process.env.STRIPE_REPORT_CACHE_TTL_MS || "300000");
+const REPORT_CACHE = new Map<string, CacheEntry>();
 
 function formatDayKey(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -65,6 +73,12 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     throw new Error("endDate must be >= startDate");
   }
 
+  const cacheKey = `${body.startDate}|${body.endDate}|${body.grain}`;
+  const cached = REPORT_CACHE.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
   const monthlyPeriods = buildMonthlyPeriods(firstOfMonth(rangeStart), firstOfMonth(rangeEnd));
   const dailyPeriods = buildDailyPeriods(rangeStart, rangeEnd);
   const aggregated = aggregatePeriodsFromMonthly(monthlyPeriods, body.grain);
@@ -74,95 +88,84 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
       : aggregated.map((p) => ({ key: p.key, label: p.label }));
 
   const targetCurrency = (process.env.STRIPE_TARGET_CURRENCY || "USD").trim().toLowerCase();
-  const invoices = await listInvoicesWithLineItems();
+  await ensureStripeSyncForRange({
+    startDate: body.startDate,
+    endDate: body.endDate,
+  });
+  const syncedItems = await getSyncedStripeLineItemsForRange(body.startDate, body.endDate);
 
   const rows: ReportRow[] = [];
 
-  for (const invoiceWithLines of invoices) {
-    const invoiceCurrency = String(invoiceWithLines.invoice.currency || "").trim().toLowerCase();
-    const lineCurrency = invoiceCurrency || targetCurrency;
+  for (const item of syncedItems) {
+    const lineCurrency = (item.currency || targetCurrency).trim().toLowerCase();
     if (lineCurrency && lineCurrency !== targetCurrency) continue;
+    const closeDate = item.invoiceCreatedTs > 0 ? new Date(item.invoiceCreatedTs) : null;
+    const amountMajor = Number(item.amountMinor || 0) / 100;
+    if (!(amountMajor > 0)) continue;
 
-    const invoiceCreated = Number(invoiceWithLines.invoice.created || 0);
-    const closeDate = invoiceCreated > 0 ? new Date(invoiceCreated * 1000) : null;
+    const windowStart = new Date(item.periodStartTs);
+    const windowEndInclusive = new Date(item.periodEndTs);
+    const windowEndExclusive = new Date(item.periodEndTs + 1);
+    if (isNaN(windowStart.getTime()) || isNaN(windowEndExclusive.getTime())) continue;
+    if (windowEndExclusive <= windowStart) continue;
 
-    for (const line of invoiceWithLines.lineItems) {
-      const amountMajor = Number(line.amount || 0) / 100;
-      if (!(amountMajor > 0)) continue;
+    const annualized = annualizedAmountFromPeriod(amountMajor, windowStart, windowEndExclusive);
+    if (!(annualized > 0)) continue;
 
-      const periodStartRaw = Number(line.period?.start || 0);
-      const periodEndRaw = Number(line.period?.end || 0);
-      if (!(periodStartRaw > 0) || !(periodEndRaw > 0)) continue;
-
-      const windowStart = new Date(periodStartRaw * 1000);
-      const windowEndExclusive = new Date(periodEndRaw * 1000);
-      if (isNaN(windowStart.getTime()) || isNaN(windowEndExclusive.getTime())) continue;
-      if (windowEndExclusive <= windowStart) continue;
-
-      // Stripe line item period end is treated as exclusive; convert for inclusion checks.
-      const windowEndInclusive = new Date(windowEndExclusive.getTime() - 1);
-
-      const annualized = annualizedAmountFromPeriod(amountMajor, windowStart, windowEndExclusive);
-      if (!(annualized > 0)) continue;
-
-      const valuesMonthly: Record<string, number> = {};
-      for (const mp of monthlyPeriods) {
-        const monthEnd = mp.end;
-        const coversMonthEnd = windowStart <= monthEnd && windowEndInclusive >= monthEnd;
-        valuesMonthly[mp.key] = coversMonthEnd ? annualized : 0;
-      }
-
-      const valuesByPeriod: Record<string, number> = {};
-      if (body.grain === "monthly") {
-        for (const mp of monthlyPeriods) valuesByPeriod[mp.key] = valuesMonthly[mp.key] || 0;
-      } else if (body.grain === "quarterly" || body.grain === "annually") {
-        for (const ap of aggregated as Array<{ key: string; members?: string[] }>) {
-          const members = ap.members || [];
-          const sum = members.reduce((acc, key) => acc + (valuesMonthly[key] || 0), 0);
-          valuesByPeriod[ap.key] = round2(sum);
-        }
-      } else {
-        for (const dp of dailyPeriods) {
-          const coversDay = windowStart <= dp.dayEnd && windowEndInclusive >= dp.dayEnd;
-          valuesByPeriod[dp.key] = coversDay ? annualized : 0;
-        }
-      }
-
-      const recurring = line.price?.recurring;
-      const recurringLabel = recurringFrequencyLabel(recurring?.interval, recurring?.interval_count);
-
-      rows.push({
-        dealName: invoiceWithLines.customerName,
-        dealId: invoiceWithLines.customerId || "(no customer id)",
-        lineItemId: line.id,
-
-        valueUsd: annualized,
-        dealCurrency: targetCurrency.toUpperCase(),
-        fxRate: null,
-        fxDateUsed: "",
-
-        dealType: "stripe_invoice_line",
-        closeDate: closeDate ? toIsoDate(closeDate) : "",
-
-        windowStart: toIsoDate(windowStart),
-        windowEnd: toIsoDate(windowEndInclusive),
-        isOpenEnded: false,
-
-        recurringbillingfrequency: recurringLabel,
-        termMonths: null,
-        amount: round2(amountMajor),
-        netPrice: round2(amountMajor),
-        quantity: Number(line.quantity || 1),
-
-        valuesByPeriod,
-        deploymentType: "",
-        accountId: "",
-        territory: "",
-        country: "",
-        industry: "",
-        lineItemDescription: String(line.description || ""),
-      });
+    const valuesMonthly: Record<string, number> = {};
+    for (const mp of monthlyPeriods) {
+      const monthEnd = mp.end;
+      const coversMonthEnd = windowStart <= monthEnd && windowEndInclusive >= monthEnd;
+      valuesMonthly[mp.key] = coversMonthEnd ? annualized : 0;
     }
+
+    const valuesByPeriod: Record<string, number> = {};
+    if (body.grain === "monthly") {
+      for (const mp of monthlyPeriods) valuesByPeriod[mp.key] = valuesMonthly[mp.key] || 0;
+    } else if (body.grain === "quarterly" || body.grain === "annually") {
+      for (const ap of aggregated as Array<{ key: string; members?: string[] }>) {
+        const members = ap.members || [];
+        const sum = members.reduce((acc, key) => acc + (valuesMonthly[key] || 0), 0);
+        valuesByPeriod[ap.key] = round2(sum);
+      }
+    } else {
+      for (const dp of dailyPeriods) {
+        const coversDay = windowStart <= dp.dayEnd && windowEndInclusive >= dp.dayEnd;
+        valuesByPeriod[dp.key] = coversDay ? annualized : 0;
+      }
+    }
+
+    rows.push({
+      dealName: item.customerName,
+      dealId: item.customerId || "(no customer id)",
+      lineItemId: item.lineItemId,
+
+      valueUsd: annualized,
+      dealCurrency: targetCurrency.toUpperCase(),
+      fxRate: null,
+      fxDateUsed: "",
+
+      dealType: "stripe_invoice_line",
+      closeDate: closeDate ? toIsoDate(closeDate) : "",
+
+      windowStart: toIsoDate(windowStart),
+      windowEnd: toIsoDate(windowEndInclusive),
+      isOpenEnded: false,
+
+      recurringbillingfrequency: recurringFrequencyLabel(),
+      termMonths: null,
+      amount: round2(amountMajor),
+      netPrice: round2(amountMajor),
+      quantity: Number(item.quantity || 1),
+
+      valuesByPeriod,
+      deploymentType: "",
+      accountId: "",
+      territory: "",
+      country: "",
+      industry: "",
+      lineItemDescription: item.lineItemDescription || "",
+    });
   }
 
   const totalsByPeriod = outputPeriods.map((p) => {
@@ -170,9 +173,11 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     return { ...p, total };
   });
 
-  return {
+  const response = {
     periods: outputPeriods,
     totalsByPeriod,
     rows,
   };
+  REPORT_CACHE.set(cacheKey, { expiresAt: Date.now() + REPORT_CACHE_TTL_MS, value: response });
+  return response;
 }

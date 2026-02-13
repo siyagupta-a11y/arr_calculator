@@ -41,6 +41,7 @@ This project includes a scheduled bot endpoint:
 
 - `GET /api/monthly-email`
 - `GET /api/daily-sync`
+- `GET /api/stripe-sync`
 
 It runs on the 1st of every month via `vercel.json`, calculates ARR and C-ARR for the month that just ended, builds an Excel-compatible attachment with two sheets (`ARR` and `C-ARR`), and emails it to your recipient list.
 
@@ -70,6 +71,7 @@ using present-day ARR and C-ARR values.
 
 The cron schedule is in `vercel.json`:
 
+- `0 * * * *` (Stripe sync every hour, UTC)
 - `0 9 1 * *` (09:00 UTC on day 1 of every month)
 - `0 9 * * *` (09:00 UTC every day)
 
@@ -85,3 +87,20 @@ Use `POST /api/monthly-email` with:
 ```
 
 If `recipients` is omitted, `MONTHLY_REPORT_RECIPIENTS` is used.
+
+## Stripe Performance Notes
+
+`/api/stripe-report` now uses:
+
+- Date-bound fetches (only invoices in the requested date window are synced)
+- Parallel invoice line-item fetching
+- A local sync store (`/tmp/arr-stripe-sync-store.json` by default)
+- In-memory response cache for report payloads
+
+### Stripe performance environment variables
+
+- `STRIPE_LINE_FETCH_CONCURRENCY` (optional, default `12`)
+- `STRIPE_REPORT_CACHE_TTL_MS` (optional, default `300000`)
+- `STRIPE_SYNC_FRESHNESS_MS` (optional, default `900000`)
+- `STRIPE_SYNC_MAX_HISTORY_DAYS` (optional, default `800`)
+- `STRIPE_SYNC_STORE_PATH` (optional, default `/tmp/arr-stripe-sync-store.json`)
