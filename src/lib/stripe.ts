@@ -84,7 +84,15 @@ async function stripeFetch<T>(path: string, params: URLSearchParams) {
 
     const text = await res.text();
     if (res.ok) {
-      return text ? (JSON.parse(text) as T) : ({} as T);
+      if (!text) return {} as T;
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        const sample = text.slice(0, 240);
+        throw new Error(
+          `Stripe API returned non-JSON for ${path} (status ${res.status}). Response starts with: ${sample}`,
+        );
+      }
     }
 
     const retryable = res.status === 429 || res.status >= 500;
