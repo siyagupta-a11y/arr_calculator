@@ -154,7 +154,7 @@ export async function generateReport(
   });
 
   const dealMeta =
-    body.mode === "contracted" && !body.contractedIncludeAllDeals
+    body.mode === "contracted" && !body.contractedIncludeAllDeals && body.grain !== "daily"
       ? allDealMeta.filter((m) => m.closeDateInRange)
       : allDealMeta;
   if (!dealMeta.length) {
@@ -239,15 +239,6 @@ export async function generateReport(
       const p = li?.properties || {};
       const w = computeWindowForLineItem(p);
 
-      if (body.mode === "arr") {
-        const billingStart = w?.start || null;
-        const billingStartInRange =
-          !!billingStart &&
-          billingStart.getTime() >= rangeStart.getTime() &&
-          billingStart.getTime() <= rangeEnd.getTime();
-        if (!billingStartInRange) continue;
-      }
-
       const liArr = computeCalculatedArrForLineItem(p);
       const liArrFx = fx.rate && liArr ? round2(liArr * fx.rate) : 0;
 
@@ -314,6 +305,11 @@ export async function generateReport(
           const coversDay = !!w && !!liArrFx && w.start <= dayPoint && w.end >= dayPoint;
 
           if (body.mode === "arr") {
+            valuesByPeriod[dp.key] = coversDay ? liArrFx : 0;
+            continue;
+          }
+
+          if (body.mode === "contracted") {
             valuesByPeriod[dp.key] = coversDay ? liArrFx : 0;
             continue;
           }
