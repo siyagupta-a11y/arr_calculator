@@ -71,7 +71,7 @@ using present-day ARR and C-ARR values.
 
 The cron schedule is in `vercel.json`:
 
-- `0 * * * *` (Stripe sync every hour, UTC)
+- `0 8 * * *` (Stripe sync daily at 08:00 UTC)
 - `0 9 1 * *` (09:00 UTC on day 1 of every month)
 - `0 9 * * *` (09:00 UTC every day)
 
