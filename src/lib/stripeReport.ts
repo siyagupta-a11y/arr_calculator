@@ -88,11 +88,16 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
       : aggregated.map((p) => ({ key: p.key, label: p.label }));
 
   const targetCurrency = (process.env.STRIPE_TARGET_CURRENCY || "USD").trim().toLowerCase();
-  await ensureStripeSyncForRange({
-    startDate: body.startDate,
-    endDate: body.endDate,
-  });
-  const syncedItems = await getSyncedStripeLineItemsForRange(body.startDate, body.endDate);
+  let syncedItems = await getSyncedStripeLineItemsForRange(body.startDate, body.endDate);
+  const autoSync = String(process.env.STRIPE_REPORT_AUTO_SYNC || "false").toLowerCase() === "true";
+
+  if (!syncedItems.length && autoSync) {
+    await ensureStripeSyncForRange({
+      startDate: body.startDate,
+      endDate: body.endDate,
+    });
+    syncedItems = await getSyncedStripeLineItemsForRange(body.startDate, body.endDate);
+  }
 
   const rows: ReportRow[] = [];
 

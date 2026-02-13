@@ -35,6 +35,7 @@ type EnsureSyncInput = {
 const STORE_PATH = process.env.STRIPE_SYNC_STORE_PATH || "/tmp/arr-stripe-sync-store.json";
 const MAX_HISTORY_DAYS = Number(process.env.STRIPE_SYNC_MAX_HISTORY_DAYS || "800");
 const SYNC_FRESHNESS_MS = Number(process.env.STRIPE_SYNC_FRESHNESS_MS || "900000");
+const SYNC_MAX_INVOICES_PER_RUN = Number(process.env.STRIPE_SYNC_MAX_INVOICES_PER_RUN || "120");
 
 let writeLock: Promise<void> = Promise.resolve();
 
@@ -140,6 +141,7 @@ export async function ensureStripeSyncForRange(input: EnsureSyncInput) {
     const invoices = await listInvoicesWithLineItems({
       createdGte: Math.floor(clampedStartTs / 1000),
       createdLte: Math.floor(endTs / 1000),
+      maxInvoices: SYNC_MAX_INVOICES_PER_RUN,
     });
 
     const nextStore: SyncStore = {

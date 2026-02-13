@@ -48,6 +48,7 @@ export type StripeInvoiceQuery = {
   status?: string;
   createdGte?: number;
   createdLte?: number;
+  maxInvoices?: number;
 };
 
 type StripeListResponse<T> = {
@@ -164,6 +165,7 @@ async function listInvoiceLines(invoiceId: string) {
 
 export async function listInvoicesWithLineItems(query?: StripeInvoiceQuery): Promise<StripeInvoiceWithLines[]> {
   const invoiceStatus = query?.status || process.env.STRIPE_INVOICE_STATUS || "paid";
+  const maxInvoices = Math.max(1, Number(query?.maxInvoices || 500));
   const invoices: StripeInvoice[] = [];
   let startingAfter: string | null = null;
 
@@ -178,6 +180,10 @@ export async function listInvoicesWithLineItems(query?: StripeInvoiceQuery): Pro
 
     const page = await stripeFetch<StripeListResponse<StripeInvoice>>("/invoices", params);
     invoices.push(...(page.data || []));
+    if (invoices.length >= maxInvoices) {
+      invoices.length = maxInvoices;
+      break;
+    }
 
     if (!page.has_more || !page.data.length) break;
     startingAfter = page.data[page.data.length - 1].id;
