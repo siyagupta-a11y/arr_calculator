@@ -12,7 +12,8 @@ type StripeApiRequest = {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as StripeApiRequest;
+    const raw = await req.text();
+    const body = (raw ? JSON.parse(raw) : {}) as StripeApiRequest;
     const report = await generateStripeReport(body);
     return NextResponse.json(report);
   } catch (e: unknown) {
@@ -23,4 +24,11 @@ export async function POST(req: Request) {
         : 500;
     return NextResponse.json({ error: message }, { status });
   }
+}
+
+export async function GET() {
+  return NextResponse.json(
+    { error: "Method not allowed. Use POST /api/stripe-report with JSON body." },
+    { status: 405 },
+  );
 }

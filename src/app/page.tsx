@@ -106,9 +106,23 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error || "Request failed");
-      setData(json);
+      const text = await res.text();
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+
+      if (!res.ok) {
+        if (json && typeof json === "object" && "error" in json) {
+          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+        }
+        throw new Error(text || "Request failed");
+      }
+
+      if (!json || typeof json !== "object") throw new Error("Invalid API response");
+      setData(json as ReportResponse);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
       setError(message);
