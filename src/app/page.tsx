@@ -61,6 +61,10 @@ function round2(n: number) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
+function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
+  return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > 1e-9);
+}
+
 export default function Home() {
   const [startDate, setStartDate] = useState("2025-01-01");
   const [endDate, setEndDate] = useState("2025-12-31");
@@ -193,7 +197,9 @@ export default function Home() {
       return dealNameOk && deploymentTypeOk && accountIdOk && territoryOk && countryOk && industryOk && dealTypeOk;
     });
 
-    if (groupByFields.length === 0) return filteredBaseRows;
+    if (groupByFields.length === 0) {
+      return filteredBaseRows.filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
+    }
 
     const map = new Map<string, UiRow>();
 
@@ -232,7 +238,7 @@ export default function Home() {
       }
     }
 
-    return Array.from(map.values());
+    return Array.from(map.values()).filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
   }, [
     data,
     groupByFields,
