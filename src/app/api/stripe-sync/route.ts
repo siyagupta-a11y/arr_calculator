@@ -7,6 +7,7 @@ type RequestBody = {
   startDate?: string;
   endDate?: string;
   force?: boolean;
+  iterations?: number;
 };
 
 function isAuthorized(req: Request) {
@@ -42,12 +43,23 @@ async function handle(req: Request) {
   const fallback = defaultWindow();
   const startDate = body.startDate || fallback.startDate;
   const endDate = body.endDate || fallback.endDate;
+  const iterations = Math.max(1, Math.min(Number(body.iterations || 1), 20));
 
-  const sync = await ensureStripeSyncForRange({
-    startDate,
-    endDate,
-    force: !!body.force,
-  });
+  const runs: unknown[] = [];
+  let syncedInvoicesTotal = 0;
+  for (let i = 0; i < iterations; i++) {
+    const run = await ensureStripeSyncForRange({
+      startDate,
+      endDate,
+      force: i === 0 ? !!body.force : false,
+    });
+    runs.push(run);
+
+    if (run && typeof run === "object" && "syncedInvoices" in run) {
+      syncedInvoicesTotal += Number((run as { syncedInvoices?: number }).syncedInvoices || 0);
+    }
+    if (run && typeof run === "object" && "hasMore" in run && !(run as { hasMore?: boolean }).hasMore) break;
+  }
 
   const stats = await getStripeSyncStoreStats();
 
@@ -55,7 +67,11 @@ async function handle(req: Request) {
     ok: true,
     startDate,
     endDate,
-    sync,
+    iterationsRequested: iterations,
+    iterationsExecuted: runs.length,
+    syncedInvoicesTotal,
+    lastRun: runs[runs.length - 1] || null,
+    runs,
     stats,
   });
 }

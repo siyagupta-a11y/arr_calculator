@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
 import { parseDate } from "@/lib/logic";
-import { listInvoicesWithLineItems } from "@/lib/stripe";
+import { listInvoiceBatchWithLineItems } from "@/lib/stripe";
 
 export type SyncedStripeLineItem = {
   key: string;
@@ -23,6 +23,10 @@ type SyncStore = {
   updatedAtTs: number;
   lastSyncStartTs: number;
   lastSyncEndTs: number;
+  activeRangeStartTs: number;
+  activeRangeEndTs: number;
+  nextInvoiceCursor: string | null;
+  rangeExhausted: boolean;
   itemsByKey: Record<string, SyncedStripeLineItem>;
 };
 
@@ -49,6 +53,10 @@ function emptyStore(): SyncStore {
     updatedAtTs: 0,
     lastSyncStartTs: 0,
     lastSyncEndTs: 0,
+    activeRangeStartTs: 0,
+    activeRangeEndTs: 0,
+    nextInvoiceCursor: null,
+    rangeExhausted: false,
     itemsByKey: {},
   };
 }
@@ -56,9 +64,19 @@ function emptyStore(): SyncStore {
 async function readStore(): Promise<SyncStore> {
   try {
     const raw = await fs.readFile(STORE_PATH, "utf8");
-    const parsed = JSON.parse(raw) as SyncStore;
+    const parsed = JSON.parse(raw) as Partial<SyncStore> | null;
     if (!parsed || parsed.version !== 1 || !parsed.itemsByKey) return emptyStore();
-    return parsed;
+    return {
+      version: 1,
+      updatedAtTs: Number(parsed.updatedAtTs || 0),
+      lastSyncStartTs: Number(parsed.lastSyncStartTs || 0),
+      lastSyncEndTs: Number(parsed.lastSyncEndTs || 0),
+      activeRangeStartTs: Number(parsed.activeRangeStartTs || 0),
+      activeRangeEndTs: Number(parsed.activeRangeEndTs || 0),
+      nextInvoiceCursor: parsed.nextInvoiceCursor || null,
+      rangeExhausted: !!parsed.rangeExhausted,
+      itemsByKey: parsed.itemsByKey || {},
+    };
   } catch {
     return emptyStore();
   }
@@ -111,14 +129,25 @@ export async function ensureStripeSyncForRange(input: EnsureSyncInput) {
 
   return withWriteLock(async () => {
     const store = await readStore();
-    const coversRequestedRange =
-      store.lastSyncStartTs > 0 &&
-      store.lastSyncEndTs > 0 &&
-      store.lastSyncStartTs <= clampedStartTs &&
-      store.lastSyncEndTs >= endTs;
+    const sameActiveRange =
+      store.activeRangeStartTs === clampedStartTs &&
+      store.activeRangeEndTs === endTs;
 
-    // Fast path: if we already cover the requested range, do not re-sync on report calls.
-    // Historical Stripe invoice data is effectively immutable for this use-case.
+    const nextStore: SyncStore = {
+      ...store,
+      activeRangeStartTs: sameActiveRange ? store.activeRangeStartTs : clampedStartTs,
+      activeRangeEndTs: sameActiveRange ? store.activeRangeEndTs : endTs,
+      nextInvoiceCursor: sameActiveRange ? store.nextInvoiceCursor : null,
+      rangeExhausted: sameActiveRange ? store.rangeExhausted : false,
+    };
+
+    const coversRequestedRange =
+      nextStore.rangeExhausted &&
+      nextStore.activeRangeStartTs > 0 &&
+      nextStore.activeRangeEndTs > 0 &&
+      nextStore.activeRangeStartTs <= clampedStartTs &&
+      nextStore.activeRangeEndTs >= endTs;
+
     if (!input.force && coversRequestedRange) {
       return {
         synced: false,
@@ -128,32 +157,26 @@ export async function ensureStripeSyncForRange(input: EnsureSyncInput) {
       };
     }
 
-    const isFresh = !input.force && nowTs() - store.updatedAtTs <= SYNC_FRESHNESS_MS;
-    if (isFresh && store.lastSyncStartTs > 0 && store.lastSyncEndTs > 0) {
+    const isFresh = !input.force && nowTs() - nextStore.updatedAtTs <= SYNC_FRESHNESS_MS;
+    if (isFresh && nextStore.rangeExhausted) {
       return {
         synced: false,
         reason: "fresh-cache",
-        updatedAtTs: store.updatedAtTs,
+        updatedAtTs: nextStore.updatedAtTs,
         syncedInvoices: 0,
       };
     }
 
-    const invoices = await listInvoicesWithLineItems({
-      createdGte: Math.floor(clampedStartTs / 1000),
-      createdLte: Math.floor(endTs / 1000),
+    const batch = await listInvoiceBatchWithLineItems({
+      createdGte: Math.floor(nextStore.activeRangeStartTs / 1000),
+      createdLte: Math.floor(nextStore.activeRangeEndTs / 1000),
       maxInvoices: SYNC_MAX_INVOICES_PER_RUN,
+      startingAfter: nextStore.nextInvoiceCursor,
     });
+    nextStore.updatedAtTs = nowTs();
+    nextStore.itemsByKey = { ...nextStore.itemsByKey };
 
-    const nextStore: SyncStore = {
-      ...store,
-      updatedAtTs: nowTs(),
-      lastSyncStartTs:
-        store.lastSyncStartTs > 0 ? Math.min(store.lastSyncStartTs, clampedStartTs) : clampedStartTs,
-      lastSyncEndTs: Math.max(store.lastSyncEndTs || 0, endTs),
-      itemsByKey: { ...store.itemsByKey },
-    };
-
-    for (const inv of invoices) {
+    for (const inv of batch.invoicesWithLines) {
       const invoiceCreatedTs = Number(inv.invoice.created || 0) * 1000;
       const invoiceId = String(inv.invoice.id || "");
       const currency = String(inv.invoice.currency || "").trim().toLowerCase();
@@ -185,13 +208,26 @@ export async function ensureStripeSyncForRange(input: EnsureSyncInput) {
       }
     }
 
+    nextStore.nextInvoiceCursor = batch.hasMore ? batch.nextStartingAfter : null;
+    nextStore.rangeExhausted = !batch.hasMore;
+
+    if (nextStore.rangeExhausted) {
+      nextStore.lastSyncStartTs =
+        nextStore.lastSyncStartTs > 0
+          ? Math.min(nextStore.lastSyncStartTs, nextStore.activeRangeStartTs)
+          : nextStore.activeRangeStartTs;
+      nextStore.lastSyncEndTs = Math.max(nextStore.lastSyncEndTs || 0, nextStore.activeRangeEndTs);
+    }
+
     await writeStore(nextStore);
 
     return {
       synced: true,
       reason: "refreshed",
       updatedAtTs: nextStore.updatedAtTs,
-      syncedInvoices: invoices.length,
+      syncedInvoices: batch.fetchedInvoices,
+      hasMore: batch.hasMore,
+      nextCursor: batch.nextStartingAfter,
     };
   });
 }
@@ -216,6 +252,10 @@ export async function getStripeSyncStoreStats() {
     updatedAtTs: store.updatedAtTs,
     lastSyncStartTs: store.lastSyncStartTs,
     lastSyncEndTs: store.lastSyncEndTs,
+    activeRangeStartTs: store.activeRangeStartTs,
+    activeRangeEndTs: store.activeRangeEndTs,
+    nextInvoiceCursor: store.nextInvoiceCursor,
+    rangeExhausted: store.rangeExhausted,
     itemCount: Object.keys(store.itemsByKey).length,
   };
 }

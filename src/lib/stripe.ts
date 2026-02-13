@@ -49,6 +49,14 @@ export type StripeInvoiceQuery = {
   createdGte?: number;
   createdLte?: number;
   maxInvoices?: number;
+  startingAfter?: string | null;
+};
+
+export type StripeInvoiceBatchResult = {
+  invoicesWithLines: StripeInvoiceWithLines[];
+  hasMore: boolean;
+  nextStartingAfter: string | null;
+  fetchedInvoices: number;
 };
 
 type StripeListResponse<T> = {
@@ -163,15 +171,17 @@ async function listInvoiceLines(invoiceId: string) {
   return lineItems;
 }
 
-export async function listInvoicesWithLineItems(query?: StripeInvoiceQuery): Promise<StripeInvoiceWithLines[]> {
+export async function listInvoiceBatchWithLineItems(query?: StripeInvoiceQuery): Promise<StripeInvoiceBatchResult> {
   const invoiceStatus = query?.status || process.env.STRIPE_INVOICE_STATUS || "paid";
   const maxInvoices = Math.max(1, Number(query?.maxInvoices || 500));
   const invoices: StripeInvoice[] = [];
-  let startingAfter: string | null = null;
+  let startingAfter: string | null = query?.startingAfter || null;
+  let hasMore = false;
 
-  while (true) {
+  while (invoices.length < maxInvoices) {
+    const remaining = maxInvoices - invoices.length;
     const params = new URLSearchParams();
-    params.set("limit", "100");
+    params.set("limit", String(Math.min(100, remaining)));
     params.set("status", invoiceStatus);
     params.append("expand[]", "data.customer");
     if (query?.createdGte) params.set("created[gte]", String(query.createdGte));
@@ -179,14 +189,18 @@ export async function listInvoicesWithLineItems(query?: StripeInvoiceQuery): Pro
     if (startingAfter) params.set("starting_after", startingAfter);
 
     const page = await stripeFetch<StripeListResponse<StripeInvoice>>("/invoices", params);
-    invoices.push(...(page.data || []));
-    if (invoices.length >= maxInvoices) {
-      invoices.length = maxInvoices;
+    const pageData = page.data || [];
+    invoices.push(...pageData);
+    if (!page.has_more || !pageData.length) {
+      hasMore = false;
+      startingAfter = null;
       break;
     }
 
-    if (!page.has_more || !page.data.length) break;
+    hasMore = true;
     startingAfter = page.data[page.data.length - 1].id;
+
+    if (invoices.length >= maxInvoices) break;
   }
 
   const results = await mapWithConcurrency(invoices, STRIPE_LINE_FETCH_CONCURRENCY, async (invoice) => {
@@ -200,5 +214,32 @@ export async function listInvoicesWithLineItems(query?: StripeInvoiceQuery): Pro
     };
   });
 
-  return results;
+  return {
+    invoicesWithLines: results,
+    hasMore,
+    nextStartingAfter: hasMore ? startingAfter : null,
+    fetchedInvoices: invoices.length,
+  };
+}
+
+export async function listInvoicesWithLineItems(query?: StripeInvoiceQuery): Promise<StripeInvoiceWithLines[]> {
+  const out: StripeInvoiceWithLines[] = [];
+  let cursor: string | null = query?.startingAfter || null;
+  const maxInvoices = Number(query?.maxInvoices || 0);
+  let remaining = maxInvoices > 0 ? maxInvoices : Number.POSITIVE_INFINITY;
+
+  while (remaining > 0) {
+    const batchSize = Number.isFinite(remaining) ? Math.min(remaining, 500) : 500;
+    const batch = await listInvoiceBatchWithLineItems({
+      ...query,
+      maxInvoices: batchSize,
+      startingAfter: cursor,
+    });
+    out.push(...batch.invoicesWithLines);
+    remaining = Number.isFinite(remaining) ? remaining - batch.fetchedInvoices : remaining;
+    if (!batch.hasMore || !batch.nextStartingAfter || batch.fetchedInvoices === 0) break;
+    cursor = batch.nextStartingAfter;
+  }
+
+  return out;
 }
