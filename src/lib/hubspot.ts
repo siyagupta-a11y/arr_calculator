@@ -102,6 +102,11 @@ type DealLineItemBatchAssociationResponse = {
   }>;
 };
 
+export type HubspotDealPropertyUpdate = {
+  dealId: string;
+  properties: Record<string, string | number | boolean>;
+};
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
@@ -276,4 +281,28 @@ export async function batchReadLineItems(ids: string[], properties: string[]) {
   }
 
   return map;
+}
+
+export async function batchUpdateDealProperties(updates: HubspotDealPropertyUpdate[]) {
+  const deduped = new Map<string, Record<string, string | number | boolean>>();
+  for (const u of updates) {
+    if (!u.dealId || !u.properties) continue;
+    deduped.set(u.dealId, u.properties);
+  }
+
+  const inputs = Array.from(deduped.entries()).map(([id, properties]) => ({
+    id,
+    properties,
+  }));
+  if (!inputs.length) return;
+
+  const url = `${HUBSPOT_BASE}/crm/v3/objects/deals/batch/update`;
+  const chunkSize = 100;
+  for (let i = 0; i < inputs.length; i += chunkSize) {
+    const chunk = inputs.slice(i, i + chunkSize);
+    await hsFetch(url, {
+      method: "POST",
+      body: JSON.stringify({ inputs: chunk }),
+    });
+  }
 }

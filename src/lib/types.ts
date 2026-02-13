@@ -37,6 +37,7 @@ export type ReportRequest = {
   endDate: string; // YYYY-MM-DD
   mode: ReportMode;
   grain: Grain;
+  contractedIncludeAllDeals?: boolean;
 };
 
 export type ReportRow = {

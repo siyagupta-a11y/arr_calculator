@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/daily-sync",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/monthly-email",
+      "schedule": "0 9 1 * *"
+    }
+  ]
+}
