@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import type { Grain } from "@/lib/types";
 import { generateStripeReport } from "@/lib/stripeReport";
 
+export const runtime = "nodejs";
+
 type StripeApiRequest = {
   startDate: string;
   endDate: string;

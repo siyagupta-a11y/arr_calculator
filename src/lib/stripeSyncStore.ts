@@ -110,14 +110,25 @@ export async function ensureStripeSyncForRange(input: EnsureSyncInput) {
 
   return withWriteLock(async () => {
     const store = await readStore();
-    const isFresh = !input.force && nowTs() - store.updatedAtTs <= SYNC_FRESHNESS_MS;
     const coversRequestedRange =
       store.lastSyncStartTs > 0 &&
       store.lastSyncEndTs > 0 &&
       store.lastSyncStartTs <= clampedStartTs &&
       store.lastSyncEndTs >= endTs;
 
-    if (isFresh && coversRequestedRange) {
+    // Fast path: if we already cover the requested range, do not re-sync on report calls.
+    // Historical Stripe invoice data is effectively immutable for this use-case.
+    if (!input.force && coversRequestedRange) {
+      return {
+        synced: false,
+        reason: "range-covered",
+        updatedAtTs: store.updatedAtTs,
+        syncedInvoices: 0,
+      };
+    }
+
+    const isFresh = !input.force && nowTs() - store.updatedAtTs <= SYNC_FRESHNESS_MS;
+    if (isFresh && store.lastSyncStartTs > 0 && store.lastSyncEndTs > 0) {
       return {
         synced: false,
         reason: "fresh-cache",

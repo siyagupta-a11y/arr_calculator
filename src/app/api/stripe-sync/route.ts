@@ -19,7 +19,8 @@ function isAuthorized(req: Request) {
 
 function defaultWindow() {
   const end = new Date();
-  const start = new Date(end.getFullYear(), end.getMonth() - 3, end.getDate());
+  const lookbackDays = Number(process.env.STRIPE_SYNC_DEFAULT_LOOKBACK_DAYS || "730");
+  const start = new Date(end.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
   return {
     startDate: start.toISOString().slice(0, 10),
     endDate: end.toISOString().slice(0, 10),

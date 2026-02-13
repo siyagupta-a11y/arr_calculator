@@ -104,3 +104,4 @@ If `recipients` is omitted, `MONTHLY_REPORT_RECIPIENTS` is used.
 - `STRIPE_SYNC_FRESHNESS_MS` (optional, default `900000`)
 - `STRIPE_SYNC_MAX_HISTORY_DAYS` (optional, default `800`)
 - `STRIPE_SYNC_STORE_PATH` (optional, default `/tmp/arr-stripe-sync-store.json`)
+- `STRIPE_SYNC_DEFAULT_LOOKBACK_DAYS` (optional, default `730`)
