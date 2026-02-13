@@ -15,15 +15,6 @@ export async function POST(req: Request) {
     const raw = await req.text();
     const body = (raw ? JSON.parse(raw) : {}) as StripeApiRequest;
     const report = await generateStripeReport(body);
-    if (!report.rows.length) {
-      return NextResponse.json(
-        {
-          error:
-            "No synced Stripe data for this range yet. Run /api/stripe-sync for the same date window, then retry.",
-        },
-        { status: 409 },
-      );
-    }
     return NextResponse.json(report);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";

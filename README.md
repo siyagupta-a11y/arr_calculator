@@ -101,7 +101,7 @@ If `recipients` is omitted, `MONTHLY_REPORT_RECIPIENTS` is used.
 
 - `STRIPE_LINE_FETCH_CONCURRENCY` (optional, default `12`)
 - `STRIPE_REPORT_CACHE_TTL_MS` (optional, default `300000`)
-- `STRIPE_REPORT_AUTO_SYNC` (optional, default `false`; keep false on Hobby to avoid request timeouts)
+- `STRIPE_REPORT_AUTO_SYNC` (optional, default `true`; set to `false` only if you want sync strictly via `/api/stripe-sync`)
 - `STRIPE_SYNC_FRESHNESS_MS` (optional, default `900000`)
 - `STRIPE_SYNC_MAX_HISTORY_DAYS` (optional, default `800`)
 - `STRIPE_SYNC_STORE_PATH` (optional, default `/tmp/arr-stripe-sync-store.json`)

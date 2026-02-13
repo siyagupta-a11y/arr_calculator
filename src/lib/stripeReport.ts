@@ -89,7 +89,7 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
 
   const targetCurrency = (process.env.STRIPE_TARGET_CURRENCY || "USD").trim().toLowerCase();
   let syncedItems = await getSyncedStripeLineItemsForRange(body.startDate, body.endDate);
-  const autoSync = String(process.env.STRIPE_REPORT_AUTO_SYNC || "false").toLowerCase() === "true";
+  const autoSync = String(process.env.STRIPE_REPORT_AUTO_SYNC || "true").toLowerCase() === "true";
 
   if (!syncedItems.length && autoSync) {
     await ensureStripeSyncForRange({
