@@ -15,6 +15,16 @@ type DealBreakdownRow = {
   value: number;
 };
 
+type SlackApiBaseResponse = {
+  ok: boolean;
+  error?: string;
+};
+
+type SlackGetUploadUrlResponse = SlackApiBaseResponse & {
+  upload_url?: string;
+  file_id?: string;
+};
+
 function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
@@ -37,13 +47,6 @@ export function getPreviousMonthWindow(now = new Date()): MonthlyWindow {
     periodLabel,
     filenamePart: `${monthStart.getFullYear()}_${pad2(monthStart.getMonth() + 1)}`,
   };
-}
-
-export function parseRecipients(raw: string | undefined | null): string[] {
-  return String(raw || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => !!s);
 }
 
 export function periodTotal(report: ReportResponse, periodKey: string): number {
@@ -139,46 +142,89 @@ export function buildExcelCompatibleXmlWorkbook(args: {
   return Buffer.from(xml, "utf8");
 }
 
-export async function sendReportEmail(params: {
-  recipients: string[];
-  subject: string;
-  text: string;
-  html: string;
-  filename: string;
-  fileContent: Buffer;
-}) {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.MONTHLY_REPORT_FROM_EMAIL;
-
-  if (!apiKey) throw new Error("Missing env var: RESEND_API_KEY");
-  if (!from) throw new Error("Missing env var: MONTHLY_REPORT_FROM_EMAIL");
-
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
+async function slackApi<T>(
+  token: string,
+  endpoint: string,
+  init: RequestInit,
+): Promise<T> {
+  const res = await fetch(`https://slack.com/api/${endpoint}`, {
+    ...init,
     headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      ...(init.headers || {}),
     },
-    body: JSON.stringify({
-      from,
-      to: params.recipients,
-      subject: params.subject,
-      text: params.text,
-      html: params.html,
-      attachments: [
-        {
-          filename: params.filename,
-          content: params.fileContent.toString("base64"),
-          type: "application/vnd.ms-excel",
-        },
-      ],
-    }),
   });
 
-  const data = await res.text();
-  if (!res.ok) {
-    throw new Error(`Resend API error ${res.status}: ${data}`);
+  const text = await res.text();
+  let parsed: T;
+  try {
+    parsed = JSON.parse(text) as T;
+  } catch {
+    throw new Error(`Slack API ${endpoint} non-JSON response: ${text}`);
   }
 
-  return data;
+  if (!res.ok) {
+    throw new Error(`Slack API ${endpoint} HTTP ${res.status}: ${text}`);
+  }
+
+  return parsed;
+}
+
+export async function sendReportToSlack(params: {
+  channelId: string;
+  filename: string;
+  fileContent: Buffer;
+  message: string;
+  title: string;
+}) {
+  const token = process.env.SLACK_BOT_TOKEN;
+  if (!token) throw new Error("Missing env var: SLACK_BOT_TOKEN");
+
+  const getUploadBody = new URLSearchParams({
+    filename: params.filename,
+    length: String(params.fileContent.byteLength),
+  }).toString();
+
+  const uploadMeta = await slackApi<SlackGetUploadUrlResponse>(token, "files.getUploadURLExternal", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: getUploadBody,
+  });
+
+  if (!uploadMeta.ok || !uploadMeta.upload_url || !uploadMeta.file_id) {
+    throw new Error(`Slack files.getUploadURLExternal failed: ${uploadMeta.error || "unknown_error"}`);
+  }
+
+  const uploadRes = await fetch(uploadMeta.upload_url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/vnd.ms-excel",
+    },
+    body: params.fileContent,
+  });
+
+  if (!uploadRes.ok) {
+    const uploadText = await uploadRes.text();
+    throw new Error(`Slack file upload failed HTTP ${uploadRes.status}: ${uploadText}`);
+  }
+
+  const completePayload = {
+    files: [{ id: uploadMeta.file_id, title: params.title }],
+    channel_id: params.channelId,
+    initial_comment: params.message,
+  };
+
+  const complete = await slackApi<SlackApiBaseResponse>(token, "files.completeUploadExternal", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(completePayload),
+  });
+
+  if (!complete.ok) {
+    throw new Error(`Slack files.completeUploadExternal failed: ${complete.error || "unknown_error"}`);
+  }
 }

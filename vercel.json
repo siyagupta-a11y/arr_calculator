@@ -9,7 +9,7 @@
       "schedule": "0 9 * * *"
     },
     {
-      "path": "/api/monthly-email",
+      "path": "/api/monthly-slack",
       "schedule": "0 9 1 * *"
     }
   ]
