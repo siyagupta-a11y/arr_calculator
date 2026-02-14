@@ -2,15 +2,7 @@
   "crons": [
     {
       "path": "/api/stripe-sync",
-      "schedule": "0 8 * * *"
-    },
-    {
-      "path": "/api/daily-sync",
-      "schedule": "0 9 * * *"
-    },
-    {
-      "path": "/api/monthly-slack",
-      "schedule": "0 9 1 * *"
+      "schedule": "0 * * * *"
     }
   ]
 }

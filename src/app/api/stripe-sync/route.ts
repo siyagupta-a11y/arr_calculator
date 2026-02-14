@@ -43,7 +43,8 @@ async function handle(req: Request) {
   const fallback = defaultWindow();
   const startDate = body.startDate || fallback.startDate;
   const endDate = body.endDate || fallback.endDate;
-  const iterations = Math.max(1, Math.min(Number(body.iterations || 1), 20));
+  const defaultIterations = Math.max(1, Math.min(Number(process.env.STRIPE_SYNC_CRON_ITERATIONS || "8"), 30));
+  const iterations = Math.max(1, Math.min(Number(body.iterations ?? defaultIterations), 30));
 
   const runs: unknown[] = [];
   let syncedInvoicesTotal = 0;

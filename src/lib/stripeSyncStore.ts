@@ -36,6 +36,7 @@ type EnsureSyncInput = {
   force?: boolean;
 };
 
+const STORE_KEY = process.env.STRIPE_SYNC_STORE_KEY || "arr:stripe_sync_store:v1";
 const STORE_PATH = process.env.STRIPE_SYNC_STORE_PATH || "/tmp/arr-stripe-sync-store.json";
 const MAX_HISTORY_DAYS = Number(process.env.STRIPE_SYNC_MAX_HISTORY_DAYS || "800");
 const SYNC_FRESHNESS_MS = Number(process.env.STRIPE_SYNC_FRESHNESS_MS || "900000");
@@ -61,9 +62,9 @@ function emptyStore(): SyncStore {
   };
 }
 
-async function readStore(): Promise<SyncStore> {
+function parseStore(raw: string | null | undefined): SyncStore {
+  if (!raw) return emptyStore();
   try {
-    const raw = await fs.readFile(STORE_PATH, "utf8");
     const parsed = JSON.parse(raw) as Partial<SyncStore> | null;
     if (!parsed || parsed.version !== 1 || !parsed.itemsByKey) return emptyStore();
     return {
@@ -82,9 +83,65 @@ async function readStore(): Promise<SyncStore> {
   }
 }
 
-async function writeStore(store: SyncStore) {
+function hasKvConfig() {
+  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+}
+
+async function kvCommand(args: string[]) {
+  const url = process.env.KV_REST_API_URL;
+  const token = process.env.KV_REST_API_TOKEN;
+  if (!url || !token) throw new Error("Missing KV_REST_API_URL or KV_REST_API_TOKEN");
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(args),
+    cache: "no-store",
+  });
+
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`KV command failed HTTP ${res.status}: ${text}`);
+  }
+
+  const parsed = text ? (JSON.parse(text) as { result?: unknown; error?: string }) : {};
+  if (parsed.error) {
+    throw new Error(`KV command error: ${parsed.error}`);
+  }
+  return parsed.result;
+}
+
+async function readStoreLocal(): Promise<SyncStore> {
+  try {
+    const raw = await fs.readFile(STORE_PATH, "utf8");
+    return parseStore(raw);
+  } catch {
+    return emptyStore();
+  }
+}
+
+async function writeStoreLocal(store: SyncStore) {
   await fs.mkdir(dirname(STORE_PATH), { recursive: true });
   await fs.writeFile(STORE_PATH, JSON.stringify(store), "utf8");
+}
+
+async function readStore(): Promise<SyncStore> {
+  if (hasKvConfig()) {
+    const result = await kvCommand(["GET", STORE_KEY]);
+    return parseStore(typeof result === "string" ? result : null);
+  }
+  return readStoreLocal();
+}
+
+async function writeStore(store: SyncStore) {
+  if (hasKvConfig()) {
+    await kvCommand(["SET", STORE_KEY, JSON.stringify(store)]);
+    return;
+  }
+  await writeStoreLocal(store);
 }
 
 function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -129,9 +186,7 @@ export async function ensureStripeSyncForRange(input: EnsureSyncInput) {
 
   return withWriteLock(async () => {
     const store = await readStore();
-    const sameActiveRange =
-      store.activeRangeStartTs === clampedStartTs &&
-      store.activeRangeEndTs === endTs;
+    const sameActiveRange = store.activeRangeStartTs === clampedStartTs && store.activeRangeEndTs === endTs;
 
     const nextStore: SyncStore = {
       ...store,
@@ -173,6 +228,7 @@ export async function ensureStripeSyncForRange(input: EnsureSyncInput) {
       maxInvoices: SYNC_MAX_INVOICES_PER_RUN,
       startingAfter: nextStore.nextInvoiceCursor,
     });
+
     nextStore.updatedAtTs = nowTs();
     nextStore.itemsByKey = { ...nextStore.itemsByKey };
 
@@ -249,6 +305,7 @@ export async function getSyncedStripeLineItemsForRange(startDate: string, endDat
 export async function getStripeSyncStoreStats() {
   const store = await readStore();
   return {
+    storage: hasKvConfig() ? "vercel_kv" : "local_tmp",
     updatedAtTs: store.updatedAtTs,
     lastSyncStartTs: store.lastSyncStartTs,
     lastSyncEndTs: store.lastSyncEndTs,

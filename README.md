@@ -1,108 +1,76 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+This is a [Next.js](https://nextjs.org) project.
 
 ## Getting Started
 
-First, run the development server:
+Run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## App Routes
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `/` HubSpot ARR report page
+- `/stripe` Stripe ARR report page
+- `POST /api/report` HubSpot report API
+- `POST /api/stripe-report` Stripe report API
+- `GET|POST /api/stripe-sync` Stripe sync API
 
-## Learn More
+## Stripe Auto Sync
 
-To learn more about Next.js, take a look at the following resources:
+Stripe sync is automated by Vercel cron:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `0 * * * *` (hourly)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Defined in `/vercel.json`.
 
-## Deploy on Vercel
+`/api/stripe-sync` supports `POST` body:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```json
+{
+  "startDate": "2025-01-01",
+  "endDate": "2026-12-31",
+  "force": false,
+  "iterations": 8
+}
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+If body is omitted, the endpoint uses the default lookback window and `STRIPE_SYNC_CRON_ITERATIONS`.
 
-## Monthly ARR + C-ARR Slack Bot
+## Persistence Across Redeploys
 
-This project includes a scheduled bot endpoint:
+Stripe sync state is persisted in Vercel KV when these env vars are set:
 
-- `GET /api/monthly-slack`
-- `GET /api/daily-sync`
-- `GET /api/stripe-sync`
+- `KV_REST_API_URL`
+- `KV_REST_API_TOKEN`
 
-It runs on the 1st of every month via `vercel.json`, calculates ARR and C-ARR for the month that just ended, builds an Excel-compatible attachment with two sheets (`ARR` and `C-ARR`), and posts it to Slack.
+Without KV env vars, the app falls back to local `/tmp` storage (not persistent across redeploys/instances).
 
-The daily sync endpoint updates each included HubSpot deal with:
+## Required Environment Variables
 
-- `current_arr` (or `HUBSPOT_CURRENT_ARR_PROP`)
-- `current_carr` (or `HUBSPOT_CURRENT_CARR_PROP`)
-
-using present-day ARR and C-ARR values.
-
-### Required environment variables
+HubSpot report:
 
 - `HUBSPOT_PRIVATE_APP_TOKEN`
 - `INCLUDED_DEALSTAGE`
 - `FX_TARGET_CURRENCY`
-- `SLACK_BOT_TOKEN`
-- `SLACK_CHANNEL_ID`
-- `CRON_SECRET` (recommended; protects the endpoint)
-- `HUBSPOT_CURRENT_ARR_PROP` (optional; defaults to `current_arr`)
-- `HUBSPOT_CURRENT_CARR_PROP` (optional; defaults to `current_carr`)
-- `STRIPE_SECRET_KEY` (required for `/stripe` page and `/api/stripe-report`)
-- `STRIPE_INVOICE_STATUS` (optional; defaults to `paid`)
-- `STRIPE_TARGET_CURRENCY` (optional; defaults to `USD`)
 
-### Schedule
+Stripe report/sync:
 
-The cron schedule is in `vercel.json`:
+- `STRIPE_SECRET_KEY`
+- `STRIPE_INVOICE_STATUS` (optional, default `paid`)
+- `STRIPE_TARGET_CURRENCY` (optional, default `USD`)
+- `STRIPE_SYNC_STORE_KEY` (optional, default `arr:stripe_sync_store:v1`)
 
-- `0 8 * * *` (Stripe sync daily at 08:00 UTC)
-- `0 9 1 * *` (09:00 UTC on day 1 of every month)
-- `0 9 * * *` (09:00 UTC every day)
+Optional auth and tuning:
 
-### Manual test
-
-Use `POST /api/monthly-slack` with:
-
-```json
-{
-  "force": true,
-  "channelId": "C0123456789"
-}
-```
-
-If `channelId` is omitted, `SLACK_CHANNEL_ID` is used.
-
-## Stripe Performance Notes
-
-`/api/stripe-report` now uses:
-
-- Date-bound fetches (only invoices in the requested date window are synced)
-- Parallel invoice line-item fetching
-- A local sync store (`/tmp/arr-stripe-sync-store.json` by default)
-- In-memory response cache for report payloads
-
-### Stripe performance environment variables
-
-- `STRIPE_LINE_FETCH_CONCURRENCY` (optional, default `12`)
-- `STRIPE_REPORT_CACHE_TTL_MS` (optional, default `300000`)
-- `STRIPE_REPORT_AUTO_SYNC` (optional, default `true`; set to `false` only if you want sync strictly via `/api/stripe-sync`)
-- `STRIPE_SYNC_FRESHNESS_MS` (optional, default `900000`)
-- `STRIPE_SYNC_MAX_HISTORY_DAYS` (optional, default `800`)
-- `STRIPE_SYNC_STORE_PATH` (optional, default `/tmp/arr-stripe-sync-store.json`)
-- `STRIPE_SYNC_DEFAULT_LOOKBACK_DAYS` (optional, default `730`)
-- `STRIPE_SYNC_MAX_INVOICES_PER_RUN` (optional, default `120`; reduce if you still hit timeouts)
+- `CRON_SECRET` (recommended; protects cron endpoints)
+- `STRIPE_LINE_FETCH_CONCURRENCY` (default `12`)
+- `STRIPE_REPORT_CACHE_TTL_MS` (default `300000`)
+- `STRIPE_REPORT_AUTO_SYNC` (default `true`)
+- `STRIPE_SYNC_FRESHNESS_MS` (default `900000`)
+- `STRIPE_SYNC_MAX_HISTORY_DAYS` (default `800`)
+- `STRIPE_SYNC_DEFAULT_LOOKBACK_DAYS` (default `730`)
+- `STRIPE_SYNC_MAX_INVOICES_PER_RUN` (default `120`)
+- `STRIPE_SYNC_CRON_ITERATIONS` (default `8`)
