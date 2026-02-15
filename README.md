@@ -1,76 +1,76 @@
-This is a [Next.js](https://nextjs.org) project.
+This is a Next.js ARR dashboard.
 
-## Getting Started
+## Routes
 
-Run the development server:
-
-```bash
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000).
-
-## App Routes
-
-- `/` HubSpot ARR report page
-- `/stripe` Stripe ARR report page
+- `/` HubSpot ARR report
+- `/stripe` Stripe ARR report (POC window only)
 - `POST /api/report` HubSpot report API
 - `POST /api/stripe-report` Stripe report API
 - `GET|POST /api/stripe-sync` Stripe sync API
 
-## Stripe Auto Sync
+## Stripe POC Scope
 
-Stripe sync is automated by Vercel cron:
+This proof of concept is intentionally restricted to:
 
-- `0 * * * *` (hourly)
+- `2025-11-01` through `2026-01-31`
+- Months: November 2025, December 2025, January 2026
 
-Defined in `/vercel.json`.
+Requests outside this range are clamped or rejected.
 
-`/api/stripe-sync` supports `POST` body:
+## Automatic Stripe Sync
+
+Vercel cron runs Stripe sync automatically every hour:
+
+- `0 * * * *` (`/api/stripe-sync`)
+
+`/api/stripe-sync` accepts:
 
 ```json
 {
-  "startDate": "2025-01-01",
-  "endDate": "2026-12-31",
+  "startDate": "2025-11-01",
+  "endDate": "2026-01-31",
   "force": false,
   "iterations": 8
 }
 ```
 
-If body is omitted, the endpoint uses the default lookback window and `STRIPE_SYNC_CRON_ITERATIONS`.
+## Persistence Across Redeployments
 
-## Persistence Across Redeploys
+Stripe sync state is persisted in Vercel Blob when configured.
 
-Stripe sync state is persisted in Vercel KV when these env vars are set:
+Required for persistent shared storage:
 
-- `KV_REST_API_URL`
-- `KV_REST_API_TOKEN`
+- `BLOB_READ_WRITE_TOKEN`
 
-Without KV env vars, the app falls back to local `/tmp` storage (not persistent across redeploys/instances).
+Optional blob key path:
+
+- `STRIPE_SYNC_BLOB_PATH` (default `arr/stripe-sync-store-v1.json`)
+
+If blob token is missing, local `/tmp` fallback is used (not persistent across redeploys/instances).
 
 ## Required Environment Variables
 
-HubSpot report:
+HubSpot:
 
 - `HUBSPOT_PRIVATE_APP_TOKEN`
 - `INCLUDED_DEALSTAGE`
 - `FX_TARGET_CURRENCY`
 
-Stripe report/sync:
+Stripe:
 
 - `STRIPE_SECRET_KEY`
 - `STRIPE_INVOICE_STATUS` (optional, default `paid`)
 - `STRIPE_TARGET_CURRENCY` (optional, default `USD`)
-- `STRIPE_SYNC_STORE_KEY` (optional, default `arr:stripe_sync_store:v1`)
+- `BLOB_READ_WRITE_TOKEN` (required for persistent sync store)
 
-Optional auth and tuning:
+## Optional Tuning
 
-- `CRON_SECRET` (recommended; protects cron endpoints)
+- `CRON_SECRET` (recommended)
 - `STRIPE_LINE_FETCH_CONCURRENCY` (default `12`)
 - `STRIPE_REPORT_CACHE_TTL_MS` (default `300000`)
 - `STRIPE_REPORT_AUTO_SYNC` (default `true`)
 - `STRIPE_SYNC_FRESHNESS_MS` (default `900000`)
 - `STRIPE_SYNC_MAX_HISTORY_DAYS` (default `800`)
-- `STRIPE_SYNC_DEFAULT_LOOKBACK_DAYS` (default `730`)
 - `STRIPE_SYNC_MAX_INVOICES_PER_RUN` (default `120`)
 - `STRIPE_SYNC_CRON_ITERATIONS` (default `8`)
+- `STRIPE_SYNC_STORE_PATH` (local fallback path, default `/tmp/arr-stripe-sync-store.json`)

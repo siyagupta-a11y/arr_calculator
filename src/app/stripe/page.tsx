@@ -45,8 +45,8 @@ function groupValueForRow(row: UiRow, field: GroupField) {
 }
 
 export default function StripePage() {
-  const [startDate, setStartDate] = useState("2025-01-01");
-  const [endDate, setEndDate] = useState("2025-12-31");
+  const [startDate, setStartDate] = useState("2025-11-01");
+  const [endDate, setEndDate] = useState("2026-01-31");
   const [grain, setGrain] = useState<Grain>("monthly");
   const [currencyDisplay, setCurrencyDisplay] = useState<CurrencyDisplay>("normal");
 

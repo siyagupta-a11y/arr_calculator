@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
+import { BlobNotFoundError, head, put } from "@vercel/blob";
 import { parseDate } from "@/lib/logic";
 import { listInvoiceBatchWithLineItems } from "@/lib/stripe";
 
@@ -36,11 +37,13 @@ type EnsureSyncInput = {
   force?: boolean;
 };
 
-const STORE_KEY = process.env.STRIPE_SYNC_STORE_KEY || "arr:stripe_sync_store:v1";
+const STORE_BLOB_PATH = process.env.STRIPE_SYNC_BLOB_PATH || "arr/stripe-sync-store-v1.json";
 const STORE_PATH = process.env.STRIPE_SYNC_STORE_PATH || "/tmp/arr-stripe-sync-store.json";
 const MAX_HISTORY_DAYS = Number(process.env.STRIPE_SYNC_MAX_HISTORY_DAYS || "800");
 const SYNC_FRESHNESS_MS = Number(process.env.STRIPE_SYNC_FRESHNESS_MS || "900000");
 const SYNC_MAX_INVOICES_PER_RUN = Number(process.env.STRIPE_SYNC_MAX_INVOICES_PER_RUN || "120");
+const POC_START_TS = new Date(2025, 10, 1, 0, 0, 0, 0).getTime(); // 2025-11-01
+const POC_END_TS = new Date(2026, 0, 31, 23, 59, 59, 999).getTime(); // 2026-01-31
 
 let writeLock: Promise<void> = Promise.resolve();
 
@@ -83,35 +86,30 @@ function parseStore(raw: string | null | undefined): SyncStore {
   }
 }
 
-function hasKvConfig() {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+function hasBlobConfig() {
+  return !!process.env.BLOB_READ_WRITE_TOKEN;
 }
 
-async function kvCommand(args: string[]) {
-  const url = process.env.KV_REST_API_URL;
-  const token = process.env.KV_REST_API_TOKEN;
-  if (!url || !token) throw new Error("Missing KV_REST_API_URL or KV_REST_API_TOKEN");
+async function readStoreBlob(): Promise<SyncStore> {
+  try {
+    const meta = await head(STORE_BLOB_PATH);
+    const res = await fetch(meta.url, { cache: "no-store" });
+    if (!res.ok) return emptyStore();
+    const raw = await res.text();
+    return parseStore(raw);
+  } catch (e: unknown) {
+    if (e instanceof BlobNotFoundError) return emptyStore();
+    throw e;
+  }
+}
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(args),
-    cache: "no-store",
+async function writeStoreBlob(store: SyncStore) {
+  await put(STORE_BLOB_PATH, JSON.stringify(store), {
+    access: "public",
+    allowOverwrite: true,
+    addRandomSuffix: false,
+    contentType: "application/json",
   });
-
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`KV command failed HTTP ${res.status}: ${text}`);
-  }
-
-  const parsed = text ? (JSON.parse(text) as { result?: unknown; error?: string }) : {};
-  if (parsed.error) {
-    throw new Error(`KV command error: ${parsed.error}`);
-  }
-  return parsed.result;
 }
 
 async function readStoreLocal(): Promise<SyncStore> {
@@ -129,16 +127,15 @@ async function writeStoreLocal(store: SyncStore) {
 }
 
 async function readStore(): Promise<SyncStore> {
-  if (hasKvConfig()) {
-    const result = await kvCommand(["GET", STORE_KEY]);
-    return parseStore(typeof result === "string" ? result : null);
+  if (hasBlobConfig()) {
+    return readStoreBlob();
   }
   return readStoreLocal();
 }
 
 async function writeStore(store: SyncStore) {
-  if (hasKvConfig()) {
-    await kvCommand(["SET", STORE_KEY, JSON.stringify(store)]);
+  if (hasBlobConfig()) {
+    await writeStoreBlob(store);
     return;
   }
   await writeStoreLocal(store);
@@ -170,8 +167,10 @@ function parseRange(startDate: string, endDate: string) {
     throw new Error("Invalid startDate/endDate");
   }
 
-  const startTs = startOfDayTs(start);
-  const endTs = endOfDayTs(end);
+  const startTsRaw = startOfDayTs(start);
+  const endTsRaw = endOfDayTs(end);
+  const startTs = Math.max(startTsRaw, POC_START_TS);
+  const endTs = Math.min(endTsRaw, POC_END_TS);
   if (endTs < startTs) throw new Error("endDate must be >= startDate");
   return { startTs, endTs };
 }
@@ -305,7 +304,7 @@ export async function getSyncedStripeLineItemsForRange(startDate: string, endDat
 export async function getStripeSyncStoreStats() {
   const store = await readStore();
   return {
-    storage: hasKvConfig() ? "vercel_kv" : "local_tmp",
+    storage: hasBlobConfig() ? "vercel_blob" : "local_tmp",
     updatedAtTs: store.updatedAtTs,
     lastSyncStartTs: store.lastSyncStartTs,
     lastSyncEndTs: store.lastSyncEndTs,

@@ -19,7 +19,9 @@ export async function POST(req: Request) {
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
     const status =
-      message.includes("Invalid startDate/endDate") || message.includes("endDate must be >= startDate")
+      message.includes("Invalid startDate/endDate") ||
+      message.includes("endDate must be >= startDate") ||
+      message.includes("POC is limited")
         ? 400
         : 500;
     return NextResponse.json({ error: message }, { status });

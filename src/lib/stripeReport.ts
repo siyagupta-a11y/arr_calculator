@@ -21,6 +21,8 @@ type CacheEntry = {
 
 const REPORT_CACHE_TTL_MS = Number(process.env.STRIPE_REPORT_CACHE_TTL_MS || "300000");
 const REPORT_CACHE = new Map<string, CacheEntry>();
+const POC_MIN = new Date(2025, 10, 1); // 2025-11-01
+const POC_MAX = new Date(2026, 0, 31); // 2026-01-31
 
 function formatDayKey(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -67,10 +69,16 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     throw new Error("Invalid startDate/endDate");
   }
 
-  const rangeStart = new Date(startVal.getFullYear(), startVal.getMonth(), startVal.getDate(), 0, 0, 0, 0);
-  const rangeEnd = new Date(endVal.getFullYear(), endVal.getMonth(), endVal.getDate(), 23, 59, 59, 999);
+  const rawRangeStart = new Date(startVal.getFullYear(), startVal.getMonth(), startVal.getDate(), 0, 0, 0, 0);
+  const rawRangeEnd = new Date(endVal.getFullYear(), endVal.getMonth(), endVal.getDate(), 23, 59, 59, 999);
+  const rangeStart = new Date(
+    Math.max(rawRangeStart.getTime(), new Date(POC_MIN.getFullYear(), POC_MIN.getMonth(), POC_MIN.getDate(), 0, 0, 0, 0).getTime()),
+  );
+  const rangeEnd = new Date(
+    Math.min(rawRangeEnd.getTime(), new Date(POC_MAX.getFullYear(), POC_MAX.getMonth(), POC_MAX.getDate(), 23, 59, 59, 999).getTime()),
+  );
   if (rangeEnd < rangeStart) {
-    throw new Error("endDate must be >= startDate");
+    throw new Error("POC is limited to 2025-11-01 through 2026-01-31");
   }
 
   const cacheKey = `${body.startDate}|${body.endDate}|${body.grain}`;
@@ -88,15 +96,17 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
       : aggregated.map((p) => ({ key: p.key, label: p.label }));
 
   const targetCurrency = (process.env.STRIPE_TARGET_CURRENCY || "USD").trim().toLowerCase();
-  let syncedItems = await getSyncedStripeLineItemsForRange(body.startDate, body.endDate);
+  const clampedStartDate = toIsoDate(rangeStart);
+  const clampedEndDate = toIsoDate(rangeEnd);
+  let syncedItems = await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
   const autoSync = String(process.env.STRIPE_REPORT_AUTO_SYNC || "true").toLowerCase() === "true";
 
   if (!syncedItems.length && autoSync) {
     await ensureStripeSyncForRange({
-      startDate: body.startDate,
-      endDate: body.endDate,
+      startDate: clampedStartDate,
+      endDate: clampedEndDate,
     });
-    syncedItems = await getSyncedStripeLineItemsForRange(body.startDate, body.endDate);
+    syncedItems = await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
   }
 
   const rows: ReportRow[] = [];
