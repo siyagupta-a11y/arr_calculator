@@ -113,6 +113,7 @@ export default function StripePage() {
   const [filterCustomerId, setFilterCustomerId] = useState("");
   const [filterLineItemDescription, setFilterLineItemDescription] = useState("");
   const [filterLineItemDescriptionPrefix, setFilterLineItemDescriptionPrefix] = useState("");
+  const [sortByPeriodKey, setSortByPeriodKey] = useState<string>("none");
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ReportResponse | null>(null);
@@ -221,13 +222,21 @@ export default function StripePage() {
     return Array.from(map.values()).filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
   }, [data, filterCustomerName, filterCustomerId, filterLineItemDescription, filterLineItemDescriptionPrefix, groupByFields]);
 
+  const displayedRowsSorted: UiRow[] = useMemo(() => {
+    if (!displayedRows.length) return displayedRows;
+    if (sortByPeriodKey === "none") return displayedRows;
+    const sorted = [...displayedRows];
+    sorted.sort((a, b) => (b.valuesByPeriod[sortByPeriodKey] || 0) - (a.valuesByPeriod[sortByPeriodKey] || 0));
+    return sorted;
+  }, [displayedRows, sortByPeriodKey]);
+
   const totalsByPeriodForDisplayed = useMemo(() => {
     if (!data) return [];
     return data.periods.map((p) => {
-      const total = displayedRows.reduce((acc, r) => acc + (r.valuesByPeriod[p.key] || 0), 0);
+      const total = displayedRowsSorted.reduce((acc, r) => acc + (r.valuesByPeriod[p.key] || 0), 0);
       return { key: p.key, label: p.label, total: round2(total) };
     });
-  }, [data, displayedRows]);
+  }, [data, displayedRowsSorted]);
 
   const showDefaultColumns = groupByFields.length === 0;
   const groupByLabel = groupByFields.map((f) => GROUP_BY_OPTIONS.find((o) => o.key === f)?.label || f).join(" + ");
@@ -268,7 +277,7 @@ export default function StripePage() {
     );
     const lines: string[] = [csvHeaders.map(escapeCsvCell).join(",")];
 
-    for (const r of displayedRows) {
+    for (const r of displayedRowsSorted) {
       const leadingColumns = showDefaultColumns
         ? [r.customerName, r.customerId, r.lineItemId, r.lineItemDescription]
         : groupByFields.map((field) => r.groupValues[field] || "(blank)");
@@ -481,6 +490,18 @@ export default function StripePage() {
             Breakdown {showDefaultColumns ? "(per line item)" : `(grouped by ${groupByLabel})`}
           </h2>
 
+          <div style={{ marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <label>Sort rows by period</label>
+            <select value={sortByPeriodKey} onChange={(e) => setSortByPeriodKey(e.target.value)}>
+              <option value="none">None</option>
+              {(data.periods || []).map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.label} (desc)
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div style={{ marginBottom: 8 }}>
             <button onClick={exportBreakdownCsv}>Export breakdown CSV</button>
           </div>
@@ -506,7 +527,7 @@ export default function StripePage() {
               </thead>
 
               <tbody>
-                {displayedRows.map((r, idx) => (
+                {displayedRowsSorted.map((r, idx) => (
                   <tr key={`${r.lineItemId || "group"}-${idx}`} style={{ borderBottom: "1px solid #f2f2f2" }}>
                     {showDefaultColumns ? (
                       <>
