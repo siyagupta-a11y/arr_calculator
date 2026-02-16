@@ -5,11 +5,12 @@ import React, { useMemo, useState } from "react";
 import type { Grain, ReportResponse } from "@/lib/types";
 
 type CurrencyDisplay = "normal" | "thousands" | "millions";
-type GroupField = "customerId" | "lineItemDescription";
+type GroupField = "customerId" | "lineItemDescription" | "lineItemDescriptionPrefix";
 
 const GROUP_BY_OPTIONS: Array<{ key: GroupField; label: string }> = [
   { key: "customerId", label: "Customer ID" },
   { key: "lineItemDescription", label: "Line Item Description" },
+  { key: "lineItemDescriptionPrefix", label: "Line Description (before ' - ')" },
 ];
 
 type UiRow = {
@@ -39,9 +40,17 @@ function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
   return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > 1e-9);
 }
 
+function lineItemDescriptionPrefix(description: string) {
+  const text = String(description || "").trim();
+  if (!text) return "(blank)";
+  const cut = text.indexOf(" - ");
+  return (cut === -1 ? text : text.slice(0, cut)).trim() || "(blank)";
+}
+
 function groupValueForRow(row: UiRow, field: GroupField) {
   if (field === "customerId") return row.customerId || "(blank)";
-  return row.lineItemDescription || "(blank)";
+  if (field === "lineItemDescription") return row.lineItemDescription || "(blank)";
+  return lineItemDescriptionPrefix(row.lineItemDescription);
 }
 
 export default function StripePage() {
@@ -56,6 +65,7 @@ export default function StripePage() {
   const [filterCustomerName, setFilterCustomerName] = useState("");
   const [filterCustomerId, setFilterCustomerId] = useState("");
   const [filterLineItemDescription, setFilterLineItemDescription] = useState("");
+  const [filterLineItemDescriptionPrefix, setFilterLineItemDescriptionPrefix] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ReportResponse | null>(null);
@@ -107,6 +117,7 @@ export default function StripePage() {
     const customerNameNeedle = filterCustomerName.trim().toLowerCase();
     const customerIdNeedle = filterCustomerId.trim().toLowerCase();
     const lineItemDescriptionNeedle = filterLineItemDescription.trim().toLowerCase();
+    const lineItemDescriptionPrefixNeedle = filterLineItemDescriptionPrefix.trim().toLowerCase();
 
     const baseRows: UiRow[] = (data.rows || []).map((r) => ({
       customerName: r.dealName || "",
@@ -122,7 +133,10 @@ export default function StripePage() {
       const customerIdOk = !customerIdNeedle || r.customerId.toLowerCase().includes(customerIdNeedle);
       const lineItemDescriptionOk =
         !lineItemDescriptionNeedle || r.lineItemDescription.toLowerCase().includes(lineItemDescriptionNeedle);
-      return customerNameOk && customerIdOk && lineItemDescriptionOk;
+      const lineItemDescriptionPrefixOk =
+        !lineItemDescriptionPrefixNeedle ||
+        lineItemDescriptionPrefix(r.lineItemDescription).toLowerCase().includes(lineItemDescriptionPrefixNeedle);
+      return customerNameOk && customerIdOk && lineItemDescriptionOk && lineItemDescriptionPrefixOk;
     });
 
     if (groupByFields.length === 0) {
@@ -163,7 +177,7 @@ export default function StripePage() {
     }
 
     return Array.from(map.values()).filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
-  }, [data, filterCustomerName, filterCustomerId, filterLineItemDescription, groupByFields]);
+  }, [data, filterCustomerName, filterCustomerId, filterLineItemDescription, filterLineItemDescriptionPrefix, groupByFields]);
 
   const totalsByPeriodForDisplayed = useMemo(() => {
     if (!data) return [];
@@ -382,6 +396,17 @@ export default function StripePage() {
                   value={filterLineItemDescription}
                   onChange={(e) => setFilterLineItemDescription(e.target.value)}
                   placeholder="contains..."
+                />
+              </div>
+
+              <div>
+                <label>Filter Description Prefix</label>
+                <br />
+                <input
+                  type="text"
+                  value={filterLineItemDescriptionPrefix}
+                  onChange={(e) => setFilterLineItemDescriptionPrefix(e.target.value)}
+                  placeholder="before ' - ' contains..."
                 />
               </div>
             </div>
