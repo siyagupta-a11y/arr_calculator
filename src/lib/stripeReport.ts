@@ -24,6 +24,7 @@ const REPORT_CACHE_TTL_MS = Number(process.env.STRIPE_REPORT_CACHE_TTL_MS || "30
 const REPORT_CACHE = new Map<string, CacheEntry>();
 const POC_MIN = new Date(2025, 10, 1); // 2025-11-01
 const POC_MAX = new Date(2026, 0, 31); // 2026-01-31
+const NON_ZERO_EPSILON = 1e-9;
 
 function formatDayKey(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -144,7 +145,7 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     if (lineCurrency && lineCurrency !== targetCurrency) continue;
     const closeDate = item.invoiceCreatedTs > 0 ? new Date(item.invoiceCreatedTs) : null;
     const amountMajor = Number(item.amountMinor || 0) / 100;
-    if (!(amountMajor > 0)) continue;
+    if (Math.abs(amountMajor) <= NON_ZERO_EPSILON) continue;
 
     const windowStart = new Date(item.periodStartTs);
     const windowEndInclusive = new Date(item.periodEndTs);
@@ -153,7 +154,7 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     if (windowEndExclusive <= windowStart) continue;
 
     const annualized = annualizedAmountFromPeriod(amountMajor, windowStart, windowEndExclusive);
-    if (!(annualized > 0)) continue;
+    if (Math.abs(annualized) <= NON_ZERO_EPSILON) continue;
 
     const valuesMonthly: Record<string, number> = {};
     for (const mp of monthlyPeriods) {
