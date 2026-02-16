@@ -26,13 +26,12 @@ function round2(n: number) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
-function fmtMoney(n: number, currencyDisplay: CurrencyDisplay) {
-  const fractionDigits = currencyDisplay === "normal" ? 0 : 2;
+function fmtMoney(n: number) {
   return new Intl.NumberFormat(undefined, {
     style: "currency",
     currency: "USD",
-    minimumFractionDigits: fractionDigits,
-    maximumFractionDigits: fractionDigits,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
   }).format(n || 0);
 }
 
@@ -448,7 +447,7 @@ export default function StripePage() {
                   <tr>
                     {totalsByPeriodForDisplayed.map((t) => (
                       <td key={t.key} style={{ textAlign: "right", padding: 8 }}>
-                        {fmtMoney(scaleCurrency(t.total), currencyDisplay)}
+                        {fmtMoney(scaleCurrency(t.total))}
                       </td>
                     ))}
                   </tr>
@@ -505,7 +504,7 @@ export default function StripePage() {
 
                     {data.periods.map((p) => (
                       <td key={p.key} style={{ padding: 8, textAlign: "right", whiteSpace: "nowrap" }}>
-                        {fmtMoney(scaleCurrency(r.valuesByPeriod[p.key] || 0), currencyDisplay)}
+                        {fmtMoney(scaleCurrency(r.valuesByPeriod[p.key] || 0))}
                       </td>
                     ))}
                   </tr>
