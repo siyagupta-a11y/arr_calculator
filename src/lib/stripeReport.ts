@@ -98,14 +98,20 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
   const clampedStartDate = toIsoDate(rangeStart);
   const clampedEndDate = toIsoDate(rangeEnd);
   let syncedItems = await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
-  const autoSync = String(process.env.STRIPE_REPORT_AUTO_SYNC || "true").toLowerCase() === "true";
+  const autoSync = String(process.env.STRIPE_REPORT_AUTO_SYNC || "false").toLowerCase() === "true";
 
   if (!syncedItems.length && autoSync) {
-    await ensureStripeSyncForRange({
-      startDate: clampedStartDate,
-      endDate: clampedEndDate,
-    });
-    syncedItems = await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
+    try {
+      await ensureStripeSyncForRange({
+        startDate: clampedStartDate,
+        endDate: clampedEndDate,
+      });
+      syncedItems = await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e || "");
+      const isRateLimited = msg.includes("rate_limit") || msg.includes("429");
+      if (!isRateLimited) throw e;
+    }
   }
 
   const rows: ReportRow[] = [];

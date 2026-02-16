@@ -1,7 +1,7 @@
 const STRIPE_BASE = "https://api.stripe.com/v1";
 const STRIPE_MAX_RETRIES = 4;
 const STRIPE_BASE_BACKOFF_MS = 300;
-const STRIPE_LINE_FETCH_CONCURRENCY = Number(process.env.STRIPE_LINE_FETCH_CONCURRENCY || "24");
+const STRIPE_LINE_FETCH_CONCURRENCY = Number(process.env.STRIPE_LINE_FETCH_CONCURRENCY || "8");
 
 export type StripeCustomer = {
   id: string;

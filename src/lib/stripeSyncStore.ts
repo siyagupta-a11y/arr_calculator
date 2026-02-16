@@ -41,7 +41,7 @@ const STORE_BLOB_PATH = process.env.STRIPE_SYNC_BLOB_PATH || "arr/stripe-sync-st
 const STORE_PATH = process.env.STRIPE_SYNC_STORE_PATH || "/tmp/arr-stripe-sync-store.json";
 const MAX_HISTORY_DAYS = Number(process.env.STRIPE_SYNC_MAX_HISTORY_DAYS || "800");
 const SYNC_FRESHNESS_MS = Number(process.env.STRIPE_SYNC_FRESHNESS_MS || "900000");
-const SYNC_MAX_INVOICES_PER_RUN = Number(process.env.STRIPE_SYNC_MAX_INVOICES_PER_RUN || "400");
+const SYNC_MAX_INVOICES_PER_RUN = Number(process.env.STRIPE_SYNC_MAX_INVOICES_PER_RUN || "120");
 const POC_START_TS = new Date(2025, 10, 1, 0, 0, 0, 0).getTime(); // 2025-11-01
 const POC_END_TS = new Date(2026, 0, 31, 23, 59, 59, 999).getTime(); // 2026-01-31
 const STORE_SCHEMA_VERSION = 2;
@@ -238,12 +238,29 @@ export async function ensureStripeSyncForRange(input: EnsureSyncInput) {
       };
     }
 
-    const batch = await listInvoiceBatchWithLineItems({
-      createdGte: Math.floor(nextStore.activeRangeStartTs / 1000),
-      createdLte: Math.floor(nextStore.activeRangeEndTs / 1000),
-      maxInvoices: SYNC_MAX_INVOICES_PER_RUN,
-      startingAfter: nextStore.nextInvoiceCursor,
-    });
+    let batch;
+    try {
+      batch = await listInvoiceBatchWithLineItems({
+        createdGte: Math.floor(nextStore.activeRangeStartTs / 1000),
+        createdLte: Math.floor(nextStore.activeRangeEndTs / 1000),
+        maxInvoices: SYNC_MAX_INVOICES_PER_RUN,
+        startingAfter: nextStore.nextInvoiceCursor,
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e || "");
+      const isRateLimited = msg.includes("rate_limit") || msg.includes("429");
+      if (isRateLimited) {
+        return {
+          synced: false,
+          reason: "rate_limited",
+          updatedAtTs: nextStore.updatedAtTs,
+          syncedInvoices: 0,
+          hasMore: true,
+          nextCursor: nextStore.nextInvoiceCursor,
+        };
+      }
+      throw e;
+    }
 
     nextStore.updatedAtTs = nowTs();
     nextStore.itemsByKey = { ...nextStore.itemsByKey };
