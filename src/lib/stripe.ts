@@ -20,11 +20,16 @@ export type StripeInvoice = {
 export type StripePrice = {
   id?: string;
   nickname?: string | null;
-  product?: string | null;
+  product?: string | StripeProduct | null;
   recurring?: {
     interval?: string | null;
     interval_count?: number | null;
   } | null;
+};
+
+export type StripeProduct = {
+  id?: string;
+  name?: string | null;
 };
 
 export type StripeInvoiceLineItem = {
@@ -60,6 +65,12 @@ export type StripeInvoiceBatchResult = {
   hasMore: boolean;
   nextStartingAfter: string | null;
   fetchedInvoices: number;
+};
+
+type StripePriceDetail = {
+  id?: string;
+  nickname?: string | null;
+  product?: string | StripeProduct | null;
 };
 
 type StripeListResponse<T> = {
@@ -155,6 +166,19 @@ function normalizeCustomer(invoice: StripeInvoice) {
   return { customerId, customerName };
 }
 
+function normalizePriceDisplayName(priceId: string, price: StripePriceDetail | null | undefined) {
+  const nickname = String(price?.nickname || "").trim();
+  if (nickname) return nickname;
+
+  const product = price?.product;
+  if (product && typeof product === "object") {
+    const productName = String(product.name || "").trim();
+    if (productName) return productName;
+  }
+
+  return priceId;
+}
+
 async function listInvoiceLines(invoiceId: string) {
   const lineItems: StripeInvoiceLineItem[] = [];
   let lineStartingAfter: string | null = null;
@@ -244,5 +268,31 @@ export async function listInvoicesWithLineItems(query?: StripeInvoiceQuery): Pro
     cursor = batch.nextStartingAfter;
   }
 
+  return out;
+}
+
+const PRICE_DISPLAY_NAME_CACHE = new Map<string, string>();
+const PRICE_LOOKUP_CONCURRENCY = Number(process.env.STRIPE_PRICE_LOOKUP_CONCURRENCY || "6");
+
+export async function getPriceDisplayNamesById(priceIds: string[]) {
+  const uniqueIds = Array.from(new Set((priceIds || []).map((id) => String(id || "").trim()).filter(Boolean)));
+  const idsToFetch = uniqueIds.filter((id) => !PRICE_DISPLAY_NAME_CACHE.has(id));
+
+  await mapWithConcurrency(idsToFetch, PRICE_LOOKUP_CONCURRENCY, async (priceId) => {
+    try {
+      const params = new URLSearchParams();
+      params.append("expand[]", "product");
+      const price = await stripeFetch<StripePriceDetail>(`/prices/${encodeURIComponent(priceId)}`, params);
+      PRICE_DISPLAY_NAME_CACHE.set(priceId, normalizePriceDisplayName(priceId, price));
+    } catch {
+      // Keep report generation resilient if one price lookup fails.
+    }
+  });
+
+  const out: Record<string, string> = {};
+  for (const id of uniqueIds) {
+    const name = PRICE_DISPLAY_NAME_CACHE.get(id);
+    if (name) out[id] = name;
+  }
   return out;
 }

@@ -6,6 +6,7 @@ import {
   round2,
 } from "@/lib/logic";
 import type { Grain, ReportResponse, ReportRow } from "@/lib/types";
+import { getPriceDisplayNamesById } from "@/lib/stripe";
 import { ensureStripeSyncForRange, getSyncedStripeLineItemsForRange } from "@/lib/stripeSyncStore";
 
 export type StripeReportRequest = {
@@ -62,6 +63,18 @@ function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusi
   return (amountMajor * 365.2425) / Math.max(durationDays, 1 / 24);
 }
 
+function getPriceIdFromDescription(description: string) {
+  const text = String(description || "").trim();
+  const match = /^price:([A-Za-z0-9_]+)/i.exec(text);
+  return match ? match[1] : "";
+}
+
+function getDisplayDescription(rawDescription: string, priceDisplayNamesById: Record<string, string>) {
+  const priceId = getPriceIdFromDescription(rawDescription);
+  if (!priceId) return rawDescription;
+  return priceDisplayNamesById[priceId] || rawDescription;
+}
+
 export async function generateStripeReport(body: StripeReportRequest): Promise<ReportResponse> {
   const startVal = parseDate(body.startDate);
   const endVal = parseDate(body.endDate);
@@ -115,6 +128,15 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     }
   }
 
+  const priceIds = Array.from(
+    new Set(
+      syncedItems
+        .map((item) => getPriceIdFromDescription(item.lineItemDescription || ""))
+        .filter((id) => !!id),
+    ),
+  );
+  const priceDisplayNamesById = priceIds.length ? await getPriceDisplayNamesById(priceIds) : {};
+
   const rows: ReportRow[] = [];
 
   for (const item of syncedItems) {
@@ -156,6 +178,8 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
       }
     }
 
+    const rawDescription = item.lineItemDescription || item.lineItemId || "(no description)";
+
     rows.push({
       dealName: item.customerName,
       dealId: item.customerId || "(no customer id)",
@@ -185,7 +209,7 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
       territory: "",
       country: "",
       industry: "",
-      lineItemDescription: item.lineItemDescription || item.lineItemId || "(no description)",
+      lineItemDescription: getDisplayDescription(rawDescription, priceDisplayNamesById),
     });
   }
 

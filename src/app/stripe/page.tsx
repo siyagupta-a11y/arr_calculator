@@ -46,10 +46,31 @@ function lineItemDescriptionPrefix(description: string) {
   return (cut === -1 ? text : text.slice(0, cut)).trim() || "(blank)";
 }
 
+function normalizeDescriptionGroupBucket(description: string) {
+  const text = String(description || "").trim();
+  if (!text) return "(blank)";
+
+  const normalized = text
+    .toLowerCase()
+    .replace(/[_-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (/remaining time on .+ add on/.test(normalized)) {
+    return "Remaining Time on Add-On";
+  }
+
+  if (/time on .+ add on/.test(normalized)) {
+    return "Time on Add-On";
+  }
+
+  return text;
+}
+
 function groupValueForRow(row: UiRow, field: GroupField) {
   if (field === "customerId") return row.customerId || "(blank)";
-  if (field === "lineItemDescription") return row.lineItemDescription || "(blank)";
-  return lineItemDescriptionPrefix(row.lineItemDescription);
+  if (field === "lineItemDescription") return normalizeDescriptionGroupBucket(row.lineItemDescription);
+  return normalizeDescriptionGroupBucket(lineItemDescriptionPrefix(row.lineItemDescription));
 }
 
 function matchesTextFilter(value: string, rawFilter: string) {
