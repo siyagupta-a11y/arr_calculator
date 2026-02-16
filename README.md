@@ -21,7 +21,7 @@ Requests outside this range are clamped or rejected.
 
 Vercel cron runs Stripe sync automatically every hour:
 
-- `0 * * * *` (`/api/stripe-sync`)
+- `*/5 * * * *` (`/api/stripe-sync`)
 
 `/api/stripe-sync` accepts:
 
@@ -66,11 +66,12 @@ Stripe:
 ## Optional Tuning
 
 - `CRON_SECRET` (recommended)
-- `STRIPE_LINE_FETCH_CONCURRENCY` (default `12`)
+- `STRIPE_LINE_FETCH_CONCURRENCY` (default `24`)
 - `STRIPE_REPORT_CACHE_TTL_MS` (default `300000`)
 - `STRIPE_REPORT_AUTO_SYNC` (default `true`)
 - `STRIPE_SYNC_FRESHNESS_MS` (default `900000`)
 - `STRIPE_SYNC_MAX_HISTORY_DAYS` (default `800`)
-- `STRIPE_SYNC_MAX_INVOICES_PER_RUN` (default `120`)
-- `STRIPE_SYNC_CRON_ITERATIONS` (default `8`)
+- `STRIPE_SYNC_MAX_INVOICES_PER_RUN` (default `400`)
+- `STRIPE_SYNC_CRON_ITERATIONS` (default `40`)
+- `STRIPE_SYNC_MAX_RUNTIME_MS` (default `50000`)
 - `STRIPE_SYNC_STORE_PATH` (local fallback path, default `/tmp/arr-stripe-sync-store.json`)

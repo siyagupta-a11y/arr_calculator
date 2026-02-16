@@ -153,7 +153,7 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     rows.push({
       dealName: item.customerName,
       dealId: item.customerId || "(no customer id)",
-      lineItemId: item.lineItemId,
+      lineItemId: item.lineItemId || item.key,
 
       valueUsd: annualized,
       dealCurrency: targetCurrency.toUpperCase(),
@@ -179,7 +179,7 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
       territory: "",
       country: "",
       industry: "",
-      lineItemDescription: item.lineItemDescription || "",
+      lineItemDescription: item.lineItemDescription || item.lineItemId || "(no description)",
     });
   }
 

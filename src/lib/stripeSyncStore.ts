@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
 import { BlobNotFoundError, head, put } from "@vercel/blob";
 import { parseDate } from "@/lib/logic";
-import { listInvoiceBatchWithLineItems } from "@/lib/stripe";
+import { listInvoiceBatchWithLineItems, type StripeInvoiceLineItem } from "@/lib/stripe";
 
 export type SyncedStripeLineItem = {
   key: string;
@@ -41,7 +41,7 @@ const STORE_BLOB_PATH = process.env.STRIPE_SYNC_BLOB_PATH || "arr/stripe-sync-st
 const STORE_PATH = process.env.STRIPE_SYNC_STORE_PATH || "/tmp/arr-stripe-sync-store.json";
 const MAX_HISTORY_DAYS = Number(process.env.STRIPE_SYNC_MAX_HISTORY_DAYS || "800");
 const SYNC_FRESHNESS_MS = Number(process.env.STRIPE_SYNC_FRESHNESS_MS || "900000");
-const SYNC_MAX_INVOICES_PER_RUN = Number(process.env.STRIPE_SYNC_MAX_INVOICES_PER_RUN || "120");
+const SYNC_MAX_INVOICES_PER_RUN = Number(process.env.STRIPE_SYNC_MAX_INVOICES_PER_RUN || "400");
 const POC_START_TS = new Date(2025, 10, 1, 0, 0, 0, 0).getTime(); // 2025-11-01
 const POC_END_TS = new Date(2026, 0, 31, 23, 59, 59, 999).getTime(); // 2026-01-31
 
@@ -179,6 +179,22 @@ function overlaps(periodStartTs: number, periodEndTs: number, rangeStartTs: numb
   return periodStartTs <= rangeEndTs && periodEndTs >= rangeStartTs;
 }
 
+function normalizeLineItemDescription(line: StripeInvoiceLineItem) {
+  const desc = String(line.description || "").trim();
+  if (desc) return desc;
+
+  const priceNickname = String(line.price?.nickname || "").trim();
+  if (priceNickname) return priceNickname;
+
+  const priceId = String(line.price?.id || "").trim();
+  if (priceId) return `price:${priceId}`;
+
+  const lineId = String(line.id || "").trim();
+  if (lineId) return `line:${lineId}`;
+
+  return "(no description)";
+}
+
 export async function ensureStripeSyncForRange(input: EnsureSyncInput) {
   const { startTs, endTs } = parseRange(input.startDate, input.endDate);
   const clampedStartTs = clampHistoryStartTs(startTs);
@@ -253,7 +269,7 @@ export async function ensureStripeSyncForRange(input: EnsureSyncInput) {
           customerId: inv.customerId || "",
           customerName: inv.customerName || "",
           lineItemId,
-          lineItemDescription: String(line.description || ""),
+          lineItemDescription: normalizeLineItemDescription(line),
           amountMinor: Number(line.amount || 0),
           currency,
           quantity: Number(line.quantity || 1),

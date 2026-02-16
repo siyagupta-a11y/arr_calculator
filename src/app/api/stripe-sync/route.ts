@@ -40,12 +40,21 @@ async function handle(req: Request) {
   const fallback = defaultWindow();
   const startDate = body.startDate || fallback.startDate;
   const endDate = body.endDate || fallback.endDate;
-  const defaultIterations = Math.max(1, Math.min(Number(process.env.STRIPE_SYNC_CRON_ITERATIONS || "8"), 30));
-  const iterations = Math.max(1, Math.min(Number(body.iterations ?? defaultIterations), 30));
+  const defaultIterations = Math.max(1, Math.min(Number(process.env.STRIPE_SYNC_CRON_ITERATIONS || "40"), 200));
+  const iterations = Math.max(1, Math.min(Number(body.iterations ?? defaultIterations), 200));
+  const runtimeBudgetMs = Math.max(5000, Number(process.env.STRIPE_SYNC_MAX_RUNTIME_MS || "50000"));
+  const startedAt = Date.now();
+  const hardStopAt = startedAt + runtimeBudgetMs;
 
   const runs: unknown[] = [];
   let syncedInvoicesTotal = 0;
+  let stopReason: "exhausted" | "iteration_limit" | "runtime_budget" = "iteration_limit";
   for (let i = 0; i < iterations; i++) {
+    if (Date.now() >= hardStopAt) {
+      stopReason = "runtime_budget";
+      break;
+    }
+
     const run = await ensureStripeSyncForRange({
       startDate,
       endDate,
@@ -56,7 +65,10 @@ async function handle(req: Request) {
     if (run && typeof run === "object" && "syncedInvoices" in run) {
       syncedInvoicesTotal += Number((run as { syncedInvoices?: number }).syncedInvoices || 0);
     }
-    if (run && typeof run === "object" && "hasMore" in run && !(run as { hasMore?: boolean }).hasMore) break;
+    if (run && typeof run === "object" && "hasMore" in run && !(run as { hasMore?: boolean }).hasMore) {
+      stopReason = "exhausted";
+      break;
+    }
   }
 
   const stats = await getStripeSyncStoreStats();
@@ -67,6 +79,9 @@ async function handle(req: Request) {
     endDate,
     iterationsRequested: iterations,
     iterationsExecuted: runs.length,
+    elapsedMs: Date.now() - startedAt,
+    runtimeBudgetMs,
+    stopReason,
     syncedInvoicesTotal,
     lastRun: runs[runs.length - 1] || null,
     runs,

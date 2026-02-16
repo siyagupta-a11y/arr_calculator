@@ -1,7 +1,7 @@
 const STRIPE_BASE = "https://api.stripe.com/v1";
 const STRIPE_MAX_RETRIES = 4;
 const STRIPE_BASE_BACKOFF_MS = 300;
-const STRIPE_LINE_FETCH_CONCURRENCY = Number(process.env.STRIPE_LINE_FETCH_CONCURRENCY || "12");
+const STRIPE_LINE_FETCH_CONCURRENCY = Number(process.env.STRIPE_LINE_FETCH_CONCURRENCY || "24");
 
 export type StripeCustomer = {
   id: string;
@@ -18,6 +18,9 @@ export type StripeInvoice = {
 };
 
 export type StripePrice = {
+  id?: string;
+  nickname?: string | null;
+  product?: string | null;
   recurring?: {
     interval?: string | null;
     interval_count?: number | null;
