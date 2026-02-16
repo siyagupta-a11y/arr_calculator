@@ -7,6 +7,7 @@ This is a Next.js ARR dashboard.
 - `POST /api/report` HubSpot report API
 - `POST /api/stripe-report` Stripe report API
 - `GET|POST /api/stripe-sync` Stripe sync API
+- `GET /api/stripe-sync/status` Stripe sync health/status API
 
 ## Stripe POC Scope
 
@@ -19,7 +20,7 @@ Requests outside this range are clamped or rejected.
 
 ## Automatic Stripe Sync
 
-Vercel cron runs Stripe sync automatically every hour:
+Vercel cron runs Stripe sync automatically every 5 minutes:
 
 - `*/5 * * * *` (`/api/stripe-sync`)
 
@@ -30,9 +31,20 @@ Vercel cron runs Stripe sync automatically every hour:
   "startDate": "2025-11-01",
   "endDate": "2026-01-31",
   "force": false,
-  "iterations": 8
+  "iterations": 40,
+  "reset": false
 }
 ```
+
+`reset: true` clears existing sync state before backfilling again.
+
+Use `/api/stripe-sync/status` to verify live progress. It returns:
+
+- `stats.storage` (`vercel_blob` or `local_tmp`)
+- `stats.itemCount`
+- `stats.rangeExhausted`
+- `secondsSinceUpdate`
+- `healthy`
 
 ## Persistence Across Redeployments
 

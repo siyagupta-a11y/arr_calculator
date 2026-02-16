@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { ensureStripeSyncForRange, getStripeSyncStoreStats } from "@/lib/stripeSyncStore";
+import { ensureStripeSyncForRange, getStripeSyncStoreStats, resetStripeSyncStore } from "@/lib/stripeSyncStore";
 
 export const runtime = "nodejs";
 
@@ -8,6 +8,7 @@ type RequestBody = {
   endDate?: string;
   force?: boolean;
   iterations?: number;
+  reset?: boolean;
 };
 
 function isAuthorized(req: Request) {
@@ -45,6 +46,11 @@ async function handle(req: Request) {
   const runtimeBudgetMs = Math.max(5000, Number(process.env.STRIPE_SYNC_MAX_RUNTIME_MS || "50000"));
   const startedAt = Date.now();
   const hardStopAt = startedAt + runtimeBudgetMs;
+  const resetApplied = !!body.reset;
+
+  if (resetApplied) {
+    await resetStripeSyncStore();
+  }
 
   const runs: unknown[] = [];
   let syncedInvoicesTotal = 0;
@@ -81,6 +87,7 @@ async function handle(req: Request) {
     iterationsExecuted: runs.length,
     elapsedMs: Date.now() - startedAt,
     runtimeBudgetMs,
+    resetApplied,
     stopReason,
     syncedInvoicesTotal,
     lastRun: runs[runs.length - 1] || null,

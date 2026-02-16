@@ -331,3 +331,14 @@ export async function getStripeSyncStoreStats() {
     itemCount: Object.keys(store.itemsByKey).length,
   };
 }
+
+export async function resetStripeSyncStore() {
+  return withWriteLock(async () => {
+    const cleared = emptyStore();
+    await writeStore(cleared);
+    return {
+      ok: true,
+      storage: hasBlobConfig() ? "vercel_blob" : "local_tmp",
+    };
+  });
+}
