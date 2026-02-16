@@ -12,6 +12,9 @@ type RequestBody = {
 };
 
 function isAuthorized(req: Request) {
+  // Allow Vercel-managed cron invocations without requiring a Bearer token.
+  if (req.headers.get("x-vercel-cron")) return true;
+
   const secret = process.env.CRON_SECRET;
   if (!secret) return true;
 
