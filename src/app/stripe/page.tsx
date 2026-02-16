@@ -53,6 +53,33 @@ function groupValueForRow(row: UiRow, field: GroupField) {
   return lineItemDescriptionPrefix(row.lineItemDescription);
 }
 
+function matchesTextFilter(value: string, rawFilter: string) {
+  const text = String(value || "").toLowerCase();
+  const tokens = String(rawFilter || "")
+    .split(",")
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  if (tokens.length === 0) return true;
+
+  const includeTerms: string[] = [];
+  const excludeTerms: string[] = [];
+
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    if (lower.startsWith("not ")) {
+      const term = token.slice(4).trim().toLowerCase();
+      if (term) excludeTerms.push(term);
+      continue;
+    }
+    includeTerms.push(lower);
+  }
+
+  if (excludeTerms.some((term) => text.includes(term))) return false;
+  if (includeTerms.length === 0) return true;
+  return includeTerms.some((term) => text.includes(term));
+}
+
 export default function StripePage() {
   const [startDate, setStartDate] = useState("2025-11-01");
   const [endDate, setEndDate] = useState("2026-01-31");
@@ -114,11 +141,6 @@ export default function StripePage() {
   const displayedRows: UiRow[] = useMemo(() => {
     if (!data) return [];
 
-    const customerNameNeedle = filterCustomerName.trim().toLowerCase();
-    const customerIdNeedle = filterCustomerId.trim().toLowerCase();
-    const lineItemDescriptionNeedle = filterLineItemDescription.trim().toLowerCase();
-    const lineItemDescriptionPrefixNeedle = filterLineItemDescriptionPrefix.trim().toLowerCase();
-
     const baseRows: UiRow[] = (data.rows || []).map((r) => ({
       customerName: r.dealName || "",
       customerId: r.dealId || "",
@@ -129,13 +151,13 @@ export default function StripePage() {
     }));
 
     const filteredBaseRows = baseRows.filter((r) => {
-      const customerNameOk = !customerNameNeedle || r.customerName.toLowerCase().includes(customerNameNeedle);
-      const customerIdOk = !customerIdNeedle || r.customerId.toLowerCase().includes(customerIdNeedle);
-      const lineItemDescriptionOk =
-        !lineItemDescriptionNeedle || r.lineItemDescription.toLowerCase().includes(lineItemDescriptionNeedle);
-      const lineItemDescriptionPrefixOk =
-        !lineItemDescriptionPrefixNeedle ||
-        lineItemDescriptionPrefix(r.lineItemDescription).toLowerCase().includes(lineItemDescriptionPrefixNeedle);
+      const customerNameOk = matchesTextFilter(r.customerName, filterCustomerName);
+      const customerIdOk = matchesTextFilter(r.customerId, filterCustomerId);
+      const lineItemDescriptionOk = matchesTextFilter(r.lineItemDescription, filterLineItemDescription);
+      const lineItemDescriptionPrefixOk = matchesTextFilter(
+        lineItemDescriptionPrefix(r.lineItemDescription),
+        filterLineItemDescriptionPrefix,
+      );
       return customerNameOk && customerIdOk && lineItemDescriptionOk && lineItemDescriptionPrefixOk;
     });
 
@@ -373,7 +395,7 @@ export default function StripePage() {
                   type="text"
                   value={filterCustomerName}
                   onChange={(e) => setFilterCustomerName(e.target.value)}
-                  placeholder="contains..."
+                  placeholder="foo, bar, NOT baz"
                 />
               </div>
 
@@ -384,7 +406,7 @@ export default function StripePage() {
                   type="text"
                   value={filterCustomerId}
                   onChange={(e) => setFilterCustomerId(e.target.value)}
-                  placeholder="contains..."
+                  placeholder="foo, bar, NOT baz"
                 />
               </div>
 
@@ -395,7 +417,7 @@ export default function StripePage() {
                   type="text"
                   value={filterLineItemDescription}
                   onChange={(e) => setFilterLineItemDescription(e.target.value)}
-                  placeholder="contains..."
+                  placeholder="foo, bar, NOT baz"
                 />
               </div>
 
@@ -406,7 +428,7 @@ export default function StripePage() {
                   type="text"
                   value={filterLineItemDescriptionPrefix}
                   onChange={(e) => setFilterLineItemDescriptionPrefix(e.target.value)}
-                  placeholder="before ' - ' contains..."
+                  placeholder="foo, bar, NOT baz"
                 />
               </div>
             </div>
