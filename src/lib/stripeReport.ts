@@ -58,7 +58,8 @@ function recurringFrequencyLabel(interval?: string | null, intervalCount?: numbe
 function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusive: Date) {
   const durationMs = endExclusive.getTime() - start.getTime();
   if (durationMs <= 0) return 0;
-  return round2(amountMajor * 12);
+  const durationDays = durationMs / (24 * 60 * 60 * 1000);
+  return round2((amountMajor * 365.2425) / Math.max(durationDays, 1 / 24));
 }
 
 export async function generateStripeReport(body: StripeReportRequest): Promise<ReportResponse> {
