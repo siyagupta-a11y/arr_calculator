@@ -20,7 +20,7 @@ export type SyncedStripeLineItem = {
 };
 
 type SyncStore = {
-  version: 1;
+  version: number;
   updatedAtTs: number;
   lastSyncStartTs: number;
   lastSyncEndTs: number;
@@ -44,6 +44,7 @@ const SYNC_FRESHNESS_MS = Number(process.env.STRIPE_SYNC_FRESHNESS_MS || "900000
 const SYNC_MAX_INVOICES_PER_RUN = Number(process.env.STRIPE_SYNC_MAX_INVOICES_PER_RUN || "400");
 const POC_START_TS = new Date(2025, 10, 1, 0, 0, 0, 0).getTime(); // 2025-11-01
 const POC_END_TS = new Date(2026, 0, 31, 23, 59, 59, 999).getTime(); // 2026-01-31
+const STORE_SCHEMA_VERSION = 2;
 
 let writeLock: Promise<void> = Promise.resolve();
 
@@ -53,7 +54,7 @@ function nowTs() {
 
 function emptyStore(): SyncStore {
   return {
-    version: 1,
+    version: STORE_SCHEMA_VERSION,
     updatedAtTs: 0,
     lastSyncStartTs: 0,
     lastSyncEndTs: 0,
@@ -69,9 +70,9 @@ function parseStore(raw: string | null | undefined): SyncStore {
   if (!raw) return emptyStore();
   try {
     const parsed = JSON.parse(raw) as Partial<SyncStore> | null;
-    if (!parsed || parsed.version !== 1 || !parsed.itemsByKey) return emptyStore();
+    if (!parsed || parsed.version !== STORE_SCHEMA_VERSION || !parsed.itemsByKey) return emptyStore();
     return {
-      version: 1,
+      version: STORE_SCHEMA_VERSION,
       updatedAtTs: Number(parsed.updatedAtTs || 0),
       lastSyncStartTs: Number(parsed.lastSyncStartTs || 0),
       lastSyncEndTs: Number(parsed.lastSyncEndTs || 0),
