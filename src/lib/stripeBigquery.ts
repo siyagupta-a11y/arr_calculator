@@ -301,6 +301,7 @@ export async function loadStripeLineItemsFromBigQuery(startTsMs: number, endTsMs
   const query = servingTable ? buildServingQuery(servingTable) : buildQuery(table);
 
   const out: SyncedStripeLineItem[] = [];
+  const seen = new Set<string>();
   let pageToken: string | undefined;
 
   while (true) {
@@ -314,7 +315,17 @@ export async function loadStripeLineItemsFromBigQuery(startTsMs: number, endTsMs
     const fields = (json.schema?.fields || []).map((f) => f.name);
     for (const row of json.rows || []) {
       const obj = rowToObject(fields, row);
-      out.push(mapBigQueryRowToSyncedItem(obj, tsMultiplier));
+      const item = mapBigQueryRowToSyncedItem(obj, tsMultiplier);
+      const dedupeKey = [
+        item.invoiceId,
+        item.lineItemId,
+        String(item.periodStartTs),
+        String(item.periodEndTs),
+        String(item.amountMinor),
+      ].join("|");
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      out.push(item);
     }
 
     if (!json.pageToken) break;
