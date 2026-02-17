@@ -142,66 +142,34 @@ function buildQuery(table: string) {
   const mode = (process.env.BIGQUERY_SCHEMA_MODE || "int_ts").toLowerCase();
   if (mode === "timestamp") {
     return `
-WITH base AS (
-  SELECT
-    COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id'), '') AS customer_id,
-    COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_name'), '') AS customer_name,
-    COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.invoice_id'), '') AS invoice_id,
-    COALESCE(
-      JSON_VALUE(TO_JSON_STRING(t), '$.id'),
-      JSON_VALUE(TO_JSON_STRING(t), '$.line_item_id'),
-      ''
-    ) AS line_item_id,
-    COALESCE(
-      JSON_VALUE(TO_JSON_STRING(t), '$.description'),
-      JSON_VALUE(TO_JSON_STRING(t), '$.line_item_description'),
-      ''
-    ) AS line_item_description,
-    CAST(
-      COALESCE(
-        SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.amount') AS INT64),
-        SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.amount_minor') AS INT64),
-        0
-      ) AS INT64
-    ) AS amount_minor,
-    LOWER(COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.currency'), 'usd')) AS currency,
-    COALESCE(
-      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.quantity') AS FLOAT64),
-      1
-    ) AS quantity,
-    CAST(
-      UNIX_MILLIS(
-        COALESCE(
-          SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS TIMESTAMP),
-          TIMESTAMP_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS INT64))
-        )
-      ) AS INT64
-    ) AS period_start_ts,
-    CAST(
-      UNIX_MILLIS(
-        COALESCE(
-          SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end') AS TIMESTAMP),
-          TIMESTAMP_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end_ts') AS INT64))
-        )
-      ) AS INT64
-    ) AS period_end_ts,
-    CAST(
-      UNIX_MILLIS(
-        COALESCE(
-          SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.date') AS TIMESTAMP),
-          SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.invoice_created') AS TIMESTAMP),
-          TIMESTAMP_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.invoice_created_ts') AS INT64))
-        )
-      ) AS INT64
-    ) AS invoice_created_ts
-  FROM \`${table}\` AS t
-  WHERE COALESCE(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.is_deleted') AS BOOL), FALSE) = FALSE
-)
-SELECT *
-FROM base
+SELECT
+  COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id'), '') AS customer_id,
+  COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_name'), '') AS customer_name,
+  COALESCE(
+    JSON_VALUE(TO_JSON_STRING(t), '$.invoice_id'),
+    ''
+  ) AS invoice_id,
+  COALESCE(
+    JSON_VALUE(TO_JSON_STRING(t), '$.id'),
+    JSON_VALUE(TO_JSON_STRING(t), '$.line_item_id'),
+    ''
+  ) AS line_item_id,
+  COALESCE(
+    JSON_VALUE(TO_JSON_STRING(t), '$.description'),
+    JSON_VALUE(TO_JSON_STRING(t), '$.line_item_description'),
+    ''
+  ) AS line_item_description,
+  CAST(COALESCE(amount, 0) AS INT64) AS amount_minor,
+  LOWER(CAST(currency AS STRING)) AS currency,
+  CAST(COALESCE(quantity, 1) AS FLOAT64) AS quantity,
+  CAST(UNIX_MILLIS(period_start) AS INT64) AS period_start_ts,
+  CAST(UNIX_MILLIS(period_end) AS INT64) AS period_end_ts,
+  CAST(UNIX_MILLIS(date) AS INT64) AS invoice_created_ts
+FROM \`${table}\` AS t
 WHERE
-  period_start_ts <= @range_end_ts
-  AND period_end_ts >= @range_start_ts
+  period_start <= TIMESTAMP_MILLIS(@range_end_ts)
+  AND period_end >= TIMESTAMP_MILLIS(@range_start_ts)
+  AND COALESCE(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.is_deleted') AS BOOL), FALSE) = FALSE
 `;
   }
 
