@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { Grain, ReportResponse } from "@/lib/types";
 
 type CurrencyDisplay = "normal" | "thousands" | "millions";
@@ -62,12 +62,14 @@ export default function StripePage() {
   const [sortByPeriodKey, setSortByPeriodKey] = useState<string>("none");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(200);
+  const [hasRunOnce, setHasRunOnce] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ReportResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function run() {
+  const run = useCallback(async () => {
+    setHasRunOnce(true);
     setLoading(true);
     setError(null);
     setData(null);
@@ -131,7 +133,19 @@ export default function StripePage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [
+    startDate,
+    endDate,
+    grain,
+    filterCustomerName,
+    filterCustomerId,
+    filterLineItemDescription,
+    filterLineItemDescriptionPrefix,
+    groupByFields,
+    sortByPeriodKey,
+    page,
+    pageSize,
+  ]);
 
   const displayedRows: UiRow[] = useMemo(() => {
     if (!data) return [];
@@ -155,6 +169,17 @@ export default function StripePage() {
     if (!data) return [];
     return data.totalsByPeriod || [];
   }, [data]);
+
+  useEffect(() => {
+    if (!hasRunOnce) return;
+    const t = setTimeout(() => {
+      void run();
+    }, 250);
+    return () => clearTimeout(t);
+  }, [
+    hasRunOnce,
+    run,
+  ]);
 
   const showDefaultColumns = groupByFields.length === 0;
   const groupByLabel = groupByFields.map((f) => GROUP_BY_OPTIONS.find((o) => o.key === f)?.label || f).join(" + ");
@@ -445,7 +470,7 @@ export default function StripePage() {
             </button>
             <button
               onClick={() => setPage((p) => p + 1)}
-              disabled={loading || (data.pagination?.returnedRows || 0) < pageSize}
+              disabled={loading || !data.pagination?.sourcePaged || (data.pagination?.sourceReturnedRows || 0) < pageSize}
               style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #ddd", background: "white" }}
             >
               Next

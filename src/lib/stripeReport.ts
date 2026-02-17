@@ -179,6 +179,7 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
           lineItemDescription: body.filterLineItemDescription,
         }, { page, pageSize })
       : await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
+  const sourceRowsFetched = syncedItems.length;
 
   if (source !== "bigquery") {
     const autoSync = String(process.env.STRIPE_REPORT_AUTO_SYNC || "false").toLowerCase() === "true";
@@ -350,6 +351,7 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
       page,
       pageSize,
       returnedRows: outputRows.length,
+      sourceReturnedRows: sourceRowsFetched,
       sourcePaged: source === "bigquery",
     },
   };
