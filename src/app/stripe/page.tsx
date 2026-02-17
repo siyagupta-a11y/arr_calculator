@@ -39,67 +39,6 @@ function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
   return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > 1e-9);
 }
 
-function lineItemDescriptionPrefix(description: string) {
-  const text = String(description || "").trim();
-  if (!text) return "(blank)";
-  const cut = text.indexOf(" - ");
-  return (cut === -1 ? text : text.slice(0, cut)).trim() || "(blank)";
-}
-
-function normalizeDescriptionGroupBucket(description: string) {
-  const text = String(description || "").trim();
-  if (!text) return "(blank)";
-
-  const normalized = text
-    .toLowerCase()
-    .replace(/[_-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (/remaining time on .+ add on/.test(normalized)) {
-    return "Remaining Time on Add-On";
-  }
-
-  if (/time on .+ add on/.test(normalized)) {
-    return "Time on Add-On";
-  }
-
-  return text;
-}
-
-function groupValueForRow(row: UiRow, field: GroupField) {
-  if (field === "customerId") return row.customerId || "(blank)";
-  if (field === "lineItemDescription") return normalizeDescriptionGroupBucket(row.lineItemDescription);
-  return normalizeDescriptionGroupBucket(lineItemDescriptionPrefix(row.lineItemDescription));
-}
-
-function matchesTextFilter(value: string, rawFilter: string) {
-  const text = String(value || "").toLowerCase();
-  const tokens = String(rawFilter || "")
-    .split(",")
-    .map((token) => token.trim())
-    .filter(Boolean);
-
-  if (tokens.length === 0) return true;
-
-  const includeTerms: string[] = [];
-  const excludeTerms: string[] = [];
-
-  for (const token of tokens) {
-    const lower = token.toLowerCase();
-    if (lower.startsWith("not ")) {
-      const term = token.slice(4).trim().toLowerCase();
-      if (term) excludeTerms.push(term);
-      continue;
-    }
-    includeTerms.push(lower);
-  }
-
-  if (excludeTerms.some((term) => text.includes(term))) return false;
-  if (includeTerms.length === 0) return true;
-  return includeTerms.some((term) => text.includes(term));
-}
-
 function defaultDateRange() {
   const end = new Date();
   const start = new Date(end.getFullYear() - 1, end.getMonth(), end.getDate());
@@ -139,10 +78,26 @@ export default function StripePage() {
           startDate,
           endDate,
           grain,
+          filterCustomerName,
+          filterCustomerId,
+          filterLineItemDescription,
+          filterLineItemDescriptionPrefix,
+          groupByFields,
+          sortByPeriodKey,
         }),
       });
       if (res.status === 405) {
-        const qs = new URLSearchParams({ startDate, endDate, grain });
+        const qs = new URLSearchParams({
+          startDate,
+          endDate,
+          grain,
+          filterCustomerName,
+          filterCustomerId,
+          filterLineItemDescription,
+          filterLineItemDescriptionPrefix,
+          groupByFields: groupByFields.join(","),
+          sortByPeriodKey,
+        });
         res = await fetch(`/api/stripe-report?${qs.toString()}`, { method: "GET" });
       }
       const text = await res.text();
@@ -174,82 +129,26 @@ export default function StripePage() {
 
   const displayedRows: UiRow[] = useMemo(() => {
     if (!data) return [];
-
-    const baseRows: UiRow[] = (data.rows || []).map((r) => ({
+    return (data.rows || [])
+      .map((r) => ({
       customerName: r.dealName || "",
       customerId: r.dealId || "",
       lineItemId: r.lineItemId || "",
       lineItemDescription: r.lineItemDescription || "",
-      groupValues: {},
+      groupValues: (r.groupValues as Partial<Record<GroupField, string>>) || {},
       valuesByPeriod: r.valuesByPeriod || {},
-    }));
-
-    const filteredBaseRows = baseRows.filter((r) => {
-      const customerNameOk = matchesTextFilter(r.customerName, filterCustomerName);
-      const customerIdOk = matchesTextFilter(r.customerId, filterCustomerId);
-      const lineItemDescriptionOk = matchesTextFilter(r.lineItemDescription, filterLineItemDescription);
-      const lineItemDescriptionPrefixOk = matchesTextFilter(
-        lineItemDescriptionPrefix(r.lineItemDescription),
-        filterLineItemDescriptionPrefix,
-      );
-      return customerNameOk && customerIdOk && lineItemDescriptionOk && lineItemDescriptionPrefixOk;
-    });
-
-    if (groupByFields.length === 0) {
-      return filteredBaseRows.filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
-    }
-
-    const map = new Map<string, UiRow>();
-
-    for (const row of filteredBaseRows) {
-      const key = groupByFields.map((field) => `${field}:${groupValueForRow(row, field)}`).join("|");
-
-      if (!map.has(key)) {
-        const groupValues: Partial<Record<GroupField, string>> = {};
-        for (const field of groupByFields) {
-          groupValues[field] = groupValueForRow(row, field);
-        }
-
-        map.set(key, {
-          customerName: row.customerName,
-          customerId: row.customerId,
-          lineItemId: row.lineItemId,
-          lineItemDescription: row.lineItemDescription,
-          groupValues,
-          valuesByPeriod: { ...row.valuesByPeriod },
-        });
-      } else {
-        const agg = map.get(key)!;
-        for (const periodKey of Object.keys(row.valuesByPeriod || {})) {
-          agg.valuesByPeriod[periodKey] = (agg.valuesByPeriod[periodKey] || 0) + (row.valuesByPeriod[periodKey] || 0);
-        }
-      }
-    }
-
-    for (const agg of map.values()) {
-      for (const periodKey of Object.keys(agg.valuesByPeriod)) {
-        agg.valuesByPeriod[periodKey] = round2(agg.valuesByPeriod[periodKey] || 0);
-      }
-    }
-
-    return Array.from(map.values()).filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
-  }, [data, filterCustomerName, filterCustomerId, filterLineItemDescription, filterLineItemDescriptionPrefix, groupByFields]);
+      }))
+      .filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
+  }, [data]);
 
   const displayedRowsSorted: UiRow[] = useMemo(() => {
-    if (!displayedRows.length) return displayedRows;
-    if (sortByPeriodKey === "none") return displayedRows;
-    const sorted = [...displayedRows];
-    sorted.sort((a, b) => (b.valuesByPeriod[sortByPeriodKey] || 0) - (a.valuesByPeriod[sortByPeriodKey] || 0));
-    return sorted;
-  }, [displayedRows, sortByPeriodKey]);
+    return displayedRows;
+  }, [displayedRows]);
 
   const totalsByPeriodForDisplayed = useMemo(() => {
     if (!data) return [];
-    return data.periods.map((p) => {
-      const total = displayedRowsSorted.reduce((acc, r) => acc + (r.valuesByPeriod[p.key] || 0), 0);
-      return { key: p.key, label: p.label, total: round2(total) };
-    });
-  }, [data, displayedRowsSorted]);
+    return data.totalsByPeriod || [];
+  }, [data]);
 
   const showDefaultColumns = groupByFields.length === 0;
   const groupByLabel = groupByFields.map((f) => GROUP_BY_OPTIONS.find((o) => o.key === f)?.label || f).join(" + ");

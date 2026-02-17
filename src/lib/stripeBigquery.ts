@@ -19,6 +19,18 @@ type BigQueryQueryResponse = {
   };
 };
 
+export type StripeBigQueryFilters = {
+  customerId?: string;
+  customerName?: string;
+  lineItemDescription?: string;
+};
+
+type BigQueryNamedParameter = {
+  name: string;
+  type: "INT64" | "STRING";
+  value: string;
+};
+
 const TOKEN_AUDIENCE = "https://oauth2.googleapis.com/token";
 const BQ_SCOPE = "https://www.googleapis.com/auth/bigquery";
 const BQ_MAX_RESULTS = Number(process.env.BIGQUERY_MAX_RESULTS || "50000");
@@ -139,6 +151,57 @@ function mapBigQueryRowToSyncedItem(raw: Record<string, unknown>, tsMultiplier: 
   };
 }
 
+function parseTextFilter(raw: string) {
+  const tokens = String(raw || "")
+    .split(",")
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  const includeTerms: string[] = [];
+  const excludeTerms: string[] = [];
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    if (lower.startsWith("not ")) {
+      const term = token.slice(4).trim().toLowerCase();
+      if (term) excludeTerms.push(term);
+    } else {
+      includeTerms.push(lower);
+    }
+  }
+
+  return { includeTerms, excludeTerms };
+}
+
+function pushStringFilterSql(
+  clauses: string[],
+  params: BigQueryNamedParameter[],
+  columnExpr: string,
+  rawFilter: string | undefined,
+  prefix: string,
+) {
+  if (!rawFilter) return;
+  const { includeTerms, excludeTerms } = parseTextFilter(rawFilter);
+  if (includeTerms.length === 0 && excludeTerms.length === 0) return;
+
+  if (includeTerms.length > 0) {
+    const includeChecks: string[] = [];
+    for (let i = 0; i < includeTerms.length; i++) {
+      const name = `${prefix}_inc_${i}`;
+      params.push({ name, type: "STRING", value: includeTerms[i] });
+      includeChecks.push(`STRPOS(LOWER(CAST(${columnExpr} AS STRING)), @${name}) > 0`);
+    }
+    clauses.push(`(${includeChecks.join(" OR ")})`);
+  }
+
+  if (excludeTerms.length > 0) {
+    for (let i = 0; i < excludeTerms.length; i++) {
+      const name = `${prefix}_exc_${i}`;
+      params.push({ name, type: "STRING", value: excludeTerms[i] });
+      clauses.push(`STRPOS(LOWER(CAST(${columnExpr} AS STRING)), @${name}) = 0`);
+    }
+  }
+}
+
 function buildQuery(table: string) {
   const mode = (process.env.BIGQUERY_SCHEMA_MODE || "int_ts").toLowerCase();
   if (mode === "timestamp") {
@@ -182,8 +245,20 @@ WHERE
 `;
 }
 
-function buildServingQueryTimestampColumns(table: string) {
-  return `
+function buildServingQueryTimestampColumns(table: string, filters?: StripeBigQueryFilters) {
+  const filterClauses: string[] = [];
+  const filterParams: BigQueryNamedParameter[] = [];
+  pushStringFilterSql(filterClauses, filterParams, "customer_id", filters?.customerId, "customer_id");
+  pushStringFilterSql(filterClauses, filterParams, "customer_name", filters?.customerName, "customer_name");
+  pushStringFilterSql(
+    filterClauses,
+    filterParams,
+    "line_item_description",
+    filters?.lineItemDescription,
+    "line_item_description",
+  );
+
+  const query = `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
   CAST(customer_name AS STRING) AS customer_name,
@@ -200,11 +275,25 @@ FROM \`${table}\` AS t
 WHERE
   period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
   AND period_end_ts >= TIMESTAMP_MILLIS(@range_start_ts)
+  ${filterClauses.length ? `AND ${filterClauses.join(" AND ")}` : ""}
 `;
+  return { query, filterParams };
 }
 
-function buildServingQueryIntColumns(table: string) {
-  return `
+function buildServingQueryIntColumns(table: string, filters?: StripeBigQueryFilters) {
+  const filterClauses: string[] = [];
+  const filterParams: BigQueryNamedParameter[] = [];
+  pushStringFilterSql(filterClauses, filterParams, "customer_id", filters?.customerId, "customer_id");
+  pushStringFilterSql(filterClauses, filterParams, "customer_name", filters?.customerName, "customer_name");
+  pushStringFilterSql(
+    filterClauses,
+    filterParams,
+    "line_item_description",
+    filters?.lineItemDescription,
+    "line_item_description",
+  );
+
+  const query = `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
   CAST(customer_name AS STRING) AS customer_name,
@@ -221,7 +310,9 @@ FROM \`${table}\` AS t
 WHERE
   CAST(period_start_ts AS INT64) <= @range_end_ts
   AND CAST(period_end_ts AS INT64) >= @range_start_ts
+  ${filterClauses.length ? `AND ${filterClauses.join(" AND ")}` : ""}
 `;
+  return { query, filterParams };
 }
 
 async function fetchBigQueryResultsPage(
@@ -231,25 +322,33 @@ async function fetchBigQueryResultsPage(
   query: string,
   rangeStart: number,
   rangeEnd: number,
+  extraParams: BigQueryNamedParameter[],
   pageToken?: string,
 ): Promise<BigQueryQueryResponse> {
+  const queryParameters: Array<{ name: string; parameterType: { type: string }; parameterValue: { value: string } }> = [
+    {
+      name: "range_start_ts",
+      parameterType: { type: "INT64" },
+      parameterValue: { value: String(rangeStart) },
+    },
+    {
+      name: "range_end_ts",
+      parameterType: { type: "INT64" },
+      parameterValue: { value: String(rangeEnd) },
+    },
+    ...extraParams.map((p) => ({
+      name: p.name,
+      parameterType: { type: p.type },
+      parameterValue: { value: p.value },
+    })),
+  ];
+
   const body: Record<string, unknown> = {
     query,
     useLegacySql: false,
     location,
     parameterMode: "NAMED",
-    queryParameters: [
-      {
-        name: "range_start_ts",
-        parameterType: { type: "INT64" },
-        parameterValue: { value: String(rangeStart) },
-      },
-      {
-        name: "range_end_ts",
-        parameterType: { type: "INT64" },
-        parameterValue: { value: String(rangeEnd) },
-      },
-    ],
+    queryParameters,
     maxResults: BQ_MAX_RESULTS,
     timeoutMs: 20000,
   };
@@ -292,7 +391,11 @@ async function waitForJobCompletion(
   throw new Error("BigQuery query timed out waiting for completion");
 }
 
-export async function loadStripeLineItemsFromBigQuery(startTsMs: number, endTsMs: number): Promise<SyncedStripeLineItem[]> {
+export async function loadStripeLineItemsFromBigQuery(
+  startTsMs: number,
+  endTsMs: number,
+  filters?: StripeBigQueryFilters,
+): Promise<SyncedStripeLineItem[]> {
   const sa = getServiceAccount();
   const projectId = process.env.BIGQUERY_PROJECT_ID || sa.project_id;
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
@@ -321,18 +424,29 @@ export async function loadStripeLineItemsFromBigQuery(startTsMs: number, endTsMs
         : Math.floor(endTsMs);
 
   const accessToken = await getAccessToken(sa);
-  const query = servingTable
+  const built = servingTable
     ? servingSchemaMode === "int"
-      ? buildServingQueryIntColumns(servingTable)
-      : buildServingQueryTimestampColumns(servingTable)
-    : buildQuery(table);
+      ? buildServingQueryIntColumns(servingTable, filters)
+      : buildServingQueryTimestampColumns(servingTable, filters)
+    : { query: buildQuery(table), filterParams: [] as BigQueryNamedParameter[] };
+  const query = built.query;
+  const extraParams = built.filterParams;
 
   const out: SyncedStripeLineItem[] = [];
   const seen = new Set<string>();
   let pageToken: string | undefined;
 
   while (true) {
-    let json = await fetchBigQueryResultsPage(accessToken, projectId, location, query, rangeStart, rangeEnd, pageToken);
+    let json = await fetchBigQueryResultsPage(
+      accessToken,
+      projectId,
+      location,
+      query,
+      rangeStart,
+      rangeEnd,
+      extraParams,
+      pageToken,
+    );
     if (!json.jobComplete && json.jobReference?.jobId) {
       const jobProjectId = json.jobReference.projectId || projectId;
       const jobLocation = json.jobReference.location || location;

@@ -70,6 +70,7 @@ export type ReportRow = {
   country?: string;
   industry?: string;
   lineItemDescription?: string;
+  groupValues?: Record<string, string>;
 
 };
 
