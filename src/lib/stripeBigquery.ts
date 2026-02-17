@@ -299,7 +299,7 @@ export async function loadStripeLineItemsFromBigQuery(startTsMs: number, endTsMs
 
   const table = mustEnv("BIGQUERY_STRIPE_TABLE");
   const servingTable = (process.env.BIGQUERY_STRIPE_SERVING_TABLE || "").trim();
-  const servingSchemaMode = (process.env.BIGQUERY_SERVING_SCHEMA_MODE || "timestamp").toLowerCase();
+  const servingSchemaMode = (process.env.BIGQUERY_SERVING_SCHEMA_MODE || "int").toLowerCase();
   const location = process.env.BIGQUERY_LOCATION || "US";
   const schemaMode = servingTable ? "int_ts" : (process.env.BIGQUERY_SCHEMA_MODE || "int_ts").toLowerCase();
   const tsUnit = servingTable
