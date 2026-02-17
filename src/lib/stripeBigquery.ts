@@ -21,6 +21,7 @@ type BigQueryQueryResponse = {
 
 const TOKEN_AUDIENCE = "https://oauth2.googleapis.com/token";
 const BQ_SCOPE = "https://www.googleapis.com/auth/bigquery";
+const BQ_MAX_RESULTS = Number(process.env.BIGQUERY_MAX_RESULTS || "50000");
 
 function base64Url(input: Buffer | string) {
   const b = Buffer.isBuffer(input) ? input : Buffer.from(input, "utf8");
@@ -181,57 +182,45 @@ WHERE
 `;
 }
 
-function buildServingQuery(table: string) {
+function buildServingQueryTimestampColumns(table: string) {
   return `
 SELECT
-  COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id'), '') AS customer_id,
-  COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_name'), '') AS customer_name,
+  CAST(customer_id AS STRING) AS customer_id,
+  CAST(customer_name AS STRING) AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
   CAST(amount_minor AS INT64) AS amount_minor,
   LOWER(CAST(currency AS STRING)) AS currency,
   CAST(quantity AS FLOAT64) AS quantity,
-  CAST(
-    COALESCE(
-      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS INT64),
-      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS TIMESTAMP)),
-      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS INT64),
-      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS TIMESTAMP))
-    ) AS INT64
-  ) AS period_start_ts,
-  CAST(
-    COALESCE(
-      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end_ts') AS INT64),
-      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end_ts') AS TIMESTAMP)),
-      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end') AS INT64),
-      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end') AS TIMESTAMP))
-    ) AS INT64
-  ) AS period_end_ts,
-  CAST(
-    COALESCE(
-      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.invoice_created_ts') AS INT64),
-      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.invoice_created_ts') AS TIMESTAMP)),
-      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS INT64),
-      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS TIMESTAMP)),
-      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS INT64),
-      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS TIMESTAMP))
-    ) AS INT64
-  ) AS invoice_created_ts
+  CAST(UNIX_MILLIS(period_start_ts) AS INT64) AS period_start_ts,
+  CAST(UNIX_MILLIS(period_end_ts) AS INT64) AS period_end_ts,
+  CAST(UNIX_MILLIS(COALESCE(invoice_created_ts, period_start_ts)) AS INT64) AS invoice_created_ts
 FROM \`${table}\` AS t
 WHERE
-  COALESCE(
-    SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS INT64),
-    UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS TIMESTAMP)),
-    SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS INT64),
-    UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS TIMESTAMP))
-  ) <= @range_end_ts
-  AND COALESCE(
-    SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end_ts') AS INT64),
-    UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end_ts') AS TIMESTAMP)),
-    SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end') AS INT64),
-    UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end') AS TIMESTAMP))
-  ) >= @range_start_ts
+  period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
+  AND period_end_ts >= TIMESTAMP_MILLIS(@range_start_ts)
+`;
+}
+
+function buildServingQueryIntColumns(table: string) {
+  return `
+SELECT
+  CAST(customer_id AS STRING) AS customer_id,
+  CAST(customer_name AS STRING) AS customer_name,
+  CAST(invoice_id AS STRING) AS invoice_id,
+  CAST(line_item_id AS STRING) AS line_item_id,
+  CAST(line_item_description AS STRING) AS line_item_description,
+  CAST(amount_minor AS INT64) AS amount_minor,
+  LOWER(CAST(currency AS STRING)) AS currency,
+  CAST(quantity AS FLOAT64) AS quantity,
+  CAST(period_start_ts AS INT64) AS period_start_ts,
+  CAST(period_end_ts AS INT64) AS period_end_ts,
+  CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts
+FROM \`${table}\` AS t
+WHERE
+  CAST(period_start_ts AS INT64) <= @range_end_ts
+  AND CAST(period_end_ts AS INT64) >= @range_start_ts
 `;
 }
 
@@ -261,7 +250,7 @@ async function fetchBigQueryResultsPage(
         parameterValue: { value: String(rangeEnd) },
       },
     ],
-    maxResults: 10000,
+    maxResults: BQ_MAX_RESULTS,
     timeoutMs: 20000,
   };
 
@@ -289,7 +278,7 @@ async function waitForJobCompletion(
   location: string,
 ): Promise<BigQueryQueryResponse> {
   for (let attempt = 0; attempt < 30; attempt++) {
-    const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/queries/${jobId}?location=${encodeURIComponent(location)}&maxResults=10000`;
+    const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/queries/${jobId}?location=${encodeURIComponent(location)}&maxResults=${encodeURIComponent(String(BQ_MAX_RESULTS))}`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${accessToken}` },
       cache: "no-store",
@@ -310,6 +299,7 @@ export async function loadStripeLineItemsFromBigQuery(startTsMs: number, endTsMs
 
   const table = mustEnv("BIGQUERY_STRIPE_TABLE");
   const servingTable = (process.env.BIGQUERY_STRIPE_SERVING_TABLE || "").trim();
+  const servingSchemaMode = (process.env.BIGQUERY_SERVING_SCHEMA_MODE || "timestamp").toLowerCase();
   const location = process.env.BIGQUERY_LOCATION || "US";
   const schemaMode = servingTable ? "int_ts" : (process.env.BIGQUERY_SCHEMA_MODE || "int_ts").toLowerCase();
   const tsUnit = servingTable
@@ -331,7 +321,11 @@ export async function loadStripeLineItemsFromBigQuery(startTsMs: number, endTsMs
         : Math.floor(endTsMs);
 
   const accessToken = await getAccessToken(sa);
-  const query = servingTable ? buildServingQuery(servingTable) : buildQuery(table);
+  const query = servingTable
+    ? servingSchemaMode === "int"
+      ? buildServingQueryIntColumns(servingTable)
+      : buildServingQueryTimestampColumns(servingTable)
+    : buildQuery(table);
 
   const out: SyncedStripeLineItem[] = [];
   const seen = new Set<string>();
