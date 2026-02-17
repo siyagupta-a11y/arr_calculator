@@ -184,8 +184,8 @@ WHERE
 function buildServingQuery(table: string) {
   return `
 SELECT
-  CAST(customer_id AS STRING) AS customer_id,
-  CAST(customer_name AS STRING) AS customer_name,
+  '' AS customer_id,
+  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
