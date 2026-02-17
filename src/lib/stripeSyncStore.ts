@@ -42,8 +42,6 @@ const STORE_PATH = process.env.STRIPE_SYNC_STORE_PATH || "/tmp/arr-stripe-sync-s
 const MAX_HISTORY_DAYS = Number(process.env.STRIPE_SYNC_MAX_HISTORY_DAYS || "800");
 const SYNC_FRESHNESS_MS = Number(process.env.STRIPE_SYNC_FRESHNESS_MS || "900000");
 const SYNC_MAX_INVOICES_PER_RUN = Number(process.env.STRIPE_SYNC_MAX_INVOICES_PER_RUN || "120");
-const POC_START_TS = new Date(2025, 10, 1, 0, 0, 0, 0).getTime(); // 2025-11-01
-const POC_END_TS = new Date(2026, 0, 31, 23, 59, 59, 999).getTime(); // 2026-01-31
 const STORE_SCHEMA_VERSION = 2;
 
 let writeLock: Promise<void> = Promise.resolve();
@@ -170,8 +168,8 @@ function parseRange(startDate: string, endDate: string) {
 
   const startTsRaw = startOfDayTs(start);
   const endTsRaw = endOfDayTs(end);
-  const startTs = Math.max(startTsRaw, POC_START_TS);
-  const endTs = Math.min(endTsRaw, POC_END_TS);
+  const startTs = startTsRaw;
+  const endTs = endTsRaw;
   if (endTs < startTs) throw new Error("endDate must be >= startDate");
   return { startTs, endTs };
 }

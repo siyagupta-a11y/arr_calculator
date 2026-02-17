@@ -181,6 +181,27 @@ WHERE
 `;
 }
 
+function buildServingQuery(table: string) {
+  return `
+SELECT
+  CAST(customer_id AS STRING) AS customer_id,
+  CAST(customer_name AS STRING) AS customer_name,
+  CAST(invoice_id AS STRING) AS invoice_id,
+  CAST(line_item_id AS STRING) AS line_item_id,
+  CAST(line_item_description AS STRING) AS line_item_description,
+  CAST(amount_minor AS INT64) AS amount_minor,
+  LOWER(CAST(currency AS STRING)) AS currency,
+  CAST(quantity AS FLOAT64) AS quantity,
+  CAST(period_start_ts AS INT64) AS period_start_ts,
+  CAST(period_end_ts AS INT64) AS period_end_ts,
+  CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts
+FROM \`${table}\`
+WHERE
+  CAST(period_start_ts AS INT64) <= @range_end_ts
+  AND CAST(period_end_ts AS INT64) >= @range_start_ts
+`;
+}
+
 async function fetchBigQueryResultsPage(
   accessToken: string,
   projectId: string,
@@ -255,9 +276,12 @@ export async function loadStripeLineItemsFromBigQuery(startTsMs: number, endTsMs
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
 
   const table = mustEnv("BIGQUERY_STRIPE_TABLE");
+  const servingTable = (process.env.BIGQUERY_STRIPE_SERVING_TABLE || "").trim();
   const location = process.env.BIGQUERY_LOCATION || "US";
-  const schemaMode = (process.env.BIGQUERY_SCHEMA_MODE || "int_ts").toLowerCase();
-  const tsUnit = (process.env.BIGQUERY_TS_UNIT || "milliseconds").toLowerCase();
+  const schemaMode = servingTable ? "int_ts" : (process.env.BIGQUERY_SCHEMA_MODE || "int_ts").toLowerCase();
+  const tsUnit = servingTable
+    ? (process.env.BIGQUERY_SERVING_TS_UNIT || "milliseconds").toLowerCase()
+    : (process.env.BIGQUERY_TS_UNIT || "milliseconds").toLowerCase();
   const tsMultiplier = schemaMode === "timestamp" ? 1 : tsUnit === "seconds" ? 1000 : 1;
 
   const rangeStart =
@@ -274,7 +298,7 @@ export async function loadStripeLineItemsFromBigQuery(startTsMs: number, endTsMs
         : Math.floor(endTsMs);
 
   const accessToken = await getAccessToken(sa);
-  const query = buildQuery(table);
+  const query = servingTable ? buildServingQuery(servingTable) : buildQuery(table);
 
   const out: SyncedStripeLineItem[] = [];
   let pageToken: string | undefined;

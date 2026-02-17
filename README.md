@@ -3,20 +3,11 @@ This is a Next.js ARR dashboard.
 ## Routes
 
 - `/` HubSpot ARR report
-- `/stripe` Stripe ARR report (POC window only)
+- `/stripe` Stripe ARR report
 - `POST /api/report` HubSpot report API
-- `POST /api/stripe-report` Stripe report API
+- `GET|POST /api/stripe-report` Stripe report API
 - `GET|POST /api/stripe-sync` Stripe sync API
 - `GET /api/stripe-sync/status` Stripe sync health/status API
-
-## Stripe POC Scope
-
-This proof of concept is intentionally restricted to:
-
-- `2025-11-01` through `2026-01-31`
-- Months: November 2025, December 2025, January 2026
-
-Requests outside this range are clamped or rejected.
 
 ## Automatic Stripe Sync
 
@@ -28,10 +19,10 @@ Vercel cron runs Stripe sync automatically every 5 minutes:
 
 ```json
 {
-  "startDate": "2025-11-01",
+  "startDate": "2025-01-01",
   "endDate": "2026-01-31",
   "force": false,
-  "iterations": 40,
+  "iterations": 12,
   "reset": false
 }
 ```
@@ -74,6 +65,8 @@ Set:
 - `BIGQUERY_LOCATION` (optional, default `US`)
 - `BIGQUERY_TS_UNIT` (`milliseconds` default, or `seconds`)
 - `BIGQUERY_SCHEMA_MODE` (`int_ts` default, use `timestamp` for tables with TIMESTAMP columns like `period_start`/`period_end`)
+- `BIGQUERY_STRIPE_SERVING_TABLE` (optional but recommended for speed; full table id with standardized int timestamp columns)
+- `BIGQUERY_SERVING_TS_UNIT` (`milliseconds` default, or `seconds`; used only with `BIGQUERY_STRIPE_SERVING_TABLE`)
 
 To keep Blob as source (default), set:
 
@@ -85,6 +78,12 @@ Expected BigQuery columns (or aliases in a view):
 - `line_item_id`, `line_item_description`
 - `amount_minor`, `currency`, `quantity`
 - `period_start_ts`, `period_end_ts`, `invoice_created_ts`
+
+If using raw TIMESTAMP columns (`amount`, `id`, `description`, `period_start`, `period_end`, `invoice_id`, `currency`, `quantity`), set:
+
+- `BIGQUERY_SCHEMA_MODE=timestamp`
+
+For fastest performance and to avoid timeout on large ranges, use a serving table (`BIGQUERY_STRIPE_SERVING_TABLE`) that already contains the standardized columns above.
 
 ## Required Environment Variables
 

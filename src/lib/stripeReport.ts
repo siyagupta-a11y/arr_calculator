@@ -23,8 +23,6 @@ type CacheEntry = {
 
 const REPORT_CACHE_TTL_MS = Number(process.env.STRIPE_REPORT_CACHE_TTL_MS || "300000");
 const REPORT_CACHE = new Map<string, CacheEntry>();
-const POC_MIN = new Date(2025, 10, 1); // 2025-11-01
-const POC_MAX = new Date(2026, 0, 31); // 2026-01-31
 const NON_ZERO_EPSILON = 1e-9;
 
 function formatDayKey(d: Date) {
@@ -86,14 +84,10 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
 
   const rawRangeStart = new Date(startVal.getFullYear(), startVal.getMonth(), startVal.getDate(), 0, 0, 0, 0);
   const rawRangeEnd = new Date(endVal.getFullYear(), endVal.getMonth(), endVal.getDate(), 23, 59, 59, 999);
-  const rangeStart = new Date(
-    Math.max(rawRangeStart.getTime(), new Date(POC_MIN.getFullYear(), POC_MIN.getMonth(), POC_MIN.getDate(), 0, 0, 0, 0).getTime()),
-  );
-  const rangeEnd = new Date(
-    Math.min(rawRangeEnd.getTime(), new Date(POC_MAX.getFullYear(), POC_MAX.getMonth(), POC_MAX.getDate(), 23, 59, 59, 999).getTime()),
-  );
+  const rangeStart = rawRangeStart;
+  const rangeEnd = rawRangeEnd;
   if (rangeEnd < rangeStart) {
-    throw new Error("POC is limited to 2025-11-01 through 2026-01-31");
+    throw new Error("endDate must be >= startDate");
   }
 
   const source = (process.env.STRIPE_DATA_SOURCE || "blob").toLowerCase();

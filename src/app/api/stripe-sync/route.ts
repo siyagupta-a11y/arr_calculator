@@ -23,9 +23,12 @@ function isAuthorized(req: Request) {
 }
 
 function defaultWindow() {
+  const end = new Date();
+  const start = new Date(end.getFullYear() - 1, end.getMonth(), end.getDate());
+  const toIso = (d: Date) => d.toISOString().slice(0, 10);
   return {
-    startDate: "2025-11-01",
-    endDate: "2026-01-31",
+    startDate: toIso(start),
+    endDate: toIso(end),
   };
 }
 

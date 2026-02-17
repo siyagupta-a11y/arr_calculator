@@ -29,8 +29,7 @@ export async function POST(req: Request) {
     const message = e instanceof Error ? e.message : "Unknown error";
     const status =
       message.includes("Invalid startDate/endDate") ||
-      message.includes("endDate must be >= startDate") ||
-      message.includes("POC is limited")
+      message.includes("endDate must be >= startDate")
         ? 400
         : 500;
     return NextResponse.json({ error: message }, { status });
@@ -51,8 +50,7 @@ export async function GET(req: Request) {
     const message = e instanceof Error ? e.message : "Unknown error";
     const status =
       message.includes("Invalid startDate/endDate") ||
-      message.includes("endDate must be >= startDate") ||
-      message.includes("POC is limited")
+      message.includes("endDate must be >= startDate")
         ? 400
         : 500;
     return NextResponse.json({ error: message }, { status });

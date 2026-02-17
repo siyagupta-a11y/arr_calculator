@@ -100,9 +100,16 @@ function matchesTextFilter(value: string, rawFilter: string) {
   return includeTerms.some((term) => text.includes(term));
 }
 
+function defaultDateRange() {
+  const end = new Date();
+  const start = new Date(end.getFullYear() - 1, end.getMonth(), end.getDate());
+  const toIso = (d: Date) => d.toISOString().slice(0, 10);
+  return { startDate: toIso(start), endDate: toIso(end) };
+}
+
 export default function StripePage() {
-  const [startDate, setStartDate] = useState("2025-11-01");
-  const [endDate, setEndDate] = useState("2026-01-31");
+  const [startDate, setStartDate] = useState(() => defaultDateRange().startDate);
+  const [endDate, setEndDate] = useState(() => defaultDateRange().endDate);
   const [grain, setGrain] = useState<Grain>("monthly");
   const [currencyDisplay, setCurrencyDisplay] = useState<CurrencyDisplay>("normal");
 
