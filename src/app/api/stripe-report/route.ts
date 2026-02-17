@@ -3,6 +3,7 @@ import type { Grain } from "@/lib/types";
 import { generateStripeReport } from "@/lib/stripeReport";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 type StripeApiRequest = {
   startDate: string;
