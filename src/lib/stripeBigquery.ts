@@ -184,8 +184,8 @@ WHERE
 function buildServingQuery(table: string) {
   return `
 SELECT
-  '' AS customer_id,
-  '' AS customer_name,
+  COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id'), '') AS customer_id,
+  COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_name'), '') AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
