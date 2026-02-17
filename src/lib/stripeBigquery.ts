@@ -174,7 +174,7 @@ SELECT
   CAST(period_start_ts AS INT64) AS period_start_ts,
   CAST(period_end_ts AS INT64) AS period_end_ts,
   CAST(invoice_created_ts AS INT64) AS invoice_created_ts
-FROM \`${table}\`
+FROM \`${table}\` AS t
 WHERE
   CAST(period_start_ts AS INT64) <= @range_end_ts
   AND CAST(period_end_ts AS INT64) >= @range_start_ts
@@ -192,13 +192,46 @@ SELECT
   CAST(amount_minor AS INT64) AS amount_minor,
   LOWER(CAST(currency AS STRING)) AS currency,
   CAST(quantity AS FLOAT64) AS quantity,
-  CAST(period_start_ts AS INT64) AS period_start_ts,
-  CAST(period_end_ts AS INT64) AS period_end_ts,
-  CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts
+  CAST(
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS INT64),
+      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS TIMESTAMP)),
+      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS INT64),
+      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS TIMESTAMP))
+    ) AS INT64
+  ) AS period_start_ts,
+  CAST(
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end_ts') AS INT64),
+      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end_ts') AS TIMESTAMP)),
+      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end') AS INT64),
+      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end') AS TIMESTAMP))
+    ) AS INT64
+  ) AS period_end_ts,
+  CAST(
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.invoice_created_ts') AS INT64),
+      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.invoice_created_ts') AS TIMESTAMP)),
+      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS INT64),
+      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS TIMESTAMP)),
+      SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS INT64),
+      UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS TIMESTAMP))
+    ) AS INT64
+  ) AS invoice_created_ts
 FROM \`${table}\`
 WHERE
-  CAST(period_start_ts AS INT64) <= @range_end_ts
-  AND CAST(period_end_ts AS INT64) >= @range_start_ts
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS INT64),
+    UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS TIMESTAMP)),
+    SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS INT64),
+    UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS TIMESTAMP))
+  ) <= @range_end_ts
+  AND COALESCE(
+    SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end_ts') AS INT64),
+    UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end_ts') AS TIMESTAMP)),
+    SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end') AS INT64),
+    UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_end') AS TIMESTAMP))
+  ) >= @range_start_ts
 `;
 }
 
