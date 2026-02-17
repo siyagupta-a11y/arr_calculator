@@ -60,6 +60,32 @@ Optional blob key path:
 
 If blob token is missing, local `/tmp` fallback is used (not persistent across redeploys/instances).
 
+## BigQuery Source (Optional)
+
+You can read Stripe line items directly from BigQuery without removing blob sync.
+Blob persistence code remains in place and can be switched back at any time.
+
+Set:
+
+- `STRIPE_DATA_SOURCE=bigquery`
+- `GOOGLE_SERVICE_ACCOUNT_JSON` (or `GOOGLE_SERVICE_ACCOUNT_JSON_BASE64`)
+- `BIGQUERY_PROJECT_ID` (optional if present in service account JSON)
+- `BIGQUERY_STRIPE_TABLE` (full table id: `project.dataset.table`)
+- `BIGQUERY_LOCATION` (optional, default `US`)
+- `BIGQUERY_TS_UNIT` (`milliseconds` default, or `seconds`)
+- `BIGQUERY_SCHEMA_MODE` (`int_ts` default, use `timestamp` for tables with TIMESTAMP columns like `period_start`/`period_end`)
+
+To keep Blob as source (default), set:
+
+- `STRIPE_DATA_SOURCE=blob`
+
+Expected BigQuery columns (or aliases in a view):
+
+- `customer_id`, `customer_name`, `invoice_id`
+- `line_item_id`, `line_item_description`
+- `amount_minor`, `currency`, `quantity`
+- `period_start_ts`, `period_end_ts`, `invoice_created_ts`
+
 ## Required Environment Variables
 
 HubSpot:
@@ -78,12 +104,12 @@ Stripe:
 ## Optional Tuning
 
 - `CRON_SECRET` (recommended)
-- `STRIPE_LINE_FETCH_CONCURRENCY` (default `24`)
+- `STRIPE_LINE_FETCH_CONCURRENCY` (default `8`)
 - `STRIPE_REPORT_CACHE_TTL_MS` (default `300000`)
-- `STRIPE_REPORT_AUTO_SYNC` (default `true`)
+- `STRIPE_REPORT_AUTO_SYNC` (default `false`)
 - `STRIPE_SYNC_FRESHNESS_MS` (default `900000`)
 - `STRIPE_SYNC_MAX_HISTORY_DAYS` (default `800`)
-- `STRIPE_SYNC_MAX_INVOICES_PER_RUN` (default `400`)
-- `STRIPE_SYNC_CRON_ITERATIONS` (default `40`)
-- `STRIPE_SYNC_MAX_RUNTIME_MS` (default `50000`)
+- `STRIPE_SYNC_MAX_INVOICES_PER_RUN` (default `120`)
+- `STRIPE_SYNC_CRON_ITERATIONS` (default `12`)
+- `STRIPE_SYNC_MAX_RUNTIME_MS` (default `40000`)
 - `STRIPE_SYNC_STORE_PATH` (local fallback path, default `/tmp/arr-stripe-sync-store.json`)

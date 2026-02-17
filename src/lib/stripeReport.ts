@@ -7,6 +7,7 @@ import {
 } from "@/lib/logic";
 import type { Grain, ReportResponse, ReportRow } from "@/lib/types";
 import { getPriceDisplayNamesById } from "@/lib/stripe";
+import { loadStripeLineItemsFromBigQuery } from "@/lib/stripeBigquery";
 import { ensureStripeSyncForRange, getSyncedStripeLineItemsForRange } from "@/lib/stripeSyncStore";
 
 export type StripeReportRequest = {
@@ -112,20 +113,26 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
   const targetCurrency = (process.env.STRIPE_TARGET_CURRENCY || "USD").trim().toLowerCase();
   const clampedStartDate = toIsoDate(rangeStart);
   const clampedEndDate = toIsoDate(rangeEnd);
-  let syncedItems = await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
-  const autoSync = String(process.env.STRIPE_REPORT_AUTO_SYNC || "false").toLowerCase() === "true";
+  const source = (process.env.STRIPE_DATA_SOURCE || "blob").toLowerCase();
+  let syncedItems =
+    source === "bigquery"
+      ? await loadStripeLineItemsFromBigQuery(rangeStart.getTime(), rangeEnd.getTime())
+      : await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
 
-  if (!syncedItems.length && autoSync) {
-    try {
-      await ensureStripeSyncForRange({
-        startDate: clampedStartDate,
-        endDate: clampedEndDate,
-      });
-      syncedItems = await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e || "");
-      const isRateLimited = msg.includes("rate_limit") || msg.includes("429");
-      if (!isRateLimited) throw e;
+  if (source !== "bigquery") {
+    const autoSync = String(process.env.STRIPE_REPORT_AUTO_SYNC || "false").toLowerCase() === "true";
+    if (!syncedItems.length && autoSync) {
+      try {
+        await ensureStripeSyncForRange({
+          startDate: clampedStartDate,
+          endDate: clampedEndDate,
+        });
+        syncedItems = await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e || "");
+        const isRateLimited = msg.includes("rate_limit") || msg.includes("429");
+        if (!isRateLimited) throw e;
+      }
     }
   }
 
