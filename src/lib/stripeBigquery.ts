@@ -163,7 +163,7 @@ FROM \`${table}\` AS t
 WHERE
   period_start <= TIMESTAMP_MILLIS(@range_end_ts)
   AND period_end >= TIMESTAMP_MILLIS(@range_start_ts)
-  AND (is_deleted IS NULL OR is_deleted = FALSE)
+  AND COALESCE(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.is_deleted') AS BOOL), FALSE) = FALSE
 `;
   }
 
