@@ -461,6 +461,9 @@ export default function StripePage() {
               ))}
             </select>
             <span style={{ color: "#666", fontSize: 12 }}>{`Page ${data.pagination?.page || page}`}</span>
+            <span style={{ color: "#666", fontSize: 12 }}>
+              {`Rows: ${data.pagination?.returnedRows || 0}${data.pagination?.totalRows ? ` / ${data.pagination.totalRows}` : ""}`}
+            </span>
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={loading || page <= 1}
@@ -470,7 +473,7 @@ export default function StripePage() {
             </button>
             <button
               onClick={() => setPage((p) => p + 1)}
-              disabled={loading || !data.pagination?.sourcePaged || (data.pagination?.sourceReturnedRows || 0) < pageSize}
+              disabled={loading || !data.pagination?.hasMore}
               style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #ddd", background: "white" }}
             >
               Next

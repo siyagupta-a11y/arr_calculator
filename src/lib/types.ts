@@ -83,6 +83,8 @@ export type ReportResponse = {
     pageSize: number;
     returnedRows: number;
     sourceReturnedRows?: number;
+    totalRows?: number;
+    hasMore?: boolean;
     sourcePaged: boolean;
   };
 };

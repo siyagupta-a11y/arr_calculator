@@ -171,13 +171,15 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
   const targetCurrency = (process.env.STRIPE_TARGET_CURRENCY || "USD").trim().toLowerCase();
   const clampedStartDate = toIsoDate(rangeStart);
   const clampedEndDate = toIsoDate(rangeEnd);
+  const groupByFields = (body.groupByFields || []).filter(Boolean);
+  const sourcePagingEnabled = source === "bigquery" && groupByFields.length === 0;
   let syncedItems =
     source === "bigquery"
       ? await loadStripeLineItemsFromBigQuery(rangeStart.getTime(), rangeEnd.getTime(), {
           customerId: body.filterCustomerId,
           customerName: body.filterCustomerName,
           lineItemDescription: body.filterLineItemDescription,
-        }, { page, pageSize })
+        }, sourcePagingEnabled ? { page, pageSize } : undefined)
       : await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
   const sourceRowsFetched = syncedItems.length;
 
@@ -299,7 +301,6 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
   });
 
   let outputRows = filteredRows;
-  const groupByFields = (body.groupByFields || []).filter(Boolean);
   if (groupByFields.length > 0) {
     const grouped = new Map<string, ReportRow>();
     for (const row of filteredRows) {
@@ -338,6 +339,11 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     outputRows = [...outputRows].sort((a, b) => (b.valuesByPeriod[sortKey] || 0) - (a.valuesByPeriod[sortKey] || 0));
   }
 
+  const totalRows = outputRows.length;
+  const pageStartIdx = Math.max(0, (page - 1) * pageSize);
+  const pagedRows = sourcePagingEnabled ? outputRows : outputRows.slice(pageStartIdx, pageStartIdx + pageSize);
+  const hasMore = sourcePagingEnabled ? sourceRowsFetched >= pageSize : pageStartIdx + pageSize < totalRows;
+
   const totalsByPeriod = outputPeriods.map((p) => {
     const total = round2(outputRows.reduce((acc, r) => acc + (r.valuesByPeriod[p.key] || 0), 0));
     return { ...p, total };
@@ -346,13 +352,15 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
   const response = {
     periods: outputPeriods,
     totalsByPeriod,
-    rows: outputRows,
+    rows: pagedRows,
     pagination: {
       page,
       pageSize,
-      returnedRows: outputRows.length,
+      returnedRows: pagedRows.length,
       sourceReturnedRows: sourceRowsFetched,
-      sourcePaged: source === "bigquery",
+      totalRows,
+      hasMore,
+      sourcePaged: sourcePagingEnabled,
     },
   };
   REPORT_CACHE.set(cacheKey, { expiresAt: Date.now() + REPORT_CACHE_TTL_MS, value: response });
