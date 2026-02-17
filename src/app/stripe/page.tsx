@@ -144,9 +144,11 @@ export default function StripePage() {
 
       if (!res.ok) {
         if (json && typeof json === "object" && "error" in json) {
-          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+          const apiError = String((json as { error?: unknown }).error || "Request failed");
+          throw new Error(`HTTP ${res.status}: ${apiError}`);
         }
-        throw new Error(text || "Request failed");
+        const snippet = (text || "").trim().slice(0, 500);
+        throw new Error(`HTTP ${res.status}: ${snippet || "Request failed (empty response body)"}`);
       }
 
       if (!json || typeof json !== "object") throw new Error("Invalid API response");
