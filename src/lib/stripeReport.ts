@@ -22,6 +22,8 @@ export type StripeReportRequest = {
   filterLineItemDescriptionPrefix?: string;
   groupByFields?: StripeGroupField[];
   sortByPeriodKey?: string;
+  page?: number;
+  pageSize?: number;
 };
 
 type CacheEntry = {
@@ -150,7 +152,9 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
   }
 
   const source = (process.env.STRIPE_DATA_SOURCE || "blob").toLowerCase();
-  const cacheKey = `${body.startDate}|${body.endDate}|${body.grain}|${source}|${body.filterCustomerName || ""}|${body.filterCustomerId || ""}|${body.filterLineItemDescription || ""}|${body.filterLineItemDescriptionPrefix || ""}|${(body.groupByFields || []).join(",")}|${body.sortByPeriodKey || ""}`;
+  const page = Math.max(1, Math.floor(Number(body.page || 1)));
+  const pageSize = Math.max(1, Math.min(1000, Math.floor(Number(body.pageSize || 200))));
+  const cacheKey = `${body.startDate}|${body.endDate}|${body.grain}|${source}|${body.filterCustomerName || ""}|${body.filterCustomerId || ""}|${body.filterLineItemDescription || ""}|${body.filterLineItemDescriptionPrefix || ""}|${(body.groupByFields || []).join(",")}|${body.sortByPeriodKey || ""}|${page}|${pageSize}`;
   const cached = REPORT_CACHE.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.value;
@@ -173,7 +177,7 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
           customerId: body.filterCustomerId,
           customerName: body.filterCustomerName,
           lineItemDescription: body.filterLineItemDescription,
-        })
+        }, { page, pageSize })
       : await getSyncedStripeLineItemsForRange(clampedStartDate, clampedEndDate);
 
   if (source !== "bigquery") {
@@ -342,6 +346,12 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     periods: outputPeriods,
     totalsByPeriod,
     rows: outputRows,
+    pagination: {
+      page,
+      pageSize,
+      returnedRows: outputRows.length,
+      sourcePaged: source === "bigquery",
+    },
   };
   REPORT_CACHE.set(cacheKey, { expiresAt: Date.now() + REPORT_CACHE_TTL_MS, value: response });
   return response;

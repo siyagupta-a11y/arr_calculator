@@ -60,6 +60,8 @@ export default function StripePage() {
   const [filterLineItemDescription, setFilterLineItemDescription] = useState("");
   const [filterLineItemDescriptionPrefix, setFilterLineItemDescriptionPrefix] = useState("");
   const [sortByPeriodKey, setSortByPeriodKey] = useState<string>("none");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(200);
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ReportResponse | null>(null);
@@ -84,6 +86,8 @@ export default function StripePage() {
           filterLineItemDescriptionPrefix,
           groupByFields,
           sortByPeriodKey,
+          page,
+          pageSize,
         }),
       });
       if (res.status === 405) {
@@ -97,6 +101,8 @@ export default function StripePage() {
           filterLineItemDescriptionPrefix,
           groupByFields: groupByFields.join(","),
           sortByPeriodKey,
+          page: String(page),
+          pageSize: String(pageSize),
         });
         res = await fetch(`/api/stripe-report?${qs.toString()}`, { method: "GET" });
       }
@@ -265,6 +271,23 @@ export default function StripePage() {
         </div>
 
         <div>
+          <label>Page size</label>
+          <br />
+          <select
+            value={pageSize}
+            onChange={(e) => {
+              setPageSize(Number(e.target.value) || 200);
+              setPage(1);
+            }}
+          >
+            <option value={100}>100</option>
+            <option value={200}>200</option>
+            <option value={500}>500</option>
+            <option value={1000}>1000</option>
+          </select>
+        </div>
+
+        <div>
           <label>Group by</label>
           <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
             <select value={groupByToAdd} onChange={(e) => setGroupByToAdd(e.target.value as GroupField | "none")}>
@@ -412,6 +435,21 @@ export default function StripePage() {
                 </option>
               ))}
             </select>
+            <span style={{ color: "#666", fontSize: 12 }}>{`Page ${data.pagination?.page || page}`}</span>
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={loading || page <= 1}
+              style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #ddd", background: "white" }}
+            >
+              Prev
+            </button>
+            <button
+              onClick={() => setPage((p) => p + 1)}
+              disabled={loading || (data.pagination?.returnedRows || 0) < pageSize}
+              style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #ddd", background: "white" }}
+            >
+              Next
+            </button>
           </div>
 
           <div style={{ marginBottom: 8 }}>

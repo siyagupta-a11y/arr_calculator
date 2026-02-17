@@ -25,6 +25,11 @@ export type StripeBigQueryFilters = {
   lineItemDescription?: string;
 };
 
+export type StripeBigQueryPaging = {
+  page?: number;
+  pageSize?: number;
+};
+
 type BigQueryNamedParameter = {
   name: string;
   type: "INT64" | "STRING";
@@ -245,7 +250,16 @@ WHERE
 `;
 }
 
-function buildServingQueryTimestampColumns(table: string, filters?: StripeBigQueryFilters) {
+function buildPaginationClause(paging?: StripeBigQueryPaging) {
+  const rawPage = Number(paging?.page || 1);
+  const rawPageSize = Number(paging?.pageSize || 200);
+  const page = Number.isFinite(rawPage) ? Math.max(1, Math.floor(rawPage)) : 1;
+  const pageSize = Number.isFinite(rawPageSize) ? Math.max(1, Math.min(1000, Math.floor(rawPageSize))) : 200;
+  const offset = (page - 1) * pageSize;
+  return { page, pageSize, offset, sql: `LIMIT ${pageSize} OFFSET ${offset}` };
+}
+
+function buildServingQueryTimestampColumns(table: string, filters?: StripeBigQueryFilters, paging?: StripeBigQueryPaging) {
   const filterClauses: string[] = [];
   const filterParams: BigQueryNamedParameter[] = [];
   pushStringFilterSql(filterClauses, filterParams, "customer_id", filters?.customerId, "customer_id");
@@ -258,6 +272,7 @@ function buildServingQueryTimestampColumns(table: string, filters?: StripeBigQue
     "line_item_description",
   );
 
+  const pagingClause = buildPaginationClause(paging);
   const query = `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
@@ -276,11 +291,13 @@ WHERE
   period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
   AND period_end_ts >= TIMESTAMP_MILLIS(@range_start_ts)
   ${filterClauses.length ? `AND ${filterClauses.join(" AND ")}` : ""}
+ORDER BY period_start_ts DESC, invoice_id DESC, line_item_id DESC
+${pagingClause.sql}
 `;
   return { query, filterParams };
 }
 
-function buildServingQueryIntColumns(table: string, filters?: StripeBigQueryFilters) {
+function buildServingQueryIntColumns(table: string, filters?: StripeBigQueryFilters, paging?: StripeBigQueryPaging) {
   const filterClauses: string[] = [];
   const filterParams: BigQueryNamedParameter[] = [];
   pushStringFilterSql(filterClauses, filterParams, "customer_id", filters?.customerId, "customer_id");
@@ -293,6 +310,7 @@ function buildServingQueryIntColumns(table: string, filters?: StripeBigQueryFilt
     "line_item_description",
   );
 
+  const pagingClause = buildPaginationClause(paging);
   const query = `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
@@ -311,6 +329,8 @@ WHERE
   CAST(period_start_ts AS INT64) <= @range_end_ts
   AND CAST(period_end_ts AS INT64) >= @range_start_ts
   ${filterClauses.length ? `AND ${filterClauses.join(" AND ")}` : ""}
+ORDER BY CAST(period_start_ts AS INT64) DESC, invoice_id DESC, line_item_id DESC
+${pagingClause.sql}
 `;
   return { query, filterParams };
 }
@@ -395,6 +415,7 @@ export async function loadStripeLineItemsFromBigQuery(
   startTsMs: number,
   endTsMs: number,
   filters?: StripeBigQueryFilters,
+  paging?: StripeBigQueryPaging,
 ): Promise<SyncedStripeLineItem[]> {
   const sa = getServiceAccount();
   const projectId = process.env.BIGQUERY_PROJECT_ID || sa.project_id;
@@ -426,8 +447,8 @@ export async function loadStripeLineItemsFromBigQuery(
   const accessToken = await getAccessToken(sa);
   const built = servingTable
     ? servingSchemaMode === "int"
-      ? buildServingQueryIntColumns(servingTable, filters)
-      : buildServingQueryTimestampColumns(servingTable, filters)
+      ? buildServingQueryIntColumns(servingTable, filters, paging)
+      : buildServingQueryTimestampColumns(servingTable, filters, paging)
     : { query: buildQuery(table), filterParams: [] as BigQueryNamedParameter[] };
   const query = built.query;
   const extraParams = built.filterParams;

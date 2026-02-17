@@ -78,4 +78,10 @@ export type ReportResponse = {
   periods: { key: string; label: string }[];
   totalsByPeriod: { key: string; label: string; total: number }[];
   rows: ReportRow[];
+  pagination?: {
+    page: number;
+    pageSize: number;
+    returnedRows: number;
+    sourcePaged: boolean;
+  };
 };
