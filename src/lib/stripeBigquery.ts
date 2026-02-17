@@ -218,7 +218,7 @@ SELECT
       UNIX_MILLIS(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start') AS TIMESTAMP))
     ) AS INT64
   ) AS invoice_created_ts
-FROM \`${table}\`
+FROM \`${table}\` AS t
 WHERE
   COALESCE(
     SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.period_start_ts') AS INT64),
