@@ -130,13 +130,17 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     }
   }
 
-  const priceIds = Array.from(
-    new Set(
-      syncedItems
-        .map((item) => getPriceIdFromDescription(item.lineItemDescription || ""))
-        .filter((id) => !!id),
-    ),
-  );
+  const allowBigQueryPriceLookup = String(process.env.STRIPE_BIGQUERY_PRICE_LOOKUP || "false").toLowerCase() === "true";
+  const shouldLookupPriceNames = source !== "bigquery" || allowBigQueryPriceLookup;
+  const priceIds = shouldLookupPriceNames
+    ? Array.from(
+        new Set(
+          syncedItems
+            .map((item) => getPriceIdFromDescription(item.lineItemDescription || ""))
+            .filter((id) => !!id),
+        ),
+      )
+    : [];
   const priceDisplayNamesById = priceIds.length ? await getPriceDisplayNamesById(priceIds) : {};
 
   const rows: ReportRow[] = [];
