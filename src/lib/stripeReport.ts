@@ -96,7 +96,8 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
     throw new Error("POC is limited to 2025-11-01 through 2026-01-31");
   }
 
-  const cacheKey = `${body.startDate}|${body.endDate}|${body.grain}`;
+  const source = (process.env.STRIPE_DATA_SOURCE || "blob").toLowerCase();
+  const cacheKey = `${body.startDate}|${body.endDate}|${body.grain}|${source}`;
   const cached = REPORT_CACHE.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.value;
@@ -113,7 +114,6 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
   const targetCurrency = (process.env.STRIPE_TARGET_CURRENCY || "USD").trim().toLowerCase();
   const clampedStartDate = toIsoDate(rangeStart);
   const clampedEndDate = toIsoDate(rangeEnd);
-  const source = (process.env.STRIPE_DATA_SOURCE || "blob").toLowerCase();
   let syncedItems =
     source === "bigquery"
       ? await loadStripeLineItemsFromBigQuery(rangeStart.getTime(), rangeEnd.getTime())
