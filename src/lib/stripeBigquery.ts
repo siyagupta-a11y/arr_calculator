@@ -164,16 +164,7 @@ SELECT
   CAST(COALESCE(quantity, 1) AS FLOAT64) AS quantity,
   CAST(UNIX_MILLIS(period_start) AS INT64) AS period_start_ts,
   CAST(UNIX_MILLIS(period_end) AS INT64) AS period_end_ts,
-  CAST(
-    UNIX_MILLIS(
-      COALESCE(
-        SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.date') AS TIMESTAMP),
-        SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.invoice_created') AS TIMESTAMP),
-        SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.created') AS TIMESTAMP),
-        period_start
-      )
-    ) AS INT64
-  ) AS invoice_created_ts
+  CAST(UNIX_MILLIS(period_start) AS INT64) AS invoice_created_ts
 FROM \`${table}\` AS t
 WHERE
   period_start <= TIMESTAMP_MILLIS(@range_end_ts)
