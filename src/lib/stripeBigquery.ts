@@ -144,21 +144,10 @@ function buildQuery(table: string) {
     return `
 SELECT
   COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id'), '') AS customer_id,
-  COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_name'), '') AS customer_name,
-  COALESCE(
-    JSON_VALUE(TO_JSON_STRING(t), '$.invoice_id'),
-    ''
-  ) AS invoice_id,
-  COALESCE(
-    JSON_VALUE(TO_JSON_STRING(t), '$.id'),
-    JSON_VALUE(TO_JSON_STRING(t), '$.line_item_id'),
-    ''
-  ) AS line_item_id,
-  COALESCE(
-    JSON_VALUE(TO_JSON_STRING(t), '$.description'),
-    JSON_VALUE(TO_JSON_STRING(t), '$.line_item_description'),
-    ''
-  ) AS line_item_description,
+  '' AS customer_name,
+  CAST(invoice_id AS STRING) AS invoice_id,
+  CAST(id AS STRING) AS line_item_id,
+  CAST(description AS STRING) AS line_item_description,
   CAST(COALESCE(amount, 0) AS INT64) AS amount_minor,
   LOWER(CAST(currency AS STRING)) AS currency,
   CAST(COALESCE(quantity, 1) AS FLOAT64) AS quantity,
@@ -169,7 +158,6 @@ FROM \`${table}\` AS t
 WHERE
   period_start <= TIMESTAMP_MILLIS(@range_end_ts)
   AND period_end >= TIMESTAMP_MILLIS(@range_start_ts)
-  AND COALESCE(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(t), '$.is_deleted') AS BOOL), FALSE) = FALSE
 `;
   }
 
