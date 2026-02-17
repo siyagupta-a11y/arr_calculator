@@ -125,7 +125,7 @@ export default function StripePage() {
     setData(null);
 
     try {
-      const res = await fetch("/api/stripe-report", {
+      let res = await fetch("/api/stripe-report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -134,6 +134,10 @@ export default function StripePage() {
           grain,
         }),
       });
+      if (res.status === 405) {
+        const qs = new URLSearchParams({ startDate, endDate, grain });
+        res = await fetch(`/api/stripe-report?${qs.toString()}`, { method: "GET" });
+      }
       const text = await res.text();
       let json: unknown = null;
       try {
