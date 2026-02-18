@@ -83,17 +83,19 @@ function recurringFrequencyLabel(interval?: string | null, intervalCount?: numbe
 }
 
 function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusive: Date) {
-  const startDayUtc = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
-  const endDayUtc = Date.UTC(endExclusive.getUTCFullYear(), endExclusive.getUTCMonth(), endExclusive.getUTCDate());
+  const startMs = start.getTime();
+  const endMs = endExclusive.getTime();
+  const durationMs = endMs - startMs;
+  if (durationMs <= 0) return 0;
 
-  const oneMonthAfterStartDayUtc = new Date(startDayUtc);
-  oneMonthAfterStartDayUtc.setUTCMonth(oneMonthAfterStartDayUtc.getUTCMonth() + 1);
-  if (oneMonthAfterStartDayUtc.getTime() === endDayUtc) {
+  const oneMonthAfterStartUtc = new Date(startMs);
+  oneMonthAfterStartUtc.setUTCMonth(oneMonthAfterStartUtc.getUTCMonth() + 1);
+  if (oneMonthAfterStartUtc.getTime() === endMs) {
     return amountMajor * 12;
   }
 
-  const durationDays = Math.max((endDayUtc - startDayUtc) / (24 * 60 * 60 * 1000), 1);
-  return (amountMajor / durationDays) * 365;
+  const msPerYear = 365 * 24 * 60 * 60 * 1000;
+  return (amountMajor * msPerYear) / Math.max(durationMs, 1);
 }
 
 function getPriceIdFromDescription(description: string) {
