@@ -302,7 +302,7 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
   }
   const rangeStartMs = rangeStart.getTime();
   const rangeEndMs = rangeEnd.getTime();
-  syncedItems = syncedItems.filter((item) => item.periodStartTs <= rangeEndMs && item.periodEndTs >= rangeStartMs);
+  syncedItems = syncedItems.filter((item) => item.periodStartTs <= rangeEndMs && item.periodEndTs > rangeStartMs);
   const sourceRowsFetched = syncedItems.length;
 
   const priceIds = Array.from(
@@ -332,7 +332,7 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
 
     const valuesMonthly: Record<string, number> = {};
     for (const mp of monthlyPeriods) {
-      const overlapsMonth = windowStart <= mp.end && windowEndInclusive >= mp.start;
+      const overlapsMonth = windowStart <= mp.end && windowEndInclusive > mp.start;
       valuesMonthly[mp.key] = overlapsMonth ? annualized : 0;
     }
 
@@ -347,7 +347,7 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
       }
     } else {
       for (const dp of dailyPeriods) {
-        const overlapsDay = windowStart <= dp.dayEnd && windowEndInclusive >= dp.dayStart;
+        const overlapsDay = windowStart <= dp.dayEnd && windowEndInclusive > dp.dayStart;
         valuesByPeriod[dp.key] = overlapsDay ? annualized : 0;
       }
     }
