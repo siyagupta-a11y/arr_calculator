@@ -45,6 +45,7 @@ export const STRIPE_REPORT_PAGE_SIZE = 1000;
 const REPORT_CACHE_TTL_MS = Number(process.env.STRIPE_REPORT_CACHE_TTL_MS || "300000");
 const REPORT_CACHE = new Map<string, CacheEntry>();
 const NON_ZERO_EPSILON = 1e-9;
+const ALWAYS_MULTIPLY_BY_TWELVE_DESCRIPTIONS = new Set(["web search and crawl", "ai tokens"]);
 const GROUP_FIELD_LABELS: Record<StripeGroupField, string> = {
   customerId: "Customer ID",
   lineItemDescription: "Line Item Description",
@@ -94,11 +95,19 @@ function recurringFrequencyLabel(interval?: string | null, intervalCount?: numbe
   return `every_${count}_${i}`;
 }
 
-function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusive: Date) {
+function shouldAlwaysMultiplyByTwelve(description: string) {
+  return ALWAYS_MULTIPLY_BY_TWELVE_DESCRIPTIONS.has(String(description || "").trim().toLowerCase());
+}
+
+function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusive: Date, description: string) {
   const startMs = start.getTime();
   const endMs = endExclusive.getTime();
   const durationMs = endMs - startMs;
   if (durationMs <= 0) return 0;
+
+  if (shouldAlwaysMultiplyByTwelve(description)) {
+    return amountMajor * 12;
+  }
 
   const oneMonthAfterStartUtc = new Date(startMs);
   oneMonthAfterStartUtc.setUTCMonth(oneMonthAfterStartUtc.getUTCMonth() + 1);
@@ -351,7 +360,12 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     if (isNaN(windowStart.getTime()) || isNaN(windowEndExclusive.getTime())) continue;
     if (windowEndExclusive <= windowStart) continue;
 
-    const annualized = annualizedAmountFromPeriod(amountMajor, windowStart, windowEndExclusive);
+    const annualized = annualizedAmountFromPeriod(
+      amountMajor,
+      windowStart,
+      windowEndExclusive,
+      item.lineItemDescription || "",
+    );
 
     const valuesMonthly: Record<string, number> = {};
     for (const mp of monthlyPeriods) {

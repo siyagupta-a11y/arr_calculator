@@ -655,6 +655,8 @@ function buildStripeBigQueryReportQuery(
     CAST(amount_minor AS FLOAT64) AS amount_major,
     COALESCE(CAST(quantity AS FLOAT64), 1.0) AS quantity,
     CASE
+      WHEN LOWER(TRIM(${rawDescriptionExpr})) IN ('web search and crawl', 'ai tokens')
+      THEN CAST(amount_minor AS FLOAT64) * 12.0
       WHEN UNIX_MILLIS(
         TIMESTAMP(
           DATETIME_ADD(DATETIME(TIMESTAMP_MILLIS(period_start_ts), 'UTC'), INTERVAL 1 MONTH),
