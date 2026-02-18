@@ -22,9 +22,7 @@ type UiRow = {
   valuesByPeriod: Record<string, number>;
 };
 
-function round2(n: number) {
-  return Math.round((Number(n) || 0) * 100) / 100;
-}
+const FIXED_PAGE_SIZE = 1000;
 
 function fmtMoney(n: number) {
   return new Intl.NumberFormat(undefined, {
@@ -33,10 +31,6 @@ function fmtMoney(n: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(n || 0);
-}
-
-function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
-  return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > 1e-9);
 }
 
 function defaultDateRange() {
@@ -61,10 +55,10 @@ export default function StripePage() {
   const [filterLineItemDescriptionPrefix, setFilterLineItemDescriptionPrefix] = useState("");
   const [sortByPeriodKey, setSortByPeriodKey] = useState<string>("none");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(200);
   const [hasRunOnce, setHasRunOnce] = useState(false);
 
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [data, setData] = useState<ReportResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -89,7 +83,6 @@ export default function StripePage() {
           groupByFields,
           sortByPeriodKey,
           page,
-          pageSize,
         }),
       });
       if (res.status === 405) {
@@ -104,7 +97,6 @@ export default function StripePage() {
           groupByFields: groupByFields.join(","),
           sortByPeriodKey,
           page: String(page),
-          pageSize: String(pageSize),
         });
         res = await fetch(`/api/stripe-report?${qs.toString()}`, { method: "GET" });
       }
@@ -126,7 +118,12 @@ export default function StripePage() {
       }
 
       if (!json || typeof json !== "object") throw new Error("Invalid API response");
-      setData(json as ReportResponse);
+      const report = json as ReportResponse;
+      setData(report);
+      const serverPage = report.pagination?.page;
+      if (typeof serverPage === "number" && Number.isFinite(serverPage) && serverPage > 0 && serverPage !== page) {
+        setPage(serverPage);
+      }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
       setError(message);
@@ -144,31 +141,39 @@ export default function StripePage() {
     groupByFields,
     sortByPeriodKey,
     page,
-    pageSize,
   ]);
 
   const displayedRows: UiRow[] = useMemo(() => {
     if (!data) return [];
     return (data.rows || [])
       .map((r) => ({
-      customerName: r.dealName || "",
-      customerId: r.dealId || "",
-      lineItemId: r.lineItemId || "",
-      lineItemDescription: r.lineItemDescription || "",
-      groupValues: (r.groupValues as Partial<Record<GroupField, string>>) || {},
-      valuesByPeriod: r.valuesByPeriod || {},
-      }))
-      .filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
+        customerName: r.dealName || "",
+        customerId: r.dealId || "",
+        lineItemId: r.lineItemId || "",
+        lineItemDescription: r.lineItemDescription || "",
+        groupValues: (r.groupValues as Partial<Record<GroupField, string>>) || {},
+        valuesByPeriod: r.valuesByPeriod || {},
+      }));
   }, [data]);
-
-  const displayedRowsSorted: UiRow[] = useMemo(() => {
-    return displayedRows;
-  }, [displayedRows]);
 
   const totalsByPeriodForDisplayed = useMemo(() => {
     if (!data) return [];
     return data.totalsByPeriod || [];
   }, [data]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [
+    startDate,
+    endDate,
+    grain,
+    filterCustomerName,
+    filterCustomerId,
+    filterLineItemDescription,
+    filterLineItemDescriptionPrefix,
+    groupByFields,
+    sortByPeriodKey,
+  ]);
 
   useEffect(() => {
     if (!hasRunOnce) return;
@@ -196,47 +201,44 @@ export default function StripePage() {
     return n;
   }
 
-  function currencySuffix() {
-    if (currencyDisplay === "thousands") return " (K)";
-    if (currencyDisplay === "millions") return " (M)";
-    return "";
-  }
+  async function exportBreakdownCsv() {
+    setError(null);
+    setExporting(true);
+    try {
+      const qs = new URLSearchParams({
+        startDate,
+        endDate,
+        grain,
+        filterCustomerName,
+        filterCustomerId,
+        filterLineItemDescription,
+        filterLineItemDescriptionPrefix,
+        groupByFields: groupByFields.join(","),
+        sortByPeriodKey,
+      });
+      const res = await fetch(`/api/stripe-report/export?${qs.toString()}`, { method: "GET" });
+      if (!res.ok) {
+        const text = await res.text();
+        const snippet = text.trim().slice(0, 500);
+        throw new Error(`HTTP ${res.status}: ${snippet || "CSV export failed"}`);
+      }
 
-  function escapeCsvCell(value: string | number) {
-    const text = String(value ?? "");
-    if (text.includes(",") || text.includes('"') || text.includes("\n")) {
-      return `"${text.replace(/"/g, '""')}"`;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const contentDisposition = res.headers.get("content-disposition") || "";
+      const filenameMatch = /filename="?([^"]+)"?/i.exec(contentDisposition);
+      const stamp = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = filenameMatch?.[1] || `stripe-arr-breakdown-full-${stamp}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "CSV export failed";
+      setError(message);
+    } finally {
+      setExporting(false);
     }
-    return text;
-  }
-
-  function exportBreakdownCsv() {
-    if (!data) return;
-
-    const csvHeaders = breakdownHeaders.map((h) =>
-      h !== "Customer" && h !== "Customer ID" && h !== "Line Item ID" && h !== "Line Item Description"
-        ? `${h}${currencySuffix()}`
-        : h,
-    );
-    const lines: string[] = [csvHeaders.map(escapeCsvCell).join(",")];
-
-    for (const r of displayedRowsSorted) {
-      const leadingColumns = showDefaultColumns
-        ? [r.customerName, r.customerId, r.lineItemId, r.lineItemDescription]
-        : groupByFields.map((field) => r.groupValues[field] || "(blank)");
-      const valueCols = (data.periods || []).map((p) => round2(scaleCurrency(r.valuesByPeriod[p.key] || 0)));
-      const row = [...leadingColumns, ...valueCols];
-      lines.push(row.map(escapeCsvCell).join(","));
-    }
-
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    const stamp = new Date().toISOString().slice(0, 10);
-    a.href = url;
-    a.download = `stripe-arr-breakdown-${stamp}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
   }
 
   function addGroupBy() {
@@ -292,23 +294,6 @@ export default function StripePage() {
             <option value="normal">Normal</option>
             <option value="thousands">Thousands (K)</option>
             <option value="millions">Millions (M)</option>
-          </select>
-        </div>
-
-        <div>
-          <label>Page size</label>
-          <br />
-          <select
-            value={pageSize}
-            onChange={(e) => {
-              setPageSize(Number(e.target.value) || 200);
-              setPage(1);
-            }}
-          >
-            <option value={100}>100</option>
-            <option value={200}>200</option>
-            <option value={500}>500</option>
-            <option value={1000}>1000</option>
           </select>
         </div>
 
@@ -373,7 +358,7 @@ export default function StripePage() {
               <div style={{ color: "#666", fontSize: 12 }}>
                 Rows {showDefaultColumns ? "(line items)" : `(groups: ${groupByLabel})`}
               </div>
-              <div style={{ fontSize: 18 }}>{displayedRows.length}</div>
+              <div style={{ fontSize: 18 }}>{data.pagination?.totalRows ?? displayedRows.length}</div>
             </div>
 
             <div style={{ marginTop: 12, display: "flex", gap: 12, flexWrap: "wrap" }}>
@@ -460,13 +445,15 @@ export default function StripePage() {
                 </option>
               ))}
             </select>
-            <span style={{ color: "#666", fontSize: 12 }}>{`Page ${data.pagination?.page || page}`}</span>
             <span style={{ color: "#666", fontSize: 12 }}>
-              {`Rows: ${data.pagination?.returnedRows || 0}${data.pagination?.totalRows ? ` / ${data.pagination.totalRows}` : ""}`}
+              {`Page ${data.pagination?.page || page}${data.pagination?.totalPages ? ` of ${data.pagination.totalPages}` : ""}`}
+            </span>
+            <span style={{ color: "#666", fontSize: 12 }}>
+              {`Rows: ${data.pagination?.returnedRows || 0}${data.pagination?.totalRows ? ` / ${data.pagination.totalRows}` : ""} (page size ${FIXED_PAGE_SIZE})`}
             </span>
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={loading || page <= 1}
+              disabled={loading || (data.pagination?.page || page) <= 1}
               style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #ddd", background: "white" }}
             >
               Prev
@@ -481,7 +468,9 @@ export default function StripePage() {
           </div>
 
           <div style={{ marginBottom: 8 }}>
-            <button onClick={exportBreakdownCsv}>Export breakdown CSV</button>
+            <button onClick={exportBreakdownCsv} disabled={!data || exporting}>
+              {exporting ? "Exporting full CSV…" : "Export full breakdown CSV"}
+            </button>
           </div>
 
           <div style={{ overflowX: "auto", border: "1px solid #eee", borderRadius: 10 }}>
@@ -505,7 +494,7 @@ export default function StripePage() {
               </thead>
 
               <tbody>
-                {displayedRowsSorted.map((r, idx) => (
+                {displayedRows.map((r, idx) => (
                   <tr key={`${r.lineItemId || "group"}-${idx}`} style={{ borderBottom: "1px solid #f2f2f2" }}>
                     {showDefaultColumns ? (
                       <>

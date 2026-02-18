@@ -1,5 +1,6 @@
 import { createSign } from "node:crypto";
 import type { SyncedStripeLineItem } from "@/lib/stripeSyncStore";
+import type { ReportRow } from "@/lib/types";
 
 type ServiceAccount = {
   client_email: string;
@@ -23,11 +24,39 @@ export type StripeBigQueryFilters = {
   customerId?: string;
   customerName?: string;
   lineItemDescription?: string;
+  lineItemDescriptionPrefix?: string;
 };
 
-export type StripeBigQueryPaging = {
-  page?: number;
-  pageSize?: number;
+export type StripeBigQueryPeriodSpec = {
+  key: string;
+  label: string;
+  coverageTsMs: number[];
+};
+
+export type StripeBigQueryGroupField = "customerId" | "lineItemDescription" | "lineItemDescriptionPrefix";
+
+export type StripeBigQueryReportRequest = {
+  startTsMs: number;
+  endTsMs: number;
+  targetCurrency: string;
+  page: number;
+  pageSize: number;
+  periods: StripeBigQueryPeriodSpec[];
+  sortByPeriodKey?: string;
+  groupByFields?: StripeBigQueryGroupField[];
+  filters?: StripeBigQueryFilters;
+};
+
+type StripeBigQueryReportBase = {
+  rows: ReportRow[];
+  totalsByPeriod: { key: string; label: string; total: number }[];
+  totalRows: number;
+  sourceRowsFetched: number;
+};
+
+export type StripeBigQueryReportPageResult = StripeBigQueryReportBase & {
+  page: number;
+  totalPages: number;
 };
 
 type BigQueryNamedParameter = {
@@ -250,16 +279,7 @@ WHERE
 `;
 }
 
-function buildPaginationClause(paging?: StripeBigQueryPaging) {
-  const rawPage = Number(paging?.page || 1);
-  const rawPageSize = Number(paging?.pageSize || 200);
-  const page = Number.isFinite(rawPage) ? Math.max(1, Math.floor(rawPage)) : 1;
-  const pageSize = Number.isFinite(rawPageSize) ? Math.max(1, Math.min(1000, Math.floor(rawPageSize))) : 200;
-  const offset = (page - 1) * pageSize;
-  return { page, pageSize, offset, sql: `LIMIT ${pageSize} OFFSET ${offset}` };
-}
-
-function buildServingQueryTimestampColumns(table: string, filters?: StripeBigQueryFilters, paging?: StripeBigQueryPaging) {
+function buildServingQueryTimestampColumns(table: string, filters?: StripeBigQueryFilters) {
   const filterClauses: string[] = [];
   const filterParams: BigQueryNamedParameter[] = [];
   pushStringFilterSql(filterClauses, filterParams, "customer_id", filters?.customerId, "customer_id");
@@ -272,7 +292,6 @@ function buildServingQueryTimestampColumns(table: string, filters?: StripeBigQue
     "line_item_description",
   );
 
-  const pagingClause = buildPaginationClause(paging);
   const query = `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
@@ -292,12 +311,11 @@ WHERE
   AND period_end_ts >= TIMESTAMP_MILLIS(@range_start_ts)
   ${filterClauses.length ? `AND ${filterClauses.join(" AND ")}` : ""}
 ORDER BY period_start_ts DESC, invoice_id DESC, line_item_id DESC
-${pagingClause.sql}
 `;
   return { query, filterParams };
 }
 
-function buildServingQueryIntColumns(table: string, filters?: StripeBigQueryFilters, paging?: StripeBigQueryPaging) {
+function buildServingQueryIntColumns(table: string, filters?: StripeBigQueryFilters) {
   const filterClauses: string[] = [];
   const filterParams: BigQueryNamedParameter[] = [];
   pushStringFilterSql(filterClauses, filterParams, "customer_id", filters?.customerId, "customer_id");
@@ -310,7 +328,6 @@ function buildServingQueryIntColumns(table: string, filters?: StripeBigQueryFilt
     "line_item_description",
   );
 
-  const pagingClause = buildPaginationClause(paging);
   const query = `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
@@ -330,9 +347,99 @@ WHERE
   AND CAST(period_end_ts AS INT64) >= @range_start_ts
   ${filterClauses.length ? `AND ${filterClauses.join(" AND ")}` : ""}
 ORDER BY CAST(period_start_ts AS INT64) DESC, invoice_id DESC, line_item_id DESC
-${pagingClause.sql}
 `;
   return { query, filterParams };
+}
+
+type BigQuerySourceConfig = {
+  table: string;
+  servingTable: string;
+  servingSchemaMode: string;
+  schemaMode: string;
+  tsUnit: string;
+  tsMultiplier: number;
+};
+
+function getBigQuerySourceConfig(): BigQuerySourceConfig {
+  const table = mustEnv("BIGQUERY_STRIPE_TABLE");
+  const servingTable = (process.env.BIGQUERY_STRIPE_SERVING_TABLE || "").trim();
+  const servingSchemaMode = (process.env.BIGQUERY_SERVING_SCHEMA_MODE || "int").toLowerCase();
+  const schemaMode = servingTable ? "int_ts" : (process.env.BIGQUERY_SCHEMA_MODE || "int_ts").toLowerCase();
+  const tsUnit = servingTable
+    ? (process.env.BIGQUERY_SERVING_TS_UNIT || "milliseconds").toLowerCase()
+    : (process.env.BIGQUERY_TS_UNIT || "milliseconds").toLowerCase();
+  const tsMultiplier = schemaMode === "timestamp" ? 1 : tsUnit === "seconds" ? 1000 : 1;
+  return { table, servingTable, servingSchemaMode, schemaMode, tsUnit, tsMultiplier };
+}
+
+function toQueryTimestamp(tsMs: number, sourceConfig: BigQuerySourceConfig) {
+  if (sourceConfig.schemaMode === "timestamp") return Math.floor(tsMs);
+  if (sourceConfig.tsUnit === "seconds") return Math.floor(tsMs / 1000);
+  return Math.floor(tsMs);
+}
+
+function buildRawSourceQuery(sourceConfig: BigQuerySourceConfig) {
+  if (sourceConfig.servingTable) {
+    if (sourceConfig.servingSchemaMode === "int") {
+      return `
+SELECT
+  CAST(customer_id AS STRING) AS customer_id,
+  CAST(customer_name AS STRING) AS customer_name,
+  CAST(invoice_id AS STRING) AS invoice_id,
+  CAST(line_item_id AS STRING) AS line_item_id,
+  CAST(line_item_description AS STRING) AS line_item_description,
+  CAST(amount_minor AS INT64) AS amount_minor,
+  LOWER(CAST(currency AS STRING)) AS currency,
+  CAST(quantity AS FLOAT64) AS quantity,
+  CAST(period_start_ts AS INT64) AS period_start_ts,
+  CAST(period_end_ts AS INT64) AS period_end_ts,
+  CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts
+FROM \`${sourceConfig.servingTable}\` AS t
+WHERE
+  CAST(period_start_ts AS INT64) <= @range_end_ts
+  AND CAST(period_end_ts AS INT64) >= @range_start_ts
+`;
+    }
+
+    return `
+SELECT
+  CAST(customer_id AS STRING) AS customer_id,
+  CAST(customer_name AS STRING) AS customer_name,
+  CAST(invoice_id AS STRING) AS invoice_id,
+  CAST(line_item_id AS STRING) AS line_item_id,
+  CAST(line_item_description AS STRING) AS line_item_description,
+  CAST(amount_minor AS INT64) AS amount_minor,
+  LOWER(CAST(currency AS STRING)) AS currency,
+  CAST(quantity AS FLOAT64) AS quantity,
+  CAST(UNIX_MILLIS(period_start_ts) AS INT64) AS period_start_ts,
+  CAST(UNIX_MILLIS(period_end_ts) AS INT64) AS period_end_ts,
+  CAST(UNIX_MILLIS(COALESCE(invoice_created_ts, period_start_ts)) AS INT64) AS invoice_created_ts
+FROM \`${sourceConfig.servingTable}\` AS t
+WHERE
+  period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
+  AND period_end_ts >= TIMESTAMP_MILLIS(@range_start_ts)
+`;
+  }
+
+  return buildQuery(sourceConfig.table);
+}
+
+function normalizeDescriptionBucketSql(valueExpr: string) {
+  const normalized = `TRIM(REGEXP_REPLACE(REPLACE(REPLACE(LOWER(${valueExpr}), '_', ' '), '-', ' '), r'\\s+', ' '))`;
+  return `CASE
+    WHEN ${normalized} = '' THEN '(blank)'
+    WHEN REGEXP_CONTAINS(${normalized}, r'remaining time on .+ add on') THEN 'Remaining Time on Add-On'
+    WHEN REGEXP_CONTAINS(${normalized}, r'time on .+ add on') THEN 'Time on Add-On'
+    ELSE ${valueExpr}
+  END`;
+}
+
+function normalizeGroupByFields(fields?: StripeBigQueryGroupField[]) {
+  return Array.from(new Set((fields || []).filter(Boolean)));
+}
+
+function asInt(v: unknown) {
+  return Math.max(0, Math.floor(asNumber(v)));
 }
 
 async function fetchBigQueryResultsPage(
@@ -340,28 +447,15 @@ async function fetchBigQueryResultsPage(
   projectId: string,
   location: string,
   query: string,
-  rangeStart: number,
-  rangeEnd: number,
-  extraParams: BigQueryNamedParameter[],
+  params: BigQueryNamedParameter[],
   pageToken?: string,
 ): Promise<BigQueryQueryResponse> {
-  const queryParameters: Array<{ name: string; parameterType: { type: string }; parameterValue: { value: string } }> = [
-    {
-      name: "range_start_ts",
-      parameterType: { type: "INT64" },
-      parameterValue: { value: String(rangeStart) },
-    },
-    {
-      name: "range_end_ts",
-      parameterType: { type: "INT64" },
-      parameterValue: { value: String(rangeEnd) },
-    },
-    ...extraParams.map((p) => ({
+  const queryParameters: Array<{ name: string; parameterType: { type: string }; parameterValue: { value: string } }> =
+    params.map((p) => ({
       name: p.name,
       parameterType: { type: p.type },
       parameterValue: { value: p.value },
-    })),
-  ];
+    }));
 
   const body: Record<string, unknown> = {
     query,
@@ -411,11 +505,467 @@ async function waitForJobCompletion(
   throw new Error("BigQuery query timed out waiting for completion");
 }
 
+async function runBigQueryQueryRows(
+  accessToken: string,
+  projectId: string,
+  location: string,
+  query: string,
+  params: BigQueryNamedParameter[],
+) {
+  const rowsOut: Record<string, unknown>[] = [];
+  let pageToken: string | undefined;
+  let fields: string[] = [];
+
+  while (true) {
+    let json = await fetchBigQueryResultsPage(
+      accessToken,
+      projectId,
+      location,
+      query,
+      params,
+      pageToken,
+    );
+    if (!json.jobComplete && json.jobReference?.jobId) {
+      const jobProjectId = json.jobReference.projectId || projectId;
+      const jobLocation = json.jobReference.location || location;
+      json = await waitForJobCompletion(accessToken, jobProjectId, json.jobReference.jobId, jobLocation);
+    }
+
+    const pageFields = (json.schema?.fields || []).map((f) => f.name);
+    if (pageFields.length) fields = pageFields;
+    for (const row of json.rows || []) {
+      rowsOut.push(rowToObject(fields, row));
+    }
+
+    if (!json.pageToken) break;
+    pageToken = json.pageToken;
+  }
+
+  return rowsOut;
+}
+
+type BuiltStripeBigQueryReport = {
+  ctesSql: string;
+  sharedParams: BigQueryNamedParameter[];
+  periodAliases: string[];
+  orderBySql: string;
+  groupByFields: StripeBigQueryGroupField[];
+};
+
+function buildStripeBigQueryReportQuery(
+  request: StripeBigQueryReportRequest,
+  sourceConfig: BigQuerySourceConfig,
+  rangeStart: number,
+  rangeEnd: number,
+): BuiltStripeBigQueryReport {
+  const rawSourceQuery = buildRawSourceQuery(sourceConfig);
+  const groupByFields = normalizeGroupByFields(request.groupByFields);
+  const rawDescriptionExpr =
+    "COALESCE(NULLIF(TRIM(CAST(line_item_description AS STRING)), ''), NULLIF(TRIM(CAST(line_item_id AS STRING)), ''), '(no description)')";
+  const descriptionPrefixExpr = `COALESCE(NULLIF(TRIM(SPLIT(${rawDescriptionExpr}, ' - ')[SAFE_OFFSET(0)]), ''), '(blank)')`;
+  const descriptionBucketExpr = normalizeDescriptionBucketSql(rawDescriptionExpr);
+  const descriptionPrefixBucketExpr = normalizeDescriptionBucketSql(descriptionPrefixExpr);
+
+  const filterClauses: string[] = [];
+  const filterParams: BigQueryNamedParameter[] = [];
+  pushStringFilterSql(filterClauses, filterParams, "customer_name", request.filters?.customerName, "customer_name");
+  pushStringFilterSql(filterClauses, filterParams, "customer_id", request.filters?.customerId, "customer_id");
+  pushStringFilterSql(
+    filterClauses,
+    filterParams,
+    rawDescriptionExpr,
+    request.filters?.lineItemDescription,
+    "line_item_description",
+  );
+  pushStringFilterSql(
+    filterClauses,
+    filterParams,
+    descriptionPrefixExpr,
+    request.filters?.lineItemDescriptionPrefix,
+    "line_item_description_prefix",
+  );
+
+  const periodAliases = request.periods.map((_, idx) => `period_${idx}`);
+  const periodExpressions = request.periods.map((period, idx) => {
+    const alias = periodAliases[idx];
+    const terms = (period.coverageTsMs || []).map((ts) => {
+      const edge = Math.floor(ts);
+      return `IF(period_start_ts <= ${edge} AND period_end_ts >= ${edge}, annualized, 0.0)`;
+    });
+    const expression = terms.length ? terms.join(" + ") : "0.0";
+    return `ROUND(${expression}, 2) AS ${alias}`;
+  });
+  const periodAliasByKey = new Map(request.periods.map((period, idx) => [period.key, periodAliases[idx]]));
+  const sortAlias =
+    request.sortByPeriodKey && request.sortByPeriodKey !== "none"
+      ? periodAliasByKey.get(request.sortByPeriodKey) || ""
+      : "";
+  const orderBySql = [
+    sortAlias ? `${sortAlias} DESC` : "",
+    "deal_name ASC",
+    "deal_id ASC",
+    "line_item_id ASC",
+    "line_item_description ASC",
+    "close_date ASC",
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const groupFieldSourceColumn: Record<StripeBigQueryGroupField, string> = {
+    customerId: "group_customer_id_base",
+    lineItemDescription: "group_line_item_description_base",
+    lineItemDescriptionPrefix: "group_line_item_description_prefix_base",
+  };
+  const groupFieldOutputColumn: Record<StripeBigQueryGroupField, string> = {
+    customerId: "group_customer_id",
+    lineItemDescription: "group_line_item_description",
+    lineItemDescriptionPrefix: "group_line_item_description_prefix",
+  };
+
+  const ctes: string[] = [];
+  ctes.push(`raw_source AS (${rawSourceQuery})`);
+  ctes.push(`source AS (
+  SELECT *
+  FROM raw_source
+  WHERE 1=1
+  ${filterClauses.map((clause) => `AND ${clause}`).join("\n  ")}
+)`);
+  ctes.push(`prepared AS (
+  SELECT
+    COALESCE(CAST(customer_name AS STRING), '') AS deal_name_base,
+    COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(no customer id)') AS deal_id_base,
+    COALESCE(
+      NULLIF(TRIM(CAST(line_item_id AS STRING)), ''),
+      CONCAT(
+        'line_',
+        CAST(
+          FARM_FINGERPRINT(
+            CONCAT(
+              CAST(invoice_id AS STRING),
+              '|',
+              CAST(period_start_ts AS STRING),
+              '|',
+              CAST(period_end_ts AS STRING),
+              '|',
+              CAST(amount_minor AS STRING),
+              '|',
+              COALESCE(CAST(customer_id AS STRING), '')
+            )
+          ) AS STRING
+        )
+      )
+    ) AS line_item_id_base,
+    ${rawDescriptionExpr} AS raw_description,
+    ${descriptionBucketExpr} AS group_line_item_description_base,
+    ${descriptionPrefixBucketExpr} AS group_line_item_description_prefix_base,
+    COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(no customer id)') AS group_customer_id_base,
+    FORMAT_DATE('%Y-%m-%d', DATE(TIMESTAMP_MILLIS(invoice_created_ts))) AS close_date_base,
+    FORMAT_DATE('%Y-%m-%d', DATE(TIMESTAMP_MILLIS(period_start_ts))) AS window_start_base,
+    FORMAT_DATE('%Y-%m-%d', DATE(TIMESTAMP_MILLIS(period_end_ts))) AS window_end_base,
+    CAST(period_start_ts AS INT64) AS period_start_ts,
+    CAST(period_end_ts AS INT64) AS period_end_ts,
+    CAST(amount_minor AS FLOAT64) / 100.0 AS amount_major,
+    COALESCE(CAST(quantity AS FLOAT64), 1.0) AS quantity,
+    (CAST(amount_minor AS FLOAT64) / 100.0) * 365.2425
+      / GREATEST((CAST(period_end_ts AS FLOAT64) + 1.0 - CAST(period_start_ts AS FLOAT64)) / 86400000.0, 1.0 / 24.0) AS annualized
+  FROM source
+  WHERE
+    LOWER(COALESCE(currency, '')) = @target_currency
+    AND ABS(CAST(amount_minor AS FLOAT64) / 100.0) > 1e-9
+    AND CAST(period_end_ts AS INT64) >= CAST(period_start_ts AS INT64)
+)`);
+  ctes.push(`scored AS (
+  SELECT
+    deal_name_base,
+    deal_id_base,
+    line_item_id_base,
+    raw_description,
+    group_customer_id_base,
+    group_line_item_description_base,
+    group_line_item_description_prefix_base,
+    close_date_base,
+    window_start_base,
+    window_end_base,
+    amount_major,
+    quantity,
+    annualized,
+    ${periodExpressions.join(",\n    ")}
+  FROM prepared
+  WHERE ABS(annualized) > 1e-9
+)`);
+
+  if (groupByFields.length > 0) {
+    const groupBySelect = (["customerId", "lineItemDescription", "lineItemDescriptionPrefix"] as StripeBigQueryGroupField[]).map(
+      (field) =>
+        groupByFields.includes(field)
+          ? `${groupFieldSourceColumn[field]} AS ${groupFieldOutputColumn[field]}`
+          : `CAST(NULL AS STRING) AS ${groupFieldOutputColumn[field]}`,
+    );
+    const groupByColumns = groupByFields.map((field) => groupFieldSourceColumn[field]);
+    const periodAggregates = periodAliases.map((alias) => `ROUND(SUM(${alias}), 2) AS ${alias}`);
+
+    const dealNameExpr = `ARRAY_TO_STRING([${groupByFields
+      .map((field) => `COALESCE(${groupFieldOutputColumn[field]}, '(blank)')`)
+      .join(", ")}], ' | ')`;
+    const dealIdExpr = groupByFields.includes("customerId") ? "COALESCE(group_customer_id, '(blank)')" : "'(group)'";
+    const lineItemIdExpr = `ARRAY_TO_STRING([${groupByFields
+      .map((field) => `CONCAT('${field}:', COALESCE(${groupFieldOutputColumn[field]}, '(blank)'))`)
+      .join(", ")}], '|')`;
+    const nonCustomerGroupFields = groupByFields.filter((field) => field !== "customerId");
+    const lineItemDescriptionExpr = nonCustomerGroupFields.length
+      ? `ARRAY_TO_STRING([${nonCustomerGroupFields
+          .map((field) => `COALESCE(${groupFieldOutputColumn[field]}, '(blank)')`)
+          .join(", ")}], ' | ')`
+      : "''";
+
+    ctes.push(`grouped_rows AS (
+  SELECT
+    ${groupBySelect.join(",\n    ")},
+    ROUND(SUM(annualized), 2) AS value_usd,
+    ROUND(SUM(amount_major), 2) AS amount,
+    ROUND(SUM(amount_major), 2) AS net_price,
+    SUM(quantity) AS quantity,
+    ${periodAggregates.join(",\n    ")}
+  FROM scored
+  GROUP BY ${groupByColumns.join(", ")}
+)`);
+    ctes.push(`final_rows AS (
+  SELECT
+    ${dealNameExpr} AS deal_name,
+    ${dealIdExpr} AS deal_id,
+    ${lineItemIdExpr} AS line_item_id,
+    ${lineItemDescriptionExpr} AS line_item_description,
+    group_customer_id,
+    group_line_item_description,
+    group_line_item_description_prefix,
+    '' AS close_date,
+    '' AS window_start,
+    '' AS window_end,
+    value_usd,
+    amount,
+    net_price,
+    quantity,
+    ${periodAliases.join(", ")}
+  FROM grouped_rows
+)`);
+  } else {
+    ctes.push(`final_rows AS (
+  SELECT
+    deal_name_base AS deal_name,
+    deal_id_base AS deal_id,
+    line_item_id_base AS line_item_id,
+    raw_description AS line_item_description,
+    CAST(NULL AS STRING) AS group_customer_id,
+    CAST(NULL AS STRING) AS group_line_item_description,
+    CAST(NULL AS STRING) AS group_line_item_description_prefix,
+    close_date_base AS close_date,
+    window_start_base AS window_start,
+    window_end_base AS window_end,
+    annualized AS value_usd,
+    ROUND(amount_major, 2) AS amount,
+    ROUND(amount_major, 2) AS net_price,
+    quantity,
+    ${periodAliases.join(", ")}
+  FROM scored
+)`);
+  }
+
+  const nonZeroPredicate = periodAliases.length
+    ? periodAliases.map((alias) => `ABS(COALESCE(${alias}, 0)) > 1e-9`).join(" OR ")
+    : "TRUE";
+  ctes.push(`non_zero AS (
+  SELECT *
+  FROM final_rows
+  WHERE ${nonZeroPredicate}
+)`);
+
+  const sharedParams: BigQueryNamedParameter[] = [
+    { name: "range_start_ts", type: "INT64", value: String(rangeStart) },
+    { name: "range_end_ts", type: "INT64", value: String(rangeEnd) },
+    { name: "target_currency", type: "STRING", value: request.targetCurrency.toLowerCase() },
+    ...filterParams,
+  ];
+
+  return {
+    ctesSql: `WITH\n${ctes.join(",\n")}`,
+    sharedParams,
+    periodAliases,
+    orderBySql,
+    groupByFields,
+  };
+}
+
+function mapBigQueryReportRows(
+  rawRows: Record<string, unknown>[],
+  periods: StripeBigQueryPeriodSpec[],
+  periodAliases: string[],
+  targetCurrency: string,
+  groupByFields: StripeBigQueryGroupField[],
+) {
+  const rows: ReportRow[] = [];
+  for (const raw of rawRows) {
+    const valuesByPeriod: Record<string, number> = {};
+    for (let idx = 0; idx < periods.length; idx++) {
+      valuesByPeriod[periods[idx].key] = asNumber(raw[periodAliases[idx]]);
+    }
+
+    const groupValues =
+      groupByFields.length > 0
+        ? {
+            ...(groupByFields.includes("customerId")
+              ? { customerId: asString(raw.group_customer_id) || "(blank)" }
+              : {}),
+            ...(groupByFields.includes("lineItemDescription")
+              ? { lineItemDescription: asString(raw.group_line_item_description) || "(blank)" }
+              : {}),
+            ...(groupByFields.includes("lineItemDescriptionPrefix")
+              ? { lineItemDescriptionPrefix: asString(raw.group_line_item_description_prefix) || "(blank)" }
+              : {}),
+          }
+        : undefined;
+
+    rows.push({
+      dealName: asString(raw.deal_name),
+      dealId: asString(raw.deal_id),
+      lineItemId: asString(raw.line_item_id),
+      valueUsd: asNumber(raw.value_usd),
+      dealCurrency: targetCurrency.toUpperCase(),
+      fxRate: null,
+      fxDateUsed: "",
+      dealType: "stripe_invoice_line",
+      closeDate: asString(raw.close_date),
+      windowStart: asString(raw.window_start),
+      windowEnd: asString(raw.window_end),
+      isOpenEnded: false,
+      recurringbillingfrequency: "",
+      termMonths: null,
+      amount: asNumber(raw.amount),
+      netPrice: asNumber(raw.net_price),
+      quantity: asNumber(raw.quantity || 1),
+      valuesByPeriod,
+      deploymentType: "",
+      accountId: "",
+      territory: "",
+      country: "",
+      industry: "",
+      lineItemDescription: asString(raw.line_item_description),
+      groupValues,
+    });
+  }
+  return rows;
+}
+
+async function queryStripeReportBigQueryBase(
+  request: StripeBigQueryReportRequest,
+  mode: "page" | "all",
+): Promise<StripeBigQueryReportBase & { totalPages: number; page: number }> {
+  const sa = getServiceAccount();
+  const projectId = process.env.BIGQUERY_PROJECT_ID || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+
+  const sourceConfig = getBigQuerySourceConfig();
+  const location = process.env.BIGQUERY_LOCATION || "US";
+  const rangeStart = toQueryTimestamp(request.startTsMs, sourceConfig);
+  const rangeEnd = toQueryTimestamp(request.endTsMs, sourceConfig);
+  const built = buildStripeBigQueryReportQuery(request, sourceConfig, rangeStart, rangeEnd);
+  const accessToken = await getAccessToken(sa);
+
+  const summaryQuery = `${built.ctesSql}
+SELECT
+  (SELECT COUNT(*) FROM prepared) AS source_rows_fetched,
+  COUNT(*) AS total_rows
+  ${built.periodAliases.length ? `,\n  ${built.periodAliases.map((alias) => `ROUND(COALESCE(SUM(${alias}), 0), 2) AS total_${alias}`).join(",\n  ")}` : ""}
+FROM non_zero`;
+  const summaryRows = await runBigQueryQueryRows(accessToken, projectId, location, summaryQuery, built.sharedParams);
+  const summary = summaryRows[0] || {};
+  const sourceRowsFetched = asInt(summary.source_rows_fetched);
+  const totalRows = asInt(summary.total_rows);
+  const totalsByPeriod = request.periods.map((period, idx) => {
+    const alias = built.periodAliases[idx];
+    return {
+      key: period.key,
+      label: period.label,
+      total: asNumber(summary[`total_${alias}`]),
+    };
+  });
+
+  const totalPages = totalRows > 0 ? Math.ceil(totalRows / Math.max(1, request.pageSize)) : 1;
+  const page = Math.min(Math.max(1, Math.floor(request.page || 1)), totalPages);
+  const offsetRows = (page - 1) * Math.max(1, request.pageSize);
+
+  let pageRowsRaw: Record<string, unknown>[] = [];
+  if (totalRows > 0) {
+    const pageQuery =
+      mode === "all"
+        ? `${built.ctesSql}
+SELECT *
+FROM non_zero
+ORDER BY ${built.orderBySql}`
+        : `${built.ctesSql}
+SELECT *
+FROM non_zero
+ORDER BY ${built.orderBySql}
+LIMIT @limit_rows
+OFFSET @offset_rows`;
+    const pageParams =
+      mode === "all"
+        ? built.sharedParams
+        : [
+            ...built.sharedParams,
+            { name: "limit_rows", type: "INT64" as const, value: String(Math.max(1, Math.floor(request.pageSize))) },
+            { name: "offset_rows", type: "INT64" as const, value: String(offsetRows) },
+          ];
+    pageRowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, pageQuery, pageParams);
+  }
+
+  const rows = mapBigQueryReportRows(
+    pageRowsRaw,
+    request.periods,
+    built.periodAliases,
+    request.targetCurrency,
+    built.groupByFields,
+  );
+
+  return {
+    rows,
+    totalsByPeriod,
+    totalRows,
+    sourceRowsFetched,
+    totalPages,
+    page,
+  };
+}
+
+export async function queryStripeReportPageFromBigQuery(
+  request: StripeBigQueryReportRequest,
+): Promise<StripeBigQueryReportPageResult> {
+  const result = await queryStripeReportBigQueryBase(request, "page");
+  return {
+    rows: result.rows,
+    totalsByPeriod: result.totalsByPeriod,
+    totalRows: result.totalRows,
+    sourceRowsFetched: result.sourceRowsFetched,
+    totalPages: result.totalPages,
+    page: result.page,
+  };
+}
+
+export async function queryStripeReportAllRowsFromBigQuery(
+  request: StripeBigQueryReportRequest,
+): Promise<StripeBigQueryReportBase> {
+  const result = await queryStripeReportBigQueryBase(request, "all");
+  return {
+    rows: result.rows,
+    totalsByPeriod: result.totalsByPeriod,
+    totalRows: result.totalRows,
+    sourceRowsFetched: result.sourceRowsFetched,
+  };
+}
+
 export async function loadStripeLineItemsFromBigQuery(
   startTsMs: number,
   endTsMs: number,
   filters?: StripeBigQueryFilters,
-  paging?: StripeBigQueryPaging,
 ): Promise<SyncedStripeLineItem[]> {
   const sa = getServiceAccount();
   const projectId = process.env.BIGQUERY_PROJECT_ID || sa.project_id;
@@ -447,11 +997,16 @@ export async function loadStripeLineItemsFromBigQuery(
   const accessToken = await getAccessToken(sa);
   const built = servingTable
     ? servingSchemaMode === "int"
-      ? buildServingQueryIntColumns(servingTable, filters, paging)
-      : buildServingQueryTimestampColumns(servingTable, filters, paging)
+      ? buildServingQueryIntColumns(servingTable, filters)
+      : buildServingQueryTimestampColumns(servingTable, filters)
     : { query: buildQuery(table), filterParams: [] as BigQueryNamedParameter[] };
   const query = built.query;
   const extraParams = built.filterParams;
+  const queryParams: BigQueryNamedParameter[] = [
+    { name: "range_start_ts", type: "INT64", value: String(rangeStart) },
+    { name: "range_end_ts", type: "INT64", value: String(rangeEnd) },
+    ...extraParams,
+  ];
 
   const out: SyncedStripeLineItem[] = [];
   const seen = new Set<string>();
@@ -460,14 +1015,12 @@ export async function loadStripeLineItemsFromBigQuery(
   while (true) {
     let json = await fetchBigQueryResultsPage(
       accessToken,
-      projectId,
-      location,
-      query,
-      rangeStart,
-      rangeEnd,
-      extraParams,
-      pageToken,
-    );
+        projectId,
+        location,
+        query,
+        queryParams,
+        pageToken,
+      );
     if (!json.jobComplete && json.jobReference?.jobId) {
       const jobProjectId = json.jobReference.projectId || projectId;
       const jobLocation = json.jobReference.location || location;

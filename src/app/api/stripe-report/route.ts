@@ -16,7 +16,6 @@ type StripeApiRequest = {
   groupByFields?: StripeGroupField[];
   sortByPeriodKey?: string;
   page?: number;
-  pageSize?: number;
 };
 
 function validateAndRun(body: Partial<StripeApiRequest>) {
@@ -33,7 +32,6 @@ function validateAndRun(body: Partial<StripeApiRequest>) {
       : [],
     sortByPeriodKey: String(body.sortByPeriodKey || "none"),
     page: Number(body.page || 1),
-    pageSize: Number(body.pageSize || 200),
   };
   return generateStripeReport(payload);
 }
@@ -72,7 +70,6 @@ export async function GET(req: Request) {
         .map((s) => s.trim())
         .filter(Boolean) as StripeGroupField[],
       page: Number(searchParams.get("page") || 1),
-      pageSize: Number(searchParams.get("pageSize") || 200),
     };
     const report = await validateAndRun(body);
     return NextResponse.json(report);

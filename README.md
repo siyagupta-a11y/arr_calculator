@@ -6,6 +6,7 @@ This is a Next.js ARR dashboard.
 - `/stripe` Stripe ARR report
 - `POST /api/report` HubSpot report API
 - `GET|POST /api/stripe-report` Stripe report API
+- `GET /api/stripe-report/export` Stripe full CSV export API (all filtered/grouped rows)
 - `GET|POST /api/stripe-sync` Stripe sync API
 - `GET /api/stripe-sync/status` Stripe sync health/status API
 
