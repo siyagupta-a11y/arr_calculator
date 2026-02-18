@@ -85,6 +85,13 @@ function recurringFrequencyLabel(interval?: string | null, intervalCount?: numbe
 function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusive: Date) {
   const startDayUtc = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
   const endDayUtc = Date.UTC(endExclusive.getUTCFullYear(), endExclusive.getUTCMonth(), endExclusive.getUTCDate());
+
+  const oneMonthAfterStartDayUtc = new Date(startDayUtc);
+  oneMonthAfterStartDayUtc.setUTCMonth(oneMonthAfterStartDayUtc.getUTCMonth() + 1);
+  if (oneMonthAfterStartDayUtc.getTime() === endDayUtc) {
+    return amountMajor * 12;
+  }
+
   const durationDays = Math.max((endDayUtc - startDayUtc) / (24 * 60 * 60 * 1000), 1);
   return (amountMajor / durationDays) * 365;
 }
