@@ -668,12 +668,17 @@ function buildStripeBigQueryReportQuery(
             CAST(
               (
                 UNIX_MILLIS(
-                  TIMESTAMP_ADD(
-                    TIMESTAMP_TRUNC(TIMESTAMP_MILLIS(period_start_ts), MONTH, 'UTC'),
-                    INTERVAL 1 MONTH
+                  TIMESTAMP(
+                    DATE_ADD(
+                      DATE_TRUNC(DATE(TIMESTAMP_MILLIS(period_start_ts), 'UTC'), MONTH),
+                      INTERVAL 1 MONTH
+                    ),
+                    'UTC'
                   )
                 )
-                - UNIX_MILLIS(TIMESTAMP_TRUNC(TIMESTAMP_MILLIS(period_start_ts), MONTH, 'UTC'))
+                - UNIX_MILLIS(
+                  TIMESTAMP(DATE_TRUNC(DATE(TIMESTAMP_MILLIS(period_start_ts), 'UTC'), MONTH), 'UTC')
+                )
               ) AS FLOAT64
             )
             / GREATEST(
