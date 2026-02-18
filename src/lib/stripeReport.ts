@@ -82,28 +82,11 @@ function recurringFrequencyLabel(interval?: string | null, intervalCount?: numbe
   return `every_${count}_${i}`;
 }
 
-function wholeCalendarMonthsBetweenUtc(start: Date, endExclusive: Date) {
-  const months =
-    (endExclusive.getUTCFullYear() - start.getUTCFullYear()) * 12 +
-    (endExclusive.getUTCMonth() - start.getUTCMonth());
-  if (months < 1) return 0;
-
-  const shifted = new Date(start.getTime());
-  shifted.setUTCMonth(shifted.getUTCMonth() + months);
-  return shifted.getTime() === endExclusive.getTime() ? months : 0;
-}
-
 function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusive: Date) {
-  const durationMs = endExclusive.getTime() - start.getTime();
-  if (durationMs <= 0) return 0;
-
-  const wholeMonths = wholeCalendarMonthsBetweenUtc(start, endExclusive);
-  if (wholeMonths >= 1) {
-    return amountMajor * (12 / wholeMonths);
-  }
-
-  const durationDays = durationMs / (24 * 60 * 60 * 1000);
-  return (amountMajor * 365.2425) / Math.max(durationDays, 1);
+  const startDayUtc = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
+  const endDayUtc = Date.UTC(endExclusive.getUTCFullYear(), endExclusive.getUTCMonth(), endExclusive.getUTCDate());
+  const durationDays = Math.max((endDayUtc - startDayUtc) / (24 * 60 * 60 * 1000), 1);
+  return (amountMajor / durationDays) * 365;
 }
 
 function getPriceIdFromDescription(description: string) {

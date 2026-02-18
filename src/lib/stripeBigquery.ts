@@ -654,19 +654,13 @@ function buildStripeBigQueryReportQuery(
     CAST(period_end_ts AS INT64) AS period_end_ts,
     CAST(amount_minor AS FLOAT64) AS amount_major,
     COALESCE(CAST(quantity AS FLOAT64), 1.0) AS quantity,
-    CASE
-      WHEN DATE_DIFF(DATE(TIMESTAMP_MILLIS(period_end_ts)), DATE(TIMESTAMP_MILLIS(period_start_ts)), MONTH) >= 1
-        AND DATE_ADD(
-          DATE(TIMESTAMP_MILLIS(period_start_ts)),
-          INTERVAL DATE_DIFF(DATE(TIMESTAMP_MILLIS(period_end_ts)), DATE(TIMESTAMP_MILLIS(period_start_ts)), MONTH) MONTH
-        ) = DATE(TIMESTAMP_MILLIS(period_end_ts))
-      THEN
-        (CAST(amount_minor AS FLOAT64)) * 12.0
-        / DATE_DIFF(DATE(TIMESTAMP_MILLIS(period_end_ts)), DATE(TIMESTAMP_MILLIS(period_start_ts)), MONTH)
-      ELSE
-        (CAST(amount_minor AS FLOAT64)) * 365.2425
-        / GREATEST((CAST(period_end_ts AS FLOAT64) - CAST(period_start_ts AS FLOAT64)) / 86400000.0, 1.0)
-    END AS annualized
+    (CAST(amount_minor AS FLOAT64) * 365.0)
+      / GREATEST(
+        CAST(
+          DATE_DIFF(DATE(TIMESTAMP_MILLIS(period_end_ts)), DATE(TIMESTAMP_MILLIS(period_start_ts)), DAY) AS FLOAT64
+        ),
+        1.0
+      ) AS annualized
   FROM source
   WHERE
     LOWER(COALESCE(currency, '')) = @target_currency
