@@ -82,11 +82,28 @@ function recurringFrequencyLabel(interval?: string | null, intervalCount?: numbe
   return `every_${count}_${i}`;
 }
 
+function wholeCalendarMonthsBetweenUtc(start: Date, endExclusive: Date) {
+  const months =
+    (endExclusive.getUTCFullYear() - start.getUTCFullYear()) * 12 +
+    (endExclusive.getUTCMonth() - start.getUTCMonth());
+  if (months < 1) return 0;
+
+  const shifted = new Date(start.getTime());
+  shifted.setUTCMonth(shifted.getUTCMonth() + months);
+  return shifted.getTime() === endExclusive.getTime() ? months : 0;
+}
+
 function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusive: Date) {
   const durationMs = endExclusive.getTime() - start.getTime();
   if (durationMs <= 0) return 0;
+
+  const wholeMonths = wholeCalendarMonthsBetweenUtc(start, endExclusive);
+  if (wholeMonths >= 1) {
+    return amountMajor * (12 / wholeMonths);
+  }
+
   const durationDays = durationMs / (24 * 60 * 60 * 1000);
-  return (amountMajor * 365.2425) / Math.max(durationDays, 1 / 24);
+  return (amountMajor * 365.2425) / Math.max(durationDays, 1);
 }
 
 function getPriceIdFromDescription(description: string) {
@@ -323,8 +340,7 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     const amountMajor = Number(item.amountMinor || 0) / 100;
 
     const windowStart = new Date(item.periodStartTs);
-    const windowEndInclusive = new Date(item.periodEndTs);
-    const windowEndExclusive = new Date(item.periodEndTs + 1);
+    const windowEndExclusive = new Date(item.periodEndTs);
     if (isNaN(windowStart.getTime()) || isNaN(windowEndExclusive.getTime())) continue;
     if (windowEndExclusive <= windowStart) continue;
 
@@ -332,7 +348,7 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
 
     const valuesMonthly: Record<string, number> = {};
     for (const mp of monthlyPeriods) {
-      const overlapsMonth = windowStart <= mp.end && windowEndInclusive > mp.start;
+      const overlapsMonth = windowStart <= mp.end && windowEndExclusive > mp.start;
       valuesMonthly[mp.key] = overlapsMonth ? annualized : 0;
     }
 
@@ -347,7 +363,7 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
       }
     } else {
       for (const dp of dailyPeriods) {
-        const overlapsDay = windowStart <= dp.dayEnd && windowEndInclusive > dp.dayStart;
+        const overlapsDay = windowStart <= dp.dayEnd && windowEndExclusive > dp.dayStart;
         valuesByPeriod[dp.key] = overlapsDay ? annualized : 0;
       }
     }
@@ -368,7 +384,7 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
       closeDate: closeDate ? toIsoDate(closeDate) : "",
 
       windowStart: toIsoDate(windowStart),
-      windowEnd: toIsoDate(windowEndInclusive),
+      windowEnd: toIsoDate(new Date(item.periodEndTs)),
       isOpenEnded: false,
 
       recurringbillingfrequency: recurringFrequencyLabel(),

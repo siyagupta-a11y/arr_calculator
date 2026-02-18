@@ -176,7 +176,7 @@ function mapBigQueryRowToSyncedItem(raw: Record<string, unknown>, tsMultiplier: 
     customerName: customerId,
     lineItemId,
     lineItemDescription,
-    amountMinor: Math.floor(asNumber(raw.amount_minor || raw.amountMinor)),
+    amountMinor: asNumber(raw.amount_minor || raw.amountMinor),
     currency: asString(raw.currency).toLowerCase(),
     quantity: asNumber(raw.quantity || 1),
     periodStartTs: periodStart,
@@ -244,7 +244,7 @@ SELECT
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(id AS STRING) AS line_item_id,
   CAST(description AS STRING) AS line_item_description,
-  CAST(COALESCE(amount, 0) AS INT64) AS amount_minor,
+  CAST(COALESCE(amount, 0) AS FLOAT64) AS amount_minor,
   LOWER(CAST(currency AS STRING)) AS currency,
   CAST(COALESCE(quantity, 1) AS FLOAT64) AS quantity,
   CAST(UNIX_MILLIS(period_start) AS INT64) AS period_start_ts,
@@ -263,7 +263,7 @@ SELECT
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
-  CAST(amount_minor AS INT64) AS amount_minor,
+  CAST(amount_minor AS FLOAT64) AS amount_minor,
   LOWER(CAST(currency AS STRING)) AS currency,
   CAST(quantity AS FLOAT64) AS quantity,
   CAST(period_start_ts AS INT64) AS period_start_ts,
@@ -294,7 +294,7 @@ SELECT
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
-  CAST(amount_minor AS INT64) AS amount_minor,
+  CAST(amount_minor AS FLOAT64) AS amount_minor,
   LOWER(CAST(currency AS STRING)) AS currency,
   CAST(quantity AS FLOAT64) AS quantity,
   CAST(UNIX_MILLIS(period_start_ts) AS INT64) AS period_start_ts,
@@ -328,7 +328,7 @@ SELECT
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
-  CAST(amount_minor AS INT64) AS amount_minor,
+  CAST(amount_minor AS FLOAT64) AS amount_minor,
   LOWER(CAST(currency AS STRING)) AS currency,
   CAST(quantity AS FLOAT64) AS quantity,
   CAST(period_start_ts AS INT64) AS period_start_ts,
@@ -380,7 +380,7 @@ SELECT
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
-  CAST(amount_minor AS INT64) AS amount_minor,
+  CAST(amount_minor AS FLOAT64) AS amount_minor,
   LOWER(CAST(currency AS STRING)) AS currency,
   CAST(quantity AS FLOAT64) AS quantity,
   CAST(period_start_ts AS INT64) AS period_start_ts,
@@ -399,7 +399,7 @@ SELECT
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
-  CAST(amount_minor AS INT64) AS amount_minor,
+  CAST(amount_minor AS FLOAT64) AS amount_minor,
   LOWER(CAST(currency AS STRING)) AS currency,
   CAST(quantity AS FLOAT64) AS quantity,
   CAST(UNIX_MILLIS(period_start_ts) AS INT64) AS period_start_ts,
@@ -652,14 +652,25 @@ function buildStripeBigQueryReportQuery(
     FORMAT_DATE('%Y-%m-%d', DATE(TIMESTAMP_MILLIS(period_end_ts))) AS window_end_base,
     CAST(period_start_ts AS INT64) AS period_start_ts,
     CAST(period_end_ts AS INT64) AS period_end_ts,
-    CAST(amount_minor AS FLOAT64) / 100.0 AS amount_major,
+    CAST(amount_minor AS FLOAT64) AS amount_major,
     COALESCE(CAST(quantity AS FLOAT64), 1.0) AS quantity,
-    (CAST(amount_minor AS FLOAT64) / 100.0) * 365.2425
-      / GREATEST((CAST(period_end_ts AS FLOAT64) + 1.0 - CAST(period_start_ts AS FLOAT64)) / 86400000.0, 1.0 / 24.0) AS annualized
+    CASE
+      WHEN DATE_DIFF(DATE(TIMESTAMP_MILLIS(period_end_ts)), DATE(TIMESTAMP_MILLIS(period_start_ts)), MONTH) >= 1
+        AND DATE_ADD(
+          DATE(TIMESTAMP_MILLIS(period_start_ts)),
+          INTERVAL DATE_DIFF(DATE(TIMESTAMP_MILLIS(period_end_ts)), DATE(TIMESTAMP_MILLIS(period_start_ts)), MONTH) MONTH
+        ) = DATE(TIMESTAMP_MILLIS(period_end_ts))
+      THEN
+        (CAST(amount_minor AS FLOAT64)) * 12.0
+        / DATE_DIFF(DATE(TIMESTAMP_MILLIS(period_end_ts)), DATE(TIMESTAMP_MILLIS(period_start_ts)), MONTH)
+      ELSE
+        (CAST(amount_minor AS FLOAT64)) * 365.2425
+        / GREATEST((CAST(period_end_ts AS FLOAT64) - CAST(period_start_ts AS FLOAT64)) / 86400000.0, 1.0)
+    END AS annualized
   FROM source
   WHERE
     LOWER(COALESCE(currency, '')) = @target_currency
-    AND CAST(period_end_ts AS INT64) >= CAST(period_start_ts AS INT64)
+    AND CAST(period_end_ts AS INT64) > CAST(period_start_ts AS INT64)
 )`);
   ctes.push(`scored AS (
   SELECT
