@@ -252,8 +252,8 @@ SELECT
   CAST(UNIX_MILLIS(period_start) AS INT64) AS invoice_created_ts
 FROM \`${table}\` AS t
 WHERE
-  period_start >= TIMESTAMP_MILLIS(@range_start_ts)
-  AND period_start <= TIMESTAMP_MILLIS(@range_end_ts)
+  period_start <= TIMESTAMP_MILLIS(@range_end_ts)
+  AND period_end >= TIMESTAMP_MILLIS(@range_start_ts)
 `;
   }
 
@@ -271,8 +271,8 @@ SELECT
   CAST(invoice_created_ts AS INT64) AS invoice_created_ts
 FROM \`${table}\` AS t
 WHERE
-  CAST(period_start_ts AS INT64) >= @range_start_ts
-  AND CAST(period_start_ts AS INT64) <= @range_end_ts
+  CAST(period_start_ts AS INT64) <= @range_end_ts
+  AND CAST(period_end_ts AS INT64) >= @range_start_ts
 `;
 }
 
@@ -302,8 +302,8 @@ SELECT
   CAST(UNIX_MILLIS(COALESCE(invoice_created_ts, period_start_ts)) AS INT64) AS invoice_created_ts
 FROM \`${table}\` AS t
 WHERE
-  period_start_ts >= TIMESTAMP_MILLIS(@range_start_ts)
-  AND period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
+  period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
+  AND period_end_ts >= TIMESTAMP_MILLIS(@range_start_ts)
   ${filterClauses.length ? `AND ${filterClauses.join(" AND ")}` : ""}
 ORDER BY period_start_ts DESC, invoice_id DESC, line_item_id DESC
 `;
@@ -336,8 +336,8 @@ SELECT
   CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts
 FROM \`${table}\` AS t
 WHERE
-  CAST(period_start_ts AS INT64) >= @range_start_ts
-  AND CAST(period_start_ts AS INT64) <= @range_end_ts
+  CAST(period_start_ts AS INT64) <= @range_end_ts
+  AND CAST(period_end_ts AS INT64) >= @range_start_ts
   ${filterClauses.length ? `AND ${filterClauses.join(" AND ")}` : ""}
 ORDER BY CAST(period_start_ts AS INT64) DESC, invoice_id DESC, line_item_id DESC
 `;
@@ -388,8 +388,8 @@ SELECT
   CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts
 FROM \`${sourceConfig.servingTable}\` AS t
 WHERE
-  CAST(period_start_ts AS INT64) >= @range_start_ts
-  AND CAST(period_start_ts AS INT64) <= @range_end_ts
+  CAST(period_start_ts AS INT64) <= @range_end_ts
+  AND CAST(period_end_ts AS INT64) >= @range_start_ts
 `;
     }
 
@@ -407,8 +407,8 @@ SELECT
   CAST(UNIX_MILLIS(COALESCE(invoice_created_ts, period_start_ts)) AS INT64) AS invoice_created_ts
 FROM \`${sourceConfig.servingTable}\` AS t
 WHERE
-  period_start_ts >= TIMESTAMP_MILLIS(@range_start_ts)
-  AND period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
+  period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
+  AND period_end_ts >= TIMESTAMP_MILLIS(@range_start_ts)
 `;
   }
 
@@ -580,7 +580,7 @@ function buildStripeBigQueryReportQuery(
     const alias = periodAliases[idx];
     const startTs = Math.floor(period.startTsMs);
     const endTs = Math.floor(period.endTsMs);
-    const expression = `IF(period_start_ts >= ${startTs} AND period_start_ts <= ${endTs}, annualized, 0.0)`;
+    const expression = `IF(period_start_ts <= ${endTs} AND period_end_ts >= ${startTs}, annualized, 0.0)`;
     return `ROUND(${expression}, 2) AS ${alias}`;
   });
   const periodAliasByKey = new Map(request.periods.map((period, idx) => [period.key, periodAliases[idx]]));
