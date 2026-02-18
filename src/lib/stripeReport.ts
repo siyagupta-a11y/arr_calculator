@@ -74,6 +74,18 @@ function toIsoDate(d: Date) {
   return d.toISOString().slice(0, 10);
 }
 
+function monthBucketStartUtcTs(d: Date) {
+  return Date.UTC(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0);
+}
+
+function monthBucketEndExclusiveUtcTs(d: Date) {
+  return Date.UTC(d.getFullYear(), d.getMonth() + 1, 1, 0, 0, 0, 0);
+}
+
+function monthBucketEndInclusiveTs(monthStart: Date) {
+  return monthBucketEndExclusiveUtcTs(monthStart) - 1;
+}
+
 function recurringFrequencyLabel(interval?: string | null, intervalCount?: number | null) {
   const i = String(interval || "").trim().toLowerCase();
   const count = Number(intervalCount || 1);
@@ -269,10 +281,10 @@ function buildBigQueryPeriodSpecs(body: StripeReportRequest, context: StripeRepo
       .map((member) => monthByKey.get(member))
       .filter((value): value is NonNullable<typeof value> => !!value);
     const startTsMs = memberMonths.length
-      ? Math.min(...memberMonths.map((month) => month.start.getTime()))
+      ? Math.min(...memberMonths.map((month) => monthBucketStartUtcTs(month.start)))
       : context.rangeStart.getTime();
     const endTsMs = memberMonths.length
-      ? Math.max(...memberMonths.map((month) => month.end.getTime()))
+      ? Math.max(...memberMonths.map((month) => monthBucketEndInclusiveTs(month.start)))
       : context.rangeEnd.getTime();
     return {
       key: period.key,
@@ -343,7 +355,9 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
 
     const valuesMonthly: Record<string, number> = {};
     for (const mp of monthlyPeriods) {
-      const overlapsMonth = windowStart <= mp.end && windowEndExclusive > mp.start;
+      const monthStartUtc = new Date(monthBucketStartUtcTs(mp.start));
+      const monthEndExclusiveUtc = new Date(monthBucketEndExclusiveUtcTs(mp.start));
+      const overlapsMonth = windowStart < monthEndExclusiveUtc && windowEndExclusive > monthStartUtc;
       valuesMonthly[mp.key] = overlapsMonth ? annualized : 0;
     }
 
