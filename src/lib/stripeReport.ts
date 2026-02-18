@@ -152,10 +152,6 @@ function groupValueForRow(row: ReportRow, field: StripeGroupField) {
   return normalizeDescriptionGroupBucket(lineItemDescriptionPrefix(row.lineItemDescription || ""));
 }
 
-function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
-  return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > NON_ZERO_EPSILON);
-}
-
 function normalizeGroupByFields(fields?: StripeGroupField[]) {
   return Array.from(new Set((fields || []).filter(Boolean)));
 }
@@ -249,20 +245,28 @@ function buildBigQueryPeriodSpecs(body: StripeReportRequest, context: StripeRepo
     return context.dailyPeriods.map((period) => ({
       key: period.key,
       label: period.label,
-      coverageTsMs: [period.dayEnd.getTime()],
+      startTsMs: period.dayStart.getTime(),
+      endTsMs: period.dayEnd.getTime(),
     }));
   }
 
-  const monthEndByKey = new Map(context.monthlyPeriods.map((month) => [month.key, month.end.getTime()]));
+  const monthByKey = new Map(context.monthlyPeriods.map((month) => [month.key, month]));
   return context.aggregated.map((period) => {
     const members = period.members && period.members.length ? period.members : [period.key];
-    const coverageTsMs = members
-      .map((member) => monthEndByKey.get(member))
-      .filter((value): value is number => Number.isFinite(value));
+    const memberMonths = members
+      .map((member) => monthByKey.get(member))
+      .filter((value): value is NonNullable<typeof value> => !!value);
+    const startTsMs = memberMonths.length
+      ? Math.min(...memberMonths.map((month) => month.start.getTime()))
+      : context.rangeStart.getTime();
+    const endTsMs = memberMonths.length
+      ? Math.max(...memberMonths.map((month) => month.end.getTime()))
+      : context.rangeEnd.getTime();
     return {
       key: period.key,
       label: period.label,
-      coverageTsMs,
+      startTsMs,
+      endTsMs,
     };
   });
 }
@@ -296,6 +300,9 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
       if (!isRateLimited) throw e;
     }
   }
+  const rangeStartMs = rangeStart.getTime();
+  const rangeEndMs = rangeEnd.getTime();
+  syncedItems = syncedItems.filter((item) => item.periodStartTs >= rangeStartMs && item.periodStartTs <= rangeEndMs);
   const sourceRowsFetched = syncedItems.length;
 
   const priceIds = Array.from(
@@ -314,7 +321,6 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     if (lineCurrency && lineCurrency !== targetCurrency) continue;
     const closeDate = item.invoiceCreatedTs > 0 ? new Date(item.invoiceCreatedTs) : null;
     const amountMajor = Number(item.amountMinor || 0) / 100;
-    if (Math.abs(amountMajor) <= NON_ZERO_EPSILON) continue;
 
     const windowStart = new Date(item.periodStartTs);
     const windowEndInclusive = new Date(item.periodEndTs);
@@ -323,13 +329,11 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     if (windowEndExclusive <= windowStart) continue;
 
     const annualized = annualizedAmountFromPeriod(amountMajor, windowStart, windowEndExclusive);
-    if (Math.abs(annualized) <= NON_ZERO_EPSILON) continue;
 
     const valuesMonthly: Record<string, number> = {};
     for (const mp of monthlyPeriods) {
-      const monthEnd = mp.end;
-      const coversMonthEnd = windowStart <= monthEnd && windowEndInclusive >= monthEnd;
-      valuesMonthly[mp.key] = coversMonthEnd ? annualized : 0;
+      const startsInMonth = windowStart >= mp.start && windowStart <= mp.end;
+      valuesMonthly[mp.key] = startsInMonth ? annualized : 0;
     }
 
     const valuesByPeriod: Record<string, number> = {};
@@ -343,8 +347,8 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
       }
     } else {
       for (const dp of dailyPeriods) {
-        const coversDay = windowStart <= dp.dayEnd && windowEndInclusive >= dp.dayEnd;
-        valuesByPeriod[dp.key] = coversDay ? annualized : 0;
+        const startsInDay = windowStart >= dp.dayStart && windowStart <= dp.dayEnd;
+        valuesByPeriod[dp.key] = startsInDay ? annualized : 0;
       }
     }
 
@@ -428,17 +432,16 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
   }
 
   const outputRowsSorted = stableSortRows(outputRows, body.sortByPeriodKey);
-  const outputRowsNonZero = outputRowsSorted.filter((row) => hasAnyNonZeroValue(row.valuesByPeriod || {}));
 
   const totalsByPeriod = outputPeriods.map((p) => {
-    const total = round2(outputRowsNonZero.reduce((acc, r) => acc + (r.valuesByPeriod[p.key] || 0), 0));
+    const total = round2(outputRowsSorted.reduce((acc, r) => acc + (r.valuesByPeriod[p.key] || 0), 0));
     return { ...p, total };
   });
 
   const response: StripeReportBaseResponse = {
     periods: outputPeriods,
     totalsByPeriod,
-    rows: outputRowsNonZero,
+    rows: outputRowsSorted,
     sourceRowsFetched,
   };
   REPORT_CACHE.set(cacheKey, { expiresAt: Date.now() + REPORT_CACHE_TTL_MS, value: response });

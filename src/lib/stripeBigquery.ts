@@ -29,7 +29,8 @@ export type StripeBigQueryFilters = {
 export type StripeBigQueryPeriodSpec = {
   key: string;
   label: string;
-  coverageTsMs: number[];
+  startTsMs: number;
+  endTsMs: number;
 };
 
 export type StripeBigQueryGroupField = "customerId" | "lineItemDescription" | "lineItemDescriptionPrefix";
@@ -251,8 +252,8 @@ SELECT
   CAST(UNIX_MILLIS(period_start) AS INT64) AS invoice_created_ts
 FROM \`${table}\` AS t
 WHERE
-  period_start <= TIMESTAMP_MILLIS(@range_end_ts)
-  AND period_end >= TIMESTAMP_MILLIS(@range_start_ts)
+  period_start >= TIMESTAMP_MILLIS(@range_start_ts)
+  AND period_start <= TIMESTAMP_MILLIS(@range_end_ts)
 `;
   }
 
@@ -270,8 +271,8 @@ SELECT
   CAST(invoice_created_ts AS INT64) AS invoice_created_ts
 FROM \`${table}\` AS t
 WHERE
-  CAST(period_start_ts AS INT64) <= @range_end_ts
-  AND CAST(period_end_ts AS INT64) >= @range_start_ts
+  CAST(period_start_ts AS INT64) >= @range_start_ts
+  AND CAST(period_start_ts AS INT64) <= @range_end_ts
 `;
 }
 
@@ -301,8 +302,8 @@ SELECT
   CAST(UNIX_MILLIS(COALESCE(invoice_created_ts, period_start_ts)) AS INT64) AS invoice_created_ts
 FROM \`${table}\` AS t
 WHERE
-  period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
-  AND period_end_ts >= TIMESTAMP_MILLIS(@range_start_ts)
+  period_start_ts >= TIMESTAMP_MILLIS(@range_start_ts)
+  AND period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
   ${filterClauses.length ? `AND ${filterClauses.join(" AND ")}` : ""}
 ORDER BY period_start_ts DESC, invoice_id DESC, line_item_id DESC
 `;
@@ -335,8 +336,8 @@ SELECT
   CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts
 FROM \`${table}\` AS t
 WHERE
-  CAST(period_start_ts AS INT64) <= @range_end_ts
-  AND CAST(period_end_ts AS INT64) >= @range_start_ts
+  CAST(period_start_ts AS INT64) >= @range_start_ts
+  AND CAST(period_start_ts AS INT64) <= @range_end_ts
   ${filterClauses.length ? `AND ${filterClauses.join(" AND ")}` : ""}
 ORDER BY CAST(period_start_ts AS INT64) DESC, invoice_id DESC, line_item_id DESC
 `;
@@ -387,8 +388,8 @@ SELECT
   CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts
 FROM \`${sourceConfig.servingTable}\` AS t
 WHERE
-  CAST(period_start_ts AS INT64) <= @range_end_ts
-  AND CAST(period_end_ts AS INT64) >= @range_start_ts
+  CAST(period_start_ts AS INT64) >= @range_start_ts
+  AND CAST(period_start_ts AS INT64) <= @range_end_ts
 `;
     }
 
@@ -406,8 +407,8 @@ SELECT
   CAST(UNIX_MILLIS(COALESCE(invoice_created_ts, period_start_ts)) AS INT64) AS invoice_created_ts
 FROM \`${sourceConfig.servingTable}\` AS t
 WHERE
-  period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
-  AND period_end_ts >= TIMESTAMP_MILLIS(@range_start_ts)
+  period_start_ts >= TIMESTAMP_MILLIS(@range_start_ts)
+  AND period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
 `;
   }
 
@@ -577,11 +578,9 @@ function buildStripeBigQueryReportQuery(
   const periodAliases = request.periods.map((_, idx) => `period_${idx}`);
   const periodExpressions = request.periods.map((period, idx) => {
     const alias = periodAliases[idx];
-    const terms = (period.coverageTsMs || []).map((ts) => {
-      const edge = Math.floor(ts);
-      return `IF(period_start_ts <= ${edge} AND period_end_ts >= ${edge}, annualized, 0.0)`;
-    });
-    const expression = terms.length ? terms.join(" + ") : "0.0";
+    const startTs = Math.floor(period.startTsMs);
+    const endTs = Math.floor(period.endTsMs);
+    const expression = `IF(period_start_ts >= ${startTs} AND period_start_ts <= ${endTs}, annualized, 0.0)`;
     return `ROUND(${expression}, 2) AS ${alias}`;
   });
   const periodAliasByKey = new Map(request.periods.map((period, idx) => [period.key, periodAliases[idx]]));
@@ -660,7 +659,6 @@ function buildStripeBigQueryReportQuery(
   FROM source
   WHERE
     LOWER(COALESCE(currency, '')) = @target_currency
-    AND ABS(CAST(amount_minor AS FLOAT64) / 100.0) > 1e-9
     AND CAST(period_end_ts AS INT64) >= CAST(period_start_ts AS INT64)
 )`);
   ctes.push(`scored AS (
@@ -680,7 +678,6 @@ function buildStripeBigQueryReportQuery(
     annualized,
     ${periodExpressions.join(",\n    ")}
   FROM prepared
-  WHERE ABS(annualized) > 1e-9
 )`);
 
   if (groupByFields.length > 0) {
@@ -759,13 +756,9 @@ function buildStripeBigQueryReportQuery(
 )`);
   }
 
-  const nonZeroPredicate = periodAliases.length
-    ? periodAliases.map((alias) => `ABS(COALESCE(${alias}, 0)) > 1e-9`).join(" OR ")
-    : "TRUE";
   ctes.push(`non_zero AS (
   SELECT *
   FROM final_rows
-  WHERE ${nonZeroPredicate}
 )`);
 
   const sharedParams: BigQueryNamedParameter[] = [
