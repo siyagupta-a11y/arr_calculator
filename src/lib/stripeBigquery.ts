@@ -22,7 +22,6 @@ type BigQueryQueryResponse = {
 
 export type StripeBigQueryFilters = {
   customerId?: string;
-  customerName?: string;
   lineItemDescription?: string;
   lineItemDescriptionPrefix?: string;
 };
@@ -162,7 +161,6 @@ function mapBigQueryRowToSyncedItem(raw: Record<string, unknown>, tsMultiplier: 
   const invoiceId = asString(raw.invoice_id || raw.invoiceId);
   const lineItemId = asString(raw.line_item_id || raw.lineItemId);
   const customerId = asString(raw.customer_id || raw.customerId);
-  const customerName = asString(raw.customer_name || raw.customerName);
   const lineItemDescription = asString(raw.line_item_description || raw.lineItemDescription);
 
   const periodStart = Math.floor(asNumber(raw.period_start_ts || raw.periodStartTs) * tsMultiplier);
@@ -174,7 +172,7 @@ function mapBigQueryRowToSyncedItem(raw: Record<string, unknown>, tsMultiplier: 
     invoiceId,
     invoiceCreatedTs: invoiceCreated,
     customerId,
-    customerName,
+    customerName: customerId,
     lineItemId,
     lineItemDescription,
     amountMinor: Math.floor(asNumber(raw.amount_minor || raw.amountMinor)),
@@ -262,7 +260,7 @@ WHERE
   return `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
-  CAST(customer_name AS STRING) AS customer_name,
+  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
@@ -283,7 +281,6 @@ function buildServingQueryTimestampColumns(table: string, filters?: StripeBigQue
   const filterClauses: string[] = [];
   const filterParams: BigQueryNamedParameter[] = [];
   pushStringFilterSql(filterClauses, filterParams, "customer_id", filters?.customerId, "customer_id");
-  pushStringFilterSql(filterClauses, filterParams, "customer_name", filters?.customerName, "customer_name");
   pushStringFilterSql(
     filterClauses,
     filterParams,
@@ -295,7 +292,7 @@ function buildServingQueryTimestampColumns(table: string, filters?: StripeBigQue
   const query = `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
-  CAST(customer_name AS STRING) AS customer_name,
+  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
@@ -319,7 +316,6 @@ function buildServingQueryIntColumns(table: string, filters?: StripeBigQueryFilt
   const filterClauses: string[] = [];
   const filterParams: BigQueryNamedParameter[] = [];
   pushStringFilterSql(filterClauses, filterParams, "customer_id", filters?.customerId, "customer_id");
-  pushStringFilterSql(filterClauses, filterParams, "customer_name", filters?.customerName, "customer_name");
   pushStringFilterSql(
     filterClauses,
     filterParams,
@@ -331,7 +327,7 @@ function buildServingQueryIntColumns(table: string, filters?: StripeBigQueryFilt
   const query = `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
-  CAST(customer_name AS STRING) AS customer_name,
+  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
@@ -384,7 +380,7 @@ function buildRawSourceQuery(sourceConfig: BigQuerySourceConfig) {
       return `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
-  CAST(customer_name AS STRING) AS customer_name,
+  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
@@ -404,7 +400,7 @@ WHERE
     return `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
-  CAST(customer_name AS STRING) AS customer_name,
+  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
@@ -568,7 +564,6 @@ function buildStripeBigQueryReportQuery(
 
   const filterClauses: string[] = [];
   const filterParams: BigQueryNamedParameter[] = [];
-  pushStringFilterSql(filterClauses, filterParams, "customer_name", request.filters?.customerName, "customer_name");
   pushStringFilterSql(filterClauses, filterParams, "customer_id", request.filters?.customerId, "customer_id");
   pushStringFilterSql(
     filterClauses,
@@ -632,7 +627,7 @@ function buildStripeBigQueryReportQuery(
 )`);
   ctes.push(`prepared AS (
   SELECT
-    COALESCE(CAST(customer_name AS STRING), '') AS deal_name_base,
+    COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(no customer id)') AS deal_name_base,
     COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(no customer id)') AS deal_id_base,
     COALESCE(
       NULLIF(TRIM(CAST(line_item_id AS STRING)), ''),

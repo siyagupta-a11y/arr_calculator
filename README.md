@@ -75,7 +75,7 @@ To keep Blob as source (default), set:
 
 Expected BigQuery columns (or aliases in a view):
 
-- `customer_id`, `customer_name`, `invoice_id`
+- `customer_id`, `invoice_id`
 - `line_item_id`, `line_item_description`
 - `amount_minor`, `currency`, `quantity`
 - `period_start_ts`, `period_end_ts`, `invoice_created_ts`

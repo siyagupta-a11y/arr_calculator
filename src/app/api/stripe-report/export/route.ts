@@ -9,7 +9,6 @@ function buildRequestFromSearchParams(searchParams: URLSearchParams): StripeRepo
     startDate: searchParams.get("startDate") || "",
     endDate: searchParams.get("endDate") || "",
     grain: (searchParams.get("grain") as Grain) || "monthly",
-    filterCustomerName: searchParams.get("filterCustomerName") || "",
     filterCustomerId: searchParams.get("filterCustomerId") || "",
     filterLineItemDescription: searchParams.get("filterLineItemDescription") || "",
     filterLineItemDescriptionPrefix: searchParams.get("filterLineItemDescriptionPrefix") || "",

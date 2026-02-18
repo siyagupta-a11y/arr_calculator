@@ -9,7 +9,6 @@ type StripeApiRequest = {
   startDate: string;
   endDate: string;
   grain: Grain;
-  filterCustomerName?: string;
   filterCustomerId?: string;
   filterLineItemDescription?: string;
   filterLineItemDescriptionPrefix?: string;
@@ -23,7 +22,6 @@ function validateAndRun(body: Partial<StripeApiRequest>) {
     startDate: String(body.startDate || ""),
     endDate: String(body.endDate || ""),
     grain: (body.grain as Grain) || "monthly",
-    filterCustomerName: String(body.filterCustomerName || ""),
     filterCustomerId: String(body.filterCustomerId || ""),
     filterLineItemDescription: String(body.filterLineItemDescription || ""),
     filterLineItemDescriptionPrefix: String(body.filterLineItemDescriptionPrefix || ""),
@@ -60,7 +58,6 @@ export async function GET(req: Request) {
       startDate: searchParams.get("startDate") || "",
       endDate: searchParams.get("endDate") || "",
       grain: (searchParams.get("grain") as Grain) || "monthly",
-      filterCustomerName: searchParams.get("filterCustomerName") || "",
       filterCustomerId: searchParams.get("filterCustomerId") || "",
       filterLineItemDescription: searchParams.get("filterLineItemDescription") || "",
       filterLineItemDescriptionPrefix: searchParams.get("filterLineItemDescriptionPrefix") || "",

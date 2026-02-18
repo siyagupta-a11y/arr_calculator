@@ -14,7 +14,6 @@ const GROUP_BY_OPTIONS: Array<{ key: GroupField; label: string }> = [
 ];
 
 type UiRow = {
-  customerName: string;
   customerId: string;
   lineItemId: string;
   lineItemDescription: string;
@@ -49,7 +48,6 @@ export default function StripePage() {
   const [groupByFields, setGroupByFields] = useState<GroupField[]>([]);
   const [groupByToAdd, setGroupByToAdd] = useState<GroupField | "none">("none");
 
-  const [filterCustomerName, setFilterCustomerName] = useState("");
   const [filterCustomerId, setFilterCustomerId] = useState("");
   const [filterLineItemDescription, setFilterLineItemDescription] = useState("");
   const [filterLineItemDescriptionPrefix, setFilterLineItemDescriptionPrefix] = useState("");
@@ -76,7 +74,6 @@ export default function StripePage() {
           startDate,
           endDate,
           grain,
-          filterCustomerName,
           filterCustomerId,
           filterLineItemDescription,
           filterLineItemDescriptionPrefix,
@@ -90,7 +87,6 @@ export default function StripePage() {
           startDate,
           endDate,
           grain,
-          filterCustomerName,
           filterCustomerId,
           filterLineItemDescription,
           filterLineItemDescriptionPrefix,
@@ -134,7 +130,6 @@ export default function StripePage() {
     startDate,
     endDate,
     grain,
-    filterCustomerName,
     filterCustomerId,
     filterLineItemDescription,
     filterLineItemDescriptionPrefix,
@@ -147,7 +142,6 @@ export default function StripePage() {
     if (!data) return [];
     return (data.rows || [])
       .map((r) => ({
-        customerName: r.dealName || "",
         customerId: r.dealId || "",
         lineItemId: r.lineItemId || "",
         lineItemDescription: r.lineItemDescription || "",
@@ -167,7 +161,6 @@ export default function StripePage() {
     startDate,
     endDate,
     grain,
-    filterCustomerName,
     filterCustomerId,
     filterLineItemDescription,
     filterLineItemDescriptionPrefix,
@@ -190,7 +183,7 @@ export default function StripePage() {
   const groupByLabel = groupByFields.map((f) => GROUP_BY_OPTIONS.find((o) => o.key === f)?.label || f).join(" + ");
   const breakdownHeaders = [
     ...(showDefaultColumns
-      ? ["Customer", "Customer ID", "Line Item ID", "Line Item Description"]
+      ? ["Customer ID", "Line Item ID", "Line Item Description"]
       : groupByFields.map((f) => GROUP_BY_OPTIONS.find((o) => o.key === f)?.label || f)),
     ...(data?.periods.map((p) => p.label) || []),
   ];
@@ -209,7 +202,6 @@ export default function StripePage() {
         startDate,
         endDate,
         grain,
-        filterCustomerName,
         filterCustomerId,
         filterLineItemDescription,
         filterLineItemDescriptionPrefix,
@@ -363,17 +355,6 @@ export default function StripePage() {
 
             <div style={{ marginTop: 12, display: "flex", gap: 12, flexWrap: "wrap" }}>
               <div>
-                <label>Filter Customer</label>
-                <br />
-                <input
-                  type="text"
-                  value={filterCustomerName}
-                  onChange={(e) => setFilterCustomerName(e.target.value)}
-                  placeholder="foo, bar, NOT baz"
-                />
-              </div>
-
-              <div>
                 <label>Filter Customer ID</label>
                 <br />
                 <input
@@ -498,7 +479,6 @@ export default function StripePage() {
                   <tr key={`${r.lineItemId || "group"}-${idx}`} style={{ borderBottom: "1px solid #f2f2f2" }}>
                     {showDefaultColumns ? (
                       <>
-                        <td style={{ padding: 8, whiteSpace: "nowrap" }}>{r.customerName || "(blank)"}</td>
                         <td style={{ padding: 8, whiteSpace: "nowrap" }}>{r.customerId || "(blank)"}</td>
                         <td style={{ padding: 8, whiteSpace: "nowrap" }}>{r.lineItemId || "(blank)"}</td>
                         <td style={{ padding: 8, whiteSpace: "nowrap" }}>{r.lineItemDescription || "(blank)"}</td>

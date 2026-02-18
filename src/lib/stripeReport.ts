@@ -20,7 +20,6 @@ export type StripeReportRequest = {
   startDate: string;
   endDate: string;
   grain: Grain;
-  filterCustomerName?: string;
   filterCustomerId?: string;
   filterLineItemDescription?: string;
   filterLineItemDescriptionPrefix?: string;
@@ -189,7 +188,6 @@ function buildBaseCacheKey(body: StripeReportRequest, source: string) {
     body.endDate,
     body.grain,
     source,
-    body.filterCustomerName || "",
     body.filterCustomerId || "",
     body.filterLineItemDescription || "",
     body.filterLineItemDescriptionPrefix || "",
@@ -386,14 +384,13 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
   }
 
   const filteredRows = rows.filter((r) => {
-    const customerNameOk = matchesTextFilter(r.dealName || "", body.filterCustomerName || "");
     const customerIdOk = matchesTextFilter(r.dealId || "", body.filterCustomerId || "");
     const lineItemDescriptionOk = matchesTextFilter(r.lineItemDescription || "", body.filterLineItemDescription || "");
     const lineItemDescriptionPrefixOk = matchesTextFilter(
       lineItemDescriptionPrefix(r.lineItemDescription || ""),
       body.filterLineItemDescriptionPrefix || "",
     );
-    return customerNameOk && customerIdOk && lineItemDescriptionOk && lineItemDescriptionPrefixOk;
+    return customerIdOk && lineItemDescriptionOk && lineItemDescriptionPrefixOk;
   });
 
   let outputRows = filteredRows;
@@ -465,7 +462,6 @@ function buildBigQueryRequest(
     groupByFields: context.groupByFields,
     filters: {
       customerId: body.filterCustomerId || "",
-      customerName: body.filterCustomerName || "",
       lineItemDescription: body.filterLineItemDescription || "",
       lineItemDescriptionPrefix: body.filterLineItemDescriptionPrefix || "",
     },
@@ -556,7 +552,7 @@ export async function generateStripeReportCsv(body: StripeReportRequest) {
 
   const headers = [
     ...(showDefaultColumns
-      ? ["Customer", "Customer ID", "Line Item ID", "Line Item Description"]
+      ? ["Customer ID", "Line Item ID", "Line Item Description"]
       : groupByFields.map((field) => GROUP_FIELD_LABELS[field] || field)),
     ...base.periods.map((p) => p.label),
   ];
@@ -564,7 +560,7 @@ export async function generateStripeReportCsv(body: StripeReportRequest) {
   const lines: string[] = [headers.map(escapeCsvCell).join(",")];
   for (const row of base.rows) {
     const leadingColumns = showDefaultColumns
-      ? [row.dealName || "", row.dealId || "", row.lineItemId || "", row.lineItemDescription || ""]
+      ? [row.dealId || "", row.lineItemId || "", row.lineItemDescription || ""]
       : groupByFields.map((field) => row.groupValues?.[field] || "(blank)");
     const valueColumns = base.periods.map((p) => round2(row.valuesByPeriod[p.key] || 0));
     lines.push([...leadingColumns, ...valueColumns].map(escapeCsvCell).join(","));
