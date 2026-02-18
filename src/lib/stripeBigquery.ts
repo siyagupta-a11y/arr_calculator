@@ -663,10 +663,23 @@ function buildStripeBigQueryReportQuery(
       ) = period_end_ts
       THEN CAST(amount_minor AS FLOAT64) * 12.0
       ELSE
-        (CAST(amount_minor AS FLOAT64) * 31536000000.0)
-          / GREATEST(
-            CAST(period_end_ts - period_start_ts AS FLOAT64),
-            1.0
+        (CAST(amount_minor AS FLOAT64) * 12.0)
+          * (
+            CAST(
+              (
+                UNIX_MILLIS(
+                  TIMESTAMP_ADD(
+                    TIMESTAMP_TRUNC(TIMESTAMP_MILLIS(period_start_ts), MONTH, 'UTC'),
+                    INTERVAL 1 MONTH
+                  )
+                )
+                - UNIX_MILLIS(TIMESTAMP_TRUNC(TIMESTAMP_MILLIS(period_start_ts), MONTH, 'UTC'))
+              ) AS FLOAT64
+            )
+            / GREATEST(
+              CAST(period_end_ts - period_start_ts AS FLOAT64),
+              1.0
+            )
           )
     END AS annualized
   FROM source

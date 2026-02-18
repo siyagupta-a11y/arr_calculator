@@ -94,8 +94,11 @@ function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusi
     return amountMajor * 12;
   }
 
-  const msPerYear = 365 * 24 * 60 * 60 * 1000;
-  return (amountMajor * msPerYear) / Math.max(durationMs, 1);
+  const monthStartMs = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1, 0, 0, 0, 0);
+  const nextMonthStartMs = Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1, 0, 0, 0, 0);
+  const monthMs = Math.max(nextMonthStartMs - monthStartMs, 1);
+  const ratio = monthMs / Math.max(durationMs, 1);
+  return amountMajor * ratio * 12;
 }
 
 function getPriceIdFromDescription(description: string) {
