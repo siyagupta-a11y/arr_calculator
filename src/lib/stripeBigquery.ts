@@ -240,7 +240,6 @@ function buildQuery(table: string) {
     return `
 SELECT
   COALESCE(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id'), '') AS customer_id,
-  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(id AS STRING) AS line_item_id,
   CAST(description AS STRING) AS line_item_description,
@@ -260,7 +259,6 @@ WHERE
   return `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
-  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
@@ -292,7 +290,6 @@ function buildServingQueryTimestampColumns(table: string, filters?: StripeBigQue
   const query = `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
-  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
@@ -327,7 +324,6 @@ function buildServingQueryIntColumns(table: string, filters?: StripeBigQueryFilt
   const query = `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
-  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
@@ -380,7 +376,6 @@ function buildRawSourceQuery(sourceConfig: BigQuerySourceConfig) {
       return `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
-  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
@@ -400,7 +395,6 @@ WHERE
     return `
 SELECT
   CAST(customer_id AS STRING) AS customer_id,
-  '' AS customer_name,
   CAST(invoice_id AS STRING) AS invoice_id,
   CAST(line_item_id AS STRING) AS line_item_id,
   CAST(line_item_description AS STRING) AS line_item_description,
