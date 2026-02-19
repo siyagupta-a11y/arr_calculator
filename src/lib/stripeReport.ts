@@ -45,7 +45,7 @@ export const STRIPE_REPORT_PAGE_SIZE = 1000;
 const REPORT_CACHE_TTL_MS = Number(process.env.STRIPE_REPORT_CACHE_TTL_MS || "300000");
 const REPORT_CACHE = new Map<string, CacheEntry>();
 const NON_ZERO_EPSILON = 1e-9;
-const ALWAYS_MULTIPLY_BY_TWELVE_DESCRIPTIONS = new Set(["web search and crawl", "ai tokens"]);
+const ALWAYS_MULTIPLY_BY_TWELVE_DESCRIPTIONS = new Set(["web search and crawl", "ai tokens", "refund"]);
 const GROUP_FIELD_LABELS: Record<StripeGroupField, string> = {
   customerId: "Customer ID",
   lineItemDescription: "Line Item Description",
