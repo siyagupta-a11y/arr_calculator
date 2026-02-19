@@ -692,7 +692,13 @@ function buildStripeBigQueryReportQuery(
   FROM source
   WHERE
     LOWER(COALESCE(currency, '')) = @target_currency
-    AND CAST(period_end_ts AS INT64) > CAST(period_start_ts AS INT64)
+    AND (
+      CAST(period_end_ts AS INT64) > CAST(period_start_ts AS INT64)
+      OR (
+        CAST(period_end_ts AS INT64) = CAST(period_start_ts AS INT64)
+        AND LOWER(TRIM(${rawDescriptionExpr})) = 'refund'
+      )
+    )
 )`);
   ctes.push(`scored AS (
   SELECT

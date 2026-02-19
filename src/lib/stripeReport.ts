@@ -99,15 +99,19 @@ function shouldAlwaysMultiplyByTwelve(description: string) {
   return ALWAYS_MULTIPLY_BY_TWELVE_DESCRIPTIONS.has(String(description || "").trim().toLowerCase());
 }
 
+function isRefundDescription(description: string) {
+  return String(description || "").trim().toLowerCase() === "refund";
+}
+
 function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusive: Date, description: string) {
+  if (shouldAlwaysMultiplyByTwelve(description)) {
+    return amountMajor * 12;
+  }
+
   const startMs = start.getTime();
   const endMs = endExclusive.getTime();
   const durationMs = endMs - startMs;
   if (durationMs <= 0) return 0;
-
-  if (shouldAlwaysMultiplyByTwelve(description)) {
-    return amountMajor * 12;
-  }
 
   const oneMonthAfterStartUtc = new Date(startMs);
   oneMonthAfterStartUtc.setUTCMonth(oneMonthAfterStartUtc.getUTCMonth() + 1);
@@ -354,11 +358,13 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     if (lineCurrency && lineCurrency !== targetCurrency) continue;
     const closeDate = item.invoiceCreatedTs > 0 ? new Date(item.invoiceCreatedTs) : null;
     const amountMajor = Number(item.amountMinor || 0) / 100;
+    const isRefund = isRefundDescription(item.lineItemDescription || "");
 
     const windowStart = new Date(item.periodStartTs);
     const windowEndExclusive = new Date(item.periodEndTs);
     if (isNaN(windowStart.getTime()) || isNaN(windowEndExclusive.getTime())) continue;
-    if (windowEndExclusive <= windowStart) continue;
+    if (windowEndExclusive < windowStart) continue;
+    if (windowEndExclusive.getTime() === windowStart.getTime() && !isRefund) continue;
 
     const annualized = annualizedAmountFromPeriod(
       amountMajor,
