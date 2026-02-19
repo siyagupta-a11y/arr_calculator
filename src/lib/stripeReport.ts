@@ -351,7 +351,7 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
   );
   const priceDisplayNamesById = priceIds.length ? await getPriceDisplayNamesById(priceIds) : {};
   const invoiceAnchorAmountById = new Map<string, number>();
-  const invoiceAnchorMultiplierById = new Map<string, number>();
+  const invoiceAnchorItemById = new Map<string, (typeof syncedItems)[number]>();
 
   for (const item of syncedItems) {
     const invoiceId = String(item.invoiceId || "").trim();
@@ -373,10 +373,7 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     if (currentMaxAmount != null && amountMajor <= currentMaxAmount) continue;
 
     invoiceAnchorAmountById.set(invoiceId, amountMajor);
-    invoiceAnchorMultiplierById.set(
-      invoiceId,
-      annualizationMultiplierFromPeriod(windowStart, windowEndExclusive, item.lineItemDescription || ""),
-    );
+    invoiceAnchorItemById.set(invoiceId, item);
   }
 
   const rows: ReportRow[] = [];
@@ -395,8 +392,25 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     if (windowEndExclusive.getTime() === windowStart.getTime() && !isRefund) continue;
 
     const ownMultiplier = annualizationMultiplierFromPeriod(windowStart, windowEndExclusive, item.lineItemDescription || "");
-    const anchorMultiplier = invoiceAnchorMultiplierById.get(String(item.invoiceId || "").trim());
-    const appliedMultiplier = isRefund ? (anchorMultiplier ?? ownMultiplier) : ownMultiplier;
+    let appliedMultiplier = ownMultiplier;
+    if (isRefund) {
+      const anchor = invoiceAnchorItemById.get(String(item.invoiceId || "").trim());
+      if (anchor) {
+        const anchorStart = new Date(anchor.periodStartTs);
+        const anchorEndExclusive = new Date(anchor.periodEndTs);
+        if (isNaN(anchorStart.getTime()) || isNaN(anchorEndExclusive.getTime()) || anchorEndExclusive < anchorStart) {
+          appliedMultiplier = 0;
+        } else {
+          appliedMultiplier = annualizationMultiplierFromPeriod(
+            anchorStart,
+            anchorEndExclusive,
+            anchor.lineItemDescription || "",
+          );
+        }
+      } else {
+        appliedMultiplier = 0;
+      }
+    }
     const annualized = amountMajor * appliedMultiplier;
 
     const valuesMonthly: Record<string, number> = {};

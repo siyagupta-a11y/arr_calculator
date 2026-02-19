@@ -712,7 +712,7 @@ function buildStripeBigQueryReportQuery(
     p.*,
     CASE
       WHEN LOWER(TRIM(p.raw_description)) = 'refund'
-      THEN p.amount_major * COALESCE(a.invoice_anchor_multiplier, p.annualization_multiplier_base)
+      THEN p.amount_major * IFNULL(a.invoice_anchor_multiplier, 0.0)
       ELSE p.amount_major * p.annualization_multiplier_base
     END AS annualized
   FROM prepared AS p
