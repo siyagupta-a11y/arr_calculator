@@ -45,7 +45,7 @@ export const STRIPE_REPORT_PAGE_SIZE = 1000;
 const REPORT_CACHE_TTL_MS = Number(process.env.STRIPE_REPORT_CACHE_TTL_MS || "300000");
 const REPORT_CACHE = new Map<string, CacheEntry>();
 const NON_ZERO_EPSILON = 1e-9;
-const ALWAYS_MULTIPLY_BY_TWELVE_DESCRIPTIONS = new Set(["web search and crawl", "ai tokens", "refund", "discount"]);
+const ALWAYS_MULTIPLY_BY_TWELVE_DESCRIPTIONS = new Set(["web search and crawl", "ai tokens", "discount"]);
 const GROUP_FIELD_LABELS: Record<StripeGroupField, string> = {
   customerId: "Customer ID",
   lineItemDescription: "Line Item Description",
@@ -103,9 +103,9 @@ function isRefundDescription(description: string) {
   return String(description || "").trim().toLowerCase() === "refund";
 }
 
-function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusive: Date, description: string) {
+function annualizationMultiplierFromPeriod(start: Date, endExclusive: Date, description: string) {
   if (shouldAlwaysMultiplyByTwelve(description)) {
-    return amountMajor * 12;
+    return 12;
   }
 
   const startMs = start.getTime();
@@ -116,14 +116,14 @@ function annualizedAmountFromPeriod(amountMajor: number, start: Date, endExclusi
   const oneMonthAfterStartUtc = new Date(startMs);
   oneMonthAfterStartUtc.setUTCMonth(oneMonthAfterStartUtc.getUTCMonth() + 1);
   if (oneMonthAfterStartUtc.getTime() === endMs) {
-    return amountMajor * 12;
+    return 12;
   }
 
   const monthStartMs = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1, 0, 0, 0, 0);
   const nextMonthStartMs = Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1, 0, 0, 0, 0);
   const monthMs = Math.max(nextMonthStartMs - monthStartMs, 1);
   const ratio = monthMs / Math.max(durationMs, 1);
-  return amountMajor * ratio * 12;
+  return ratio * 12;
 }
 
 function getPriceIdFromDescription(description: string) {
@@ -350,6 +350,34 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     ),
   );
   const priceDisplayNamesById = priceIds.length ? await getPriceDisplayNamesById(priceIds) : {};
+  const invoiceAnchorAmountById = new Map<string, number>();
+  const invoiceAnchorMultiplierById = new Map<string, number>();
+
+  for (const item of syncedItems) {
+    const invoiceId = String(item.invoiceId || "").trim();
+    if (!invoiceId) continue;
+
+    const lineCurrency = (item.currency || targetCurrency).trim().toLowerCase();
+    if (lineCurrency && lineCurrency !== targetCurrency) continue;
+
+    const windowStart = new Date(item.periodStartTs);
+    const windowEndExclusive = new Date(item.periodEndTs);
+    if (isNaN(windowStart.getTime()) || isNaN(windowEndExclusive.getTime())) continue;
+    if (windowEndExclusive < windowStart) continue;
+    if (windowEndExclusive.getTime() === windowStart.getTime() && !isRefundDescription(item.lineItemDescription || "")) {
+      continue;
+    }
+
+    const amountMajor = Number(item.amountMinor || 0) / 100;
+    const currentMaxAmount = invoiceAnchorAmountById.get(invoiceId);
+    if (currentMaxAmount != null && amountMajor <= currentMaxAmount) continue;
+
+    invoiceAnchorAmountById.set(invoiceId, amountMajor);
+    invoiceAnchorMultiplierById.set(
+      invoiceId,
+      annualizationMultiplierFromPeriod(windowStart, windowEndExclusive, item.lineItemDescription || ""),
+    );
+  }
 
   const rows: ReportRow[] = [];
 
@@ -366,12 +394,10 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     if (windowEndExclusive < windowStart) continue;
     if (windowEndExclusive.getTime() === windowStart.getTime() && !isRefund) continue;
 
-    const annualized = annualizedAmountFromPeriod(
-      amountMajor,
-      windowStart,
-      windowEndExclusive,
-      item.lineItemDescription || "",
-    );
+    const ownMultiplier = annualizationMultiplierFromPeriod(windowStart, windowEndExclusive, item.lineItemDescription || "");
+    const anchorMultiplier = invoiceAnchorMultiplierById.get(String(item.invoiceId || "").trim());
+    const appliedMultiplier = isRefund ? (anchorMultiplier ?? ownMultiplier) : ownMultiplier;
+    const annualized = amountMajor * appliedMultiplier;
 
     const valuesMonthly: Record<string, number> = {};
     for (const mp of monthlyPeriods) {

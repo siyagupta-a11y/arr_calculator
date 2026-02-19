@@ -622,6 +622,7 @@ function buildStripeBigQueryReportQuery(
   SELECT
     COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(no customer id)') AS deal_name_base,
     COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(no customer id)') AS deal_id_base,
+    CAST(invoice_id AS STRING) AS invoice_id,
     COALESCE(
       NULLIF(TRIM(CAST(line_item_id AS STRING)), ''),
       CONCAT(
@@ -655,40 +656,41 @@ function buildStripeBigQueryReportQuery(
     CAST(amount_minor AS FLOAT64) AS amount_major,
     COALESCE(CAST(quantity AS FLOAT64), 1.0) AS quantity,
     CASE
-      WHEN LOWER(TRIM(${rawDescriptionExpr})) IN ('web search and crawl', 'ai tokens', 'refund', 'discount')
-      THEN CAST(amount_minor AS FLOAT64) * 12.0
+      WHEN LOWER(TRIM(${rawDescriptionExpr})) IN ('web search and crawl', 'ai tokens', 'discount')
+      THEN 12.0
+      WHEN CAST(period_end_ts AS INT64) <= CAST(period_start_ts AS INT64)
+      THEN 0.0
       WHEN UNIX_MILLIS(
         TIMESTAMP(
           DATETIME_ADD(DATETIME(TIMESTAMP_MILLIS(period_start_ts), 'UTC'), INTERVAL 1 MONTH),
           'UTC'
         )
       ) = period_end_ts
-      THEN CAST(amount_minor AS FLOAT64) * 12.0
+      THEN 12.0
       ELSE
-        (CAST(amount_minor AS FLOAT64) * 12.0)
-          * (
-            CAST(
-              (
-                UNIX_MILLIS(
-                  TIMESTAMP(
-                    DATE_ADD(
-                      DATE_TRUNC(DATE(TIMESTAMP_MILLIS(period_start_ts), 'UTC'), MONTH),
-                      INTERVAL 1 MONTH
-                    ),
-                    'UTC'
-                  )
+        12.0 * (
+          CAST(
+            (
+              UNIX_MILLIS(
+                TIMESTAMP(
+                  DATE_ADD(
+                    DATE_TRUNC(DATE(TIMESTAMP_MILLIS(period_start_ts), 'UTC'), MONTH),
+                    INTERVAL 1 MONTH
+                  ),
+                  'UTC'
                 )
-                - UNIX_MILLIS(
-                  TIMESTAMP(DATE_TRUNC(DATE(TIMESTAMP_MILLIS(period_start_ts), 'UTC'), MONTH), 'UTC')
-                )
-              ) AS FLOAT64
-            )
-            / GREATEST(
-              CAST(period_end_ts - period_start_ts AS FLOAT64),
-              1.0
-            )
+              )
+              - UNIX_MILLIS(
+                TIMESTAMP(DATE_TRUNC(DATE(TIMESTAMP_MILLIS(period_start_ts), 'UTC'), MONTH), 'UTC')
+              )
+            ) AS FLOAT64
           )
-    END AS annualized
+          / GREATEST(
+            CAST(period_end_ts - period_start_ts AS FLOAT64),
+            1.0
+          )
+        )
+    END AS annualization_multiplier_base
   FROM source
   WHERE
     LOWER(COALESCE(currency, '')) = @target_currency
@@ -699,6 +701,25 @@ function buildStripeBigQueryReportQuery(
         AND LOWER(TRIM(${rawDescriptionExpr})) = 'refund'
       )
     )
+)`);
+  ctes.push(`invoice_anchor AS (
+  SELECT
+    invoice_id,
+    ARRAY_AGG(annualization_multiplier_base ORDER BY amount_major DESC, line_item_id_base DESC LIMIT 1)[OFFSET(0)] AS invoice_anchor_multiplier
+  FROM prepared
+  GROUP BY invoice_id
+)`);
+  ctes.push(`prepared_with_annualized AS (
+  SELECT
+    p.*,
+    CASE
+      WHEN LOWER(TRIM(p.raw_description)) = 'refund'
+      THEN p.amount_major * COALESCE(a.invoice_anchor_multiplier, p.annualization_multiplier_base)
+      ELSE p.amount_major * p.annualization_multiplier_base
+    END AS annualized
+  FROM prepared AS p
+  LEFT JOIN invoice_anchor AS a
+    ON a.invoice_id = p.invoice_id
 )`);
   ctes.push(`scored AS (
   SELECT
@@ -716,7 +737,7 @@ function buildStripeBigQueryReportQuery(
     quantity,
     annualized,
     ${periodExpressions.join(",\n    ")}
-  FROM prepared
+  FROM prepared_with_annualized
 )`);
 
   if (groupByFields.length > 0) {
