@@ -658,8 +658,6 @@ function buildStripeBigQueryReportQuery(
     CASE
       WHEN LOWER(TRIM(${rawDescriptionExpr})) IN ('web search and crawl', 'ai tokens', 'discount')
       THEN 12.0
-      WHEN CAST(period_end_ts AS INT64) <= CAST(period_start_ts AS INT64)
-      THEN 0.0
       WHEN UNIX_MILLIS(
         TIMESTAMP(
           DATETIME_ADD(DATETIME(TIMESTAMP_MILLIS(period_start_ts), 'UTC'), INTERVAL 1 MONTH),
