@@ -105,14 +105,20 @@ function isInvoiceAnchorDescription(description: string) {
 }
 
 function annualizationMultiplierFromPeriod(start: Date, endExclusive: Date, description: string) {
-  if (shouldAlwaysMultiplyByTwelve(description)) {
-    return 12;
-  }
-
   const startMs = start.getTime();
   const endMs = endExclusive.getTime();
   const durationMs = endMs - startMs;
   if (durationMs <= 0) return 0;
+
+  const oneYearAfterStartUtc = new Date(startMs);
+  oneYearAfterStartUtc.setUTCFullYear(oneYearAfterStartUtc.getUTCFullYear() + 1);
+  if (oneYearAfterStartUtc.getTime() === endMs) {
+    return 1;
+  }
+
+  if (shouldAlwaysMultiplyByTwelve(description)) {
+    return 12;
+  }
 
   const oneMonthAfterStartUtc = new Date(startMs);
   oneMonthAfterStartUtc.setUTCMonth(oneMonthAfterStartUtc.getUTCMonth() + 1);
