@@ -45,7 +45,7 @@ export const STRIPE_REPORT_PAGE_SIZE = 1000;
 const REPORT_CACHE_TTL_MS = Number(process.env.STRIPE_REPORT_CACHE_TTL_MS || "300000");
 const REPORT_CACHE = new Map<string, CacheEntry>();
 const NON_ZERO_EPSILON = 1e-9;
-const ALWAYS_MULTIPLY_BY_TWELVE_DESCRIPTIONS = new Set(["web search and crawl", "ai tokens", "discount"]);
+const ALWAYS_MULTIPLY_BY_TWELVE_DESCRIPTIONS = new Set(["web search and crawl", "ai tokens"]);
 const GROUP_FIELD_LABELS: Record<StripeGroupField, string> = {
   customerId: "Customer ID",
   lineItemDescription: "Line Item Description",
@@ -99,8 +99,9 @@ function shouldAlwaysMultiplyByTwelve(description: string) {
   return ALWAYS_MULTIPLY_BY_TWELVE_DESCRIPTIONS.has(String(description || "").trim().toLowerCase());
 }
 
-function isRefundDescription(description: string) {
-  return String(description || "").trim().toLowerCase() === "refund";
+function isInvoiceAnchorDescription(description: string) {
+  const normalized = String(description || "").trim().toLowerCase();
+  return normalized === "refund" || normalized === "discount";
 }
 
 function annualizationMultiplierFromPeriod(start: Date, endExclusive: Date, description: string) {
@@ -364,7 +365,10 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     const windowEndExclusive = new Date(item.periodEndTs);
     if (isNaN(windowStart.getTime()) || isNaN(windowEndExclusive.getTime())) continue;
     if (windowEndExclusive < windowStart) continue;
-    if (windowEndExclusive.getTime() === windowStart.getTime() && !isRefundDescription(item.lineItemDescription || "")) {
+    if (
+      windowEndExclusive.getTime() === windowStart.getTime() &&
+      !isInvoiceAnchorDescription(item.lineItemDescription || "")
+    ) {
       continue;
     }
 
@@ -383,17 +387,17 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     if (lineCurrency && lineCurrency !== targetCurrency) continue;
     const closeDate = item.invoiceCreatedTs > 0 ? new Date(item.invoiceCreatedTs) : null;
     const amountMajor = Number(item.amountMinor || 0) / 100;
-    const isRefund = isRefundDescription(item.lineItemDescription || "");
+    const usesInvoiceAnchor = isInvoiceAnchorDescription(item.lineItemDescription || "");
 
     const windowStart = new Date(item.periodStartTs);
     const windowEndExclusive = new Date(item.periodEndTs);
     if (isNaN(windowStart.getTime()) || isNaN(windowEndExclusive.getTime())) continue;
     if (windowEndExclusive < windowStart) continue;
-    if (windowEndExclusive.getTime() === windowStart.getTime() && !isRefund) continue;
+    if (windowEndExclusive.getTime() === windowStart.getTime() && !usesInvoiceAnchor) continue;
 
     const ownMultiplier = annualizationMultiplierFromPeriod(windowStart, windowEndExclusive, item.lineItemDescription || "");
     let appliedMultiplier = ownMultiplier;
-    if (isRefund) {
+    if (usesInvoiceAnchor) {
       const anchor = invoiceAnchorItemById.get(String(item.invoiceId || "").trim());
       if (anchor) {
         const anchorStart = new Date(anchor.periodStartTs);
