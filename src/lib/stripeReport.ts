@@ -104,6 +104,10 @@ function isInvoiceAnchorDescription(description: string) {
   return normalized === "refund" || normalized === "discount";
 }
 
+function isDiscountDescription(description: string) {
+  return String(description || "").trim().toLowerCase() === "discount";
+}
+
 function annualizationMultiplierFromPeriod(start: Date, endExclusive: Date, description: string) {
   const startMs = start.getTime();
   const endMs = endExclusive.getTime();
@@ -359,6 +363,15 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
   const priceDisplayNamesById = priceIds.length ? await getPriceDisplayNamesById(priceIds) : {};
   const invoiceAnchorAmountById = new Map<string, number>();
   const invoiceAnchorItemById = new Map<string, (typeof syncedItems)[number]>();
+  const invoiceHasPercentDescription = new Set<string>();
+
+  for (const item of syncedItems) {
+    const invoiceId = String(item.invoiceId || "").trim();
+    if (!invoiceId) continue;
+    if (String(item.lineItemDescription || "").includes("%")) {
+      invoiceHasPercentDescription.add(invoiceId);
+    }
+  }
 
   for (const item of syncedItems) {
     const invoiceId = String(item.invoiceId || "").trim();
@@ -394,6 +407,9 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     const closeDate = item.invoiceCreatedTs > 0 ? new Date(item.invoiceCreatedTs) : null;
     const amountMajor = Number(item.amountMinor || 0) / 100;
     const usesInvoiceAnchor = isInvoiceAnchorDescription(item.lineItemDescription || "");
+    const isDiscount = isDiscountDescription(item.lineItemDescription || "");
+    const invoiceId = String(item.invoiceId || "").trim();
+    if (isDiscount && invoiceId && invoiceHasPercentDescription.has(invoiceId)) continue;
 
     const windowStart = new Date(item.periodStartTs);
     const windowEndExclusive = new Date(item.periodEndTs);

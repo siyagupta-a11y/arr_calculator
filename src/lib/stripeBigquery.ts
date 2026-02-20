@@ -709,6 +709,13 @@ function buildStripeBigQueryReportQuery(
       )
     )
 )`);
+  ctes.push(`invoice_percent_flag AS (
+  SELECT
+    invoice_id,
+    MAX(IF(STRPOS(raw_description, '%') > 0, 1, 0)) AS has_percent_description
+  FROM prepared
+  GROUP BY invoice_id
+)`);
   ctes.push(`invoice_anchor AS (
   SELECT
     invoice_id,
@@ -727,6 +734,12 @@ function buildStripeBigQueryReportQuery(
   FROM prepared AS p
   LEFT JOIN invoice_anchor AS a
     ON a.invoice_id = p.invoice_id
+  LEFT JOIN invoice_percent_flag AS f
+    ON f.invoice_id = p.invoice_id
+  WHERE NOT (
+    LOWER(TRIM(p.raw_description)) = 'discount'
+    AND IFNULL(f.has_percent_description, 0) = 1
+  )
 )`);
   ctes.push(`scored AS (
   SELECT
