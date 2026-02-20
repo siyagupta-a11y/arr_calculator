@@ -87,6 +87,10 @@ function monthBucketEndInclusiveTs(monthStart: Date) {
   return monthBucketEndExclusiveUtcTs(monthStart) - 1;
 }
 
+function utcDayStartTs(d: Date) {
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0);
+}
+
 function recurringFrequencyLabel(interval?: string | null, intervalCount?: number | null) {
   const i = String(interval || "").trim().toLowerCase();
   const count = Number(intervalCount || 1);
@@ -443,7 +447,10 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     for (const mp of monthlyPeriods) {
       const monthStartUtc = new Date(monthBucketStartUtcTs(mp.start));
       const monthEndExclusiveUtc = new Date(monthBucketEndExclusiveUtcTs(mp.start));
-      const overlapsMonth = windowStart < monthEndExclusiveUtc && windowEndExclusive > monthStartUtc;
+      const endsOnMonthStartDay = utcDayStartTs(windowEndExclusive) === monthStartUtc.getTime();
+      const excludedFromMonthByBoundaryRule = windowStart < monthStartUtc && endsOnMonthStartDay;
+      const overlapsMonth =
+        windowStart < monthEndExclusiveUtc && windowEndExclusive > monthStartUtc && !excludedFromMonthByBoundaryRule;
       valuesMonthly[mp.key] = overlapsMonth ? annualized : 0;
     }
 

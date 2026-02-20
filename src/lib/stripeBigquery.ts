@@ -580,7 +580,16 @@ function buildStripeBigQueryReportQuery(
     const alias = periodAliases[idx];
     const startTs = Math.floor(period.startTsMs);
     const endTs = Math.floor(period.endTsMs);
-    const expression = `IF(period_start_ts <= ${endTs} AND period_end_ts > ${startTs}, annualized, 0.0)`;
+    const expression = `IF(
+      period_start_ts <= ${endTs}
+      AND period_end_ts > ${startTs}
+      AND NOT (
+        period_start_ts < ${startTs}
+        AND DATE(TIMESTAMP_MILLIS(period_end_ts), 'UTC') = DATE(TIMESTAMP_MILLIS(${startTs}), 'UTC')
+      ),
+      annualized,
+      0.0
+    )`;
     return `ROUND(${expression}, 2) AS ${alias}`;
   });
   const periodAliasByKey = new Map(request.periods.map((period, idx) => [period.key, periodAliases[idx]]));
