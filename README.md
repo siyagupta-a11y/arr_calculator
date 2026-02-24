@@ -86,6 +86,25 @@ If using raw TIMESTAMP columns (`amount`, `id`, `description`, `period_start`, `
 
 For fastest performance and to avoid timeout on large ranges, use a serving table (`BIGQUERY_STRIPE_SERVING_TABLE`) that already contains the standardized columns above.
 
+### Stripe Discount Handling (BigQuery)
+
+If invoice discounts are stored at invoice level (not per line), use a serving view that:
+
+- computes *realized* invoice discount from `invoices_view` totals (`subtotal + tax - total`)
+- ignores discount codes that did not reduce money (`realized_discount = 0`)
+- allocates realized discount proportionally across recurring discountable lines
+
+SQL script (for this project):
+
+- `sql/stripe_arr_serving_net_discount_v1.sql`
+
+Recommended env values:
+
+- `BIGQUERY_LOCATION=northamerica-northeast1`
+- `BIGQUERY_STRIPE_TABLE=orbital-lantern-330119.stripe_views.stripe_arr_serving_net_discount_v1`
+- `BIGQUERY_SCHEMA_MODE=int_ts`
+- `BIGQUERY_TS_UNIT=milliseconds`
+
 ## Required Environment Variables
 
 HubSpot:
