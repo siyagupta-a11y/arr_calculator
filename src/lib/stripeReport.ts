@@ -365,8 +365,10 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     ),
   );
   const priceDisplayNamesById = priceIds.length ? await getPriceDisplayNamesById(priceIds) : {};
-  const invoiceAnchorAmountById = new Map<string, number>();
-  const invoiceAnchorItemById = new Map<string, (typeof syncedItems)[number]>();
+  const invoiceRefundAnchorAmountById = new Map<string, number>();
+  const invoiceRefundAnchorItemById = new Map<string, (typeof syncedItems)[number]>();
+  const invoiceDiscountAnchorDurationById = new Map<string, number>();
+  const invoiceDiscountAnchorItemById = new Map<string, (typeof syncedItems)[number]>();
   const invoiceHasPercentDescription = new Set<string>();
 
   for (const item of syncedItems) {
@@ -396,11 +398,35 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     }
 
     const amountMajor = Number(item.amountMinor || 0) / 100;
-    const currentMaxAmount = invoiceAnchorAmountById.get(invoiceId);
-    if (currentMaxAmount != null && amountMajor <= currentMaxAmount) continue;
+    const durationMs = windowEndExclusive.getTime() - windowStart.getTime();
 
-    invoiceAnchorAmountById.set(invoiceId, amountMajor);
-    invoiceAnchorItemById.set(invoiceId, item);
+    const currentRefundAnchorAmount = invoiceRefundAnchorAmountById.get(invoiceId);
+    const currentRefundAnchor = invoiceRefundAnchorItemById.get(invoiceId);
+    const currentRefundAnchorLineItemId = String(currentRefundAnchor?.lineItemId || "");
+    const candidateLineItemId = String(item.lineItemId || "");
+    if (
+      currentRefundAnchorAmount == null ||
+      amountMajor > currentRefundAnchorAmount ||
+      (amountMajor === currentRefundAnchorAmount && candidateLineItemId > currentRefundAnchorLineItemId)
+    ) {
+      invoiceRefundAnchorAmountById.set(invoiceId, amountMajor);
+      invoiceRefundAnchorItemById.set(invoiceId, item);
+    }
+
+    const currentDiscountAnchorDuration = invoiceDiscountAnchorDurationById.get(invoiceId);
+    const currentDiscountAnchor = invoiceDiscountAnchorItemById.get(invoiceId);
+    const currentDiscountAmountMajor = currentDiscountAnchor ? Number(currentDiscountAnchor.amountMinor || 0) / 100 : 0;
+    const currentDiscountLineItemId = String(currentDiscountAnchor?.lineItemId || "");
+    if (
+      currentDiscountAnchorDuration == null ||
+      durationMs > currentDiscountAnchorDuration ||
+      (durationMs === currentDiscountAnchorDuration &&
+        (amountMajor > currentDiscountAmountMajor ||
+          (amountMajor === currentDiscountAmountMajor && candidateLineItemId > currentDiscountLineItemId)))
+    ) {
+      invoiceDiscountAnchorDurationById.set(invoiceId, durationMs);
+      invoiceDiscountAnchorItemById.set(invoiceId, item);
+    }
   }
 
   const rows: ReportRow[] = [];
@@ -424,7 +450,9 @@ async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeR
     const ownMultiplier = annualizationMultiplierFromPeriod(windowStart, windowEndExclusive, item.lineItemDescription || "");
     let appliedMultiplier = ownMultiplier;
     if (usesInvoiceAnchor) {
-      const anchor = invoiceAnchorItemById.get(String(item.invoiceId || "").trim());
+      const anchor = isDiscount
+        ? invoiceDiscountAnchorItemById.get(String(item.invoiceId || "").trim())
+        : invoiceRefundAnchorItemById.get(String(item.invoiceId || "").trim());
       if (anchor) {
         const anchorStart = new Date(anchor.periodStartTs);
         const anchorEndExclusive = new Date(anchor.periodEndTs);

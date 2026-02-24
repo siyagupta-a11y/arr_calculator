@@ -662,6 +662,7 @@ function buildStripeBigQueryReportQuery(
     FORMAT_DATE('%Y-%m-%d', DATE(TIMESTAMP_MILLIS(period_end_ts))) AS window_end_base,
     CAST(period_start_ts AS INT64) AS period_start_ts,
     CAST(period_end_ts AS INT64) AS period_end_ts,
+    GREATEST(CAST(period_end_ts AS INT64) - CAST(period_start_ts AS INT64), 0) AS duration_ms_base,
     CAST(amount_minor AS FLOAT64) AS amount_major,
     COALESCE(CAST(quantity AS FLOAT64), 1.0) AS quantity,
     CASE
@@ -728,7 +729,12 @@ function buildStripeBigQueryReportQuery(
   ctes.push(`invoice_anchor AS (
   SELECT
     invoice_id,
-    ARRAY_AGG(annualization_multiplier_base ORDER BY amount_major DESC, line_item_id_base DESC LIMIT 1)[OFFSET(0)] AS invoice_anchor_multiplier
+    ARRAY_AGG(annualization_multiplier_base ORDER BY amount_major DESC, line_item_id_base DESC LIMIT 1)[OFFSET(0)] AS invoice_refund_anchor_multiplier,
+    ARRAY_AGG(
+      annualization_multiplier_base
+      ORDER BY duration_ms_base DESC, amount_major DESC, line_item_id_base DESC
+      LIMIT 1
+    )[OFFSET(0)] AS invoice_discount_anchor_multiplier
   FROM prepared
   GROUP BY invoice_id
 )`);
@@ -736,8 +742,10 @@ function buildStripeBigQueryReportQuery(
   SELECT
     p.*,
     CASE
-      WHEN LOWER(TRIM(p.raw_description)) IN ('refund', 'discount')
-      THEN p.amount_major * IFNULL(a.invoice_anchor_multiplier, 0.0)
+      WHEN LOWER(TRIM(p.raw_description)) = 'refund'
+      THEN p.amount_major * IFNULL(a.invoice_refund_anchor_multiplier, 0.0)
+      WHEN LOWER(TRIM(p.raw_description)) = 'discount'
+      THEN p.amount_major * IFNULL(a.invoice_discount_anchor_multiplier, 0.0)
       ELSE p.amount_major * p.annualization_multiplier_base
     END AS annualized
   FROM prepared AS p
