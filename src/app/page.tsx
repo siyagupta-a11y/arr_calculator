@@ -346,7 +346,7 @@ export default function Home() {
   }
 
   return (
-    <div style={{ padding: 24, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" }}>
+    <div style={{ padding: 24 }}>
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <h1 style={{ fontSize: 24, marginBottom: 8 }}>ARR Report</h1>
         <Link href="/stripe">Open Stripe ARR report</Link>
