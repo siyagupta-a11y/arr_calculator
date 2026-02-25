@@ -685,6 +685,73 @@ export async function generateStripeReport(body: StripeReportRequest): Promise<R
   };
 }
 
+export type StripeMonthCustomerArrRow = {
+  customerId: string;
+  websiteArr: number;
+};
+
+function monthToDateRange(month: string) {
+  const trimmed = String(month || "").trim();
+  const match = /^(\d{4})-(\d{2})$/.exec(trimmed);
+  if (!match) {
+    throw new Error("Invalid month format. Use YYYY-MM.");
+  }
+
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]);
+  if (!Number.isInteger(year) || !Number.isInteger(monthIndex) || monthIndex < 1 || monthIndex > 12) {
+    throw new Error("Invalid month format. Use YYYY-MM.");
+  }
+
+  const lastDay = new Date(year, monthIndex, 0).getDate();
+  return {
+    month: `${match[1]}-${match[2]}`,
+    startDate: `${match[1]}-${match[2]}-01`,
+    endDate: `${match[1]}-${match[2]}-${String(lastDay).padStart(2, "0")}`,
+  };
+}
+
+export async function generateStripeCustomerArrForMonth(month: string): Promise<{
+  month: string;
+  rows: StripeMonthCustomerArrRow[];
+}> {
+  const { month: normalizedMonth, startDate, endDate } = monthToDateRange(month);
+  const request: StripeReportRequest = {
+    startDate,
+    endDate,
+    grain: "monthly",
+    filterCustomerId: "",
+    filterLineItemDescription: "",
+    filterLineItemDescriptionPrefix: "",
+    groupByFields: ["customerId"],
+    sortByPeriodKey: "none",
+    page: 1,
+  };
+
+  const source = (process.env.STRIPE_DATA_SOURCE || "blob").toLowerCase();
+  const base = source === "bigquery" ? await buildStripeReportBaseFromBigQuery(request) : await buildStripeReportBase(request);
+  const primaryPeriodKey = base.periods[0]?.key;
+
+  const rows = base.rows
+    .map((row) => {
+      const customerId = row.groupValues?.customerId || row.dealId || "(blank)";
+      const periodTotal = primaryPeriodKey
+        ? row.valuesByPeriod[primaryPeriodKey] || 0
+        : Object.values(row.valuesByPeriod || {}).reduce((sum, value) => sum + (value || 0), 0);
+      return {
+        customerId,
+        websiteArr: round2(periodTotal),
+      };
+    })
+    .sort((a, b) => {
+      const valueDiff = b.websiteArr - a.websiteArr;
+      if (Math.abs(valueDiff) > NON_ZERO_EPSILON) return valueDiff;
+      return a.customerId.localeCompare(b.customerId);
+    });
+
+  return { month: normalizedMonth, rows };
+}
+
 function escapeCsvCell(value: string | number) {
   const text = String(value ?? "");
   if (text.includes(",") || text.includes('"') || text.includes("\n")) {

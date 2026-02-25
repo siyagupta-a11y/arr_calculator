@@ -434,9 +434,14 @@ export default function StripePage() {
               backend-driven pagination and full CSV export. The total amount on this page reflects self serve ARR + AI spend.
             </p>
           </div>
-          <Link href="/" className="stripe-ui__hero-link">
-            Open HubSpot report
-          </Link>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Link href="/diff-sheet" className="stripe-ui__hero-link">
+              Open Diff Sheet
+            </Link>
+            <Link href="/" className="stripe-ui__hero-link">
+              Open HubSpot report
+            </Link>
+          </div>
         </div>
       </section>
 
