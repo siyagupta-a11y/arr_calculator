@@ -1,6 +1,6 @@
 :root {
-  --font-body: var(--font-inter), "Inter", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  --font-heading: var(--font-inter), "Inter", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Inter", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-heading: "Inter", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 
   --bg-0: #f2f5fb;
   --bg-1: #f7f9fd;
@@ -561,6 +561,12 @@ textarea:focus-visible {
 }
 
 .stripe-ui__table tbody tr:hover {
+  background: #142541;
+}
+
+.stripe-ui__table tbody tr:hover td.stripe-ui__sticky-col-0,
+.stripe-ui__table tbody tr:hover td.stripe-ui__sticky-col-1,
+.stripe-ui__table tbody tr:hover td.stripe-ui__sticky-col-2 {
   background: #142541;
 }
 

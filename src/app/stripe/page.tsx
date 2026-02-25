@@ -431,7 +431,7 @@ export default function StripePage() {
             <h1 className="stripe-ui__title">Stripe ARR Report</h1>
             <p className="stripe-ui__subtitle">
               Tracks Stripe invoice lines and annualizes each value from its billing window (`period.start` to `period.end`) with
-              backend-driven pagination and full CSV export.
+              backend-driven pagination and full CSV export. The total amount on this page reflects self serve ARR + AI spend.
             </p>
           </div>
           <Link href="/" className="stripe-ui__hero-link">
