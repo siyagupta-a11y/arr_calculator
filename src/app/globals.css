@@ -1,6 +1,6 @@
 :root {
-  --font-body: "Inter", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  --font-heading: "Inter", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-body: var(--font-inter), "Inter", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-heading: var(--font-inter), "Inter", "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 
   --bg-0: #f2f5fb;
   --bg-1: #f7f9fd;
@@ -101,6 +101,15 @@ button:hover:not(:disabled) {
 button:disabled {
   opacity: 0.65;
   cursor: not-allowed;
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid #68a2ff;
+  outline-offset: 1px;
 }
 
 .ui-reveal {
@@ -207,6 +216,10 @@ button:disabled {
 .stripe-ui__hero-link:hover {
   border-color: #4a75bd;
   background: #132749;
+}
+
+.stripe-ui__hero-link:focus-visible {
+  border-color: #78a8f2;
 }
 
 .stripe-ui__panel {
@@ -346,6 +359,43 @@ button:disabled {
   color: #ffd5dd;
 }
 
+.stripe-ui__error-actions {
+  margin-top: 0.62rem;
+}
+
+.stripe-ui__loading-panel {
+  min-height: 190px;
+}
+
+.stripe-ui__skeleton-grid {
+  display: grid;
+  gap: 0.52rem;
+  margin-top: 0.35rem;
+}
+
+.stripe-ui__skeleton-row {
+  height: 0.78rem;
+  width: 100%;
+  border: 1px solid #2a4169;
+  background:
+    linear-gradient(90deg, #0f1a2f 0%, #1a2c4a 50%, #0f1a2f 100%);
+  background-size: 220% 100%;
+  animation: stripe-skeleton 1.25s linear infinite;
+}
+
+.stripe-ui__skeleton-row--short {
+  width: 74%;
+}
+
+@keyframes stripe-skeleton {
+  from {
+    background-position: 210% 0;
+  }
+  to {
+    background-position: -10% 0;
+  }
+}
+
 .stripe-ui__stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(140px, 1fr));
@@ -412,6 +462,17 @@ button:disabled {
   font-size: 0.79rem;
 }
 
+.stripe-ui__page-jump {
+  width: 6.2rem;
+}
+
+.stripe-ui__export-status {
+  min-height: 1.05rem;
+  margin-bottom: 0.56rem;
+  color: #9eb8df;
+  font-size: 0.79rem;
+}
+
 .stripe-ui__table-wrap {
   overflow: auto;
   border: 1px solid #2a456f;
@@ -448,8 +509,55 @@ button:disabled {
   white-space: nowrap;
 }
 
+.stripe-ui__table th.stripe-ui__sticky-col-0,
+.stripe-ui__table td.stripe-ui__sticky-col-0,
+.stripe-ui__table th.stripe-ui__sticky-col-1,
+.stripe-ui__table td.stripe-ui__sticky-col-1,
+.stripe-ui__table th.stripe-ui__sticky-col-2,
+.stripe-ui__table td.stripe-ui__sticky-col-2 {
+  position: sticky;
+}
+
+.stripe-ui__table th.stripe-ui__sticky-col-0,
+.stripe-ui__table td.stripe-ui__sticky-col-0 {
+  left: 0;
+  min-width: 200px;
+}
+
+.stripe-ui__table th.stripe-ui__sticky-col-1,
+.stripe-ui__table td.stripe-ui__sticky-col-1 {
+  left: 200px;
+  min-width: 190px;
+}
+
+.stripe-ui__table th.stripe-ui__sticky-col-2,
+.stripe-ui__table td.stripe-ui__sticky-col-2 {
+  left: 390px;
+  min-width: 330px;
+}
+
+.stripe-ui__table th.stripe-ui__sticky-col-0,
+.stripe-ui__table th.stripe-ui__sticky-col-1,
+.stripe-ui__table th.stripe-ui__sticky-col-2 {
+  z-index: 4;
+  background: #0f1e38;
+}
+
+.stripe-ui__table td.stripe-ui__sticky-col-0,
+.stripe-ui__table td.stripe-ui__sticky-col-1,
+.stripe-ui__table td.stripe-ui__sticky-col-2 {
+  z-index: 2;
+  background: #0a1529;
+}
+
 .stripe-ui__table tbody tr:nth-child(even) {
   background: #0c172b;
+}
+
+.stripe-ui__table tbody tr:nth-child(even) td.stripe-ui__sticky-col-0,
+.stripe-ui__table tbody tr:nth-child(even) td.stripe-ui__sticky-col-1,
+.stripe-ui__table tbody tr:nth-child(even) td.stripe-ui__sticky-col-2 {
+  background: #0e1b32;
 }
 
 .stripe-ui__table tbody tr:hover {
@@ -473,6 +581,16 @@ button:disabled {
   max-width: 440px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.stripe-ui__table-wrap--compact .stripe-ui__table th {
+  padding: 0.42rem 0.5rem;
+  font-size: 0.66rem;
+}
+
+.stripe-ui__table-wrap--compact .stripe-ui__table td {
+  padding: 0.38rem 0.5rem;
+  font-size: 0.77rem;
 }
 
 @media (max-width: 1200px) {
