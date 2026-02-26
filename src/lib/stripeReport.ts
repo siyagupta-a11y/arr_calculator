@@ -10,6 +10,7 @@ import { getPriceDisplayNamesById } from "@/lib/stripe";
 import {
   queryStripeReportAllRowsFromBigQuery,
   queryStripeReportPageFromBigQuery,
+  type StripeBigQueryProfile,
   type StripeBigQueryPeriodSpec,
 } from "@/lib/stripeBigquery";
 import { ensureStripeSyncForRange, getSyncedStripeLineItemsForRange } from "@/lib/stripeSyncStore";
@@ -26,6 +27,11 @@ export type StripeReportRequest = {
   groupByFields?: StripeGroupField[];
   sortByPeriodKey?: string;
   page?: number;
+};
+
+export type StripeReportOptions = {
+  forceSource?: "blob" | "bigquery";
+  bigQueryProfile?: StripeBigQueryProfile;
 };
 
 type StripeReportBaseResponse = {
@@ -244,6 +250,27 @@ function buildBaseCacheKey(body: StripeReportRequest, source: string) {
   ].join("|");
 }
 
+function resolveStripeDataSource(options?: StripeReportOptions): "blob" | "bigquery" {
+  if (options?.forceSource) return options.forceSource;
+  if (options?.bigQueryProfile === "stripe_arr_correct") {
+    const profileSource = (process.env.STRIPE_ARR_CORRECT_DATA_SOURCE || "").trim().toLowerCase();
+    if (profileSource === "bigquery") return "bigquery";
+    if (profileSource === "blob") return "blob";
+  }
+
+  const source = (process.env.STRIPE_DATA_SOURCE || "blob").trim().toLowerCase();
+  return source === "bigquery" ? "bigquery" : "blob";
+}
+
+function resolveTargetCurrency(options?: StripeReportOptions): string {
+  if (options?.bigQueryProfile === "stripe_arr_correct") {
+    return (process.env.STRIPE_ARR_CORRECT_TARGET_CURRENCY || process.env.STRIPE_TARGET_CURRENCY || "USD")
+      .trim()
+      .toLowerCase();
+  }
+  return (process.env.STRIPE_TARGET_CURRENCY || "USD").trim().toLowerCase();
+}
+
 type StripeReportContext = {
   rangeStart: Date;
   rangeEnd: Date;
@@ -255,7 +282,7 @@ type StripeReportContext = {
   groupByFields: StripeGroupField[];
 };
 
-function buildStripeReportContext(body: StripeReportRequest): StripeReportContext {
+function buildStripeReportContext(body: StripeReportRequest, targetCurrency: string): StripeReportContext {
   const startVal = parseDate(body.startDate);
   const endVal = parseDate(body.endDate);
   if (!startVal || !endVal || isNaN(startVal.getTime()) || isNaN(endVal.getTime())) {
@@ -287,7 +314,7 @@ function buildStripeReportContext(body: StripeReportRequest): StripeReportContex
     monthlyPeriods,
     dailyPeriods,
     aggregated,
-    targetCurrency: (process.env.STRIPE_TARGET_CURRENCY || "USD").trim().toLowerCase(),
+    targetCurrency,
     groupByFields: normalizeGroupByFields(body.groupByFields),
   };
 }
@@ -323,9 +350,10 @@ function buildBigQueryPeriodSpecs(body: StripeReportRequest, context: StripeRepo
   });
 }
 
-async function buildStripeReportBase(body: StripeReportRequest): Promise<StripeReportBaseResponse> {
-  const source = "blob";
-  const context = buildStripeReportContext(body);
+async function buildStripeReportBase(body: StripeReportRequest, options?: StripeReportOptions): Promise<StripeReportBaseResponse> {
+  const resolvedTargetCurrency = resolveTargetCurrency(options);
+  const source = `blob:${resolvedTargetCurrency}`;
+  const context = buildStripeReportContext(body, resolvedTargetCurrency);
   const cacheKey = buildBaseCacheKey(body, source);
   const cached = REPORT_CACHE.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
@@ -617,11 +645,13 @@ function buildBigQueryRequest(
   };
 }
 
-async function generateStripeReportFromBigQuery(body: StripeReportRequest): Promise<ReportResponse> {
-  const context = buildStripeReportContext(body);
+async function generateStripeReportFromBigQuery(body: StripeReportRequest, options?: StripeReportOptions): Promise<ReportResponse> {
+  const context = buildStripeReportContext(body, resolveTargetCurrency(options));
   const page = Math.max(1, Math.floor(Number(body.page || 1)));
+  const bigQueryOptions = options?.bigQueryProfile ? { profile: options.bigQueryProfile } : undefined;
   const bigQueryResult = await queryStripeReportPageFromBigQuery(
     buildBigQueryRequest(body, context, page, STRIPE_REPORT_PAGE_SIZE),
+    bigQueryOptions,
   );
   return {
     periods: context.outputPeriods,
@@ -640,10 +670,15 @@ async function generateStripeReportFromBigQuery(body: StripeReportRequest): Prom
   };
 }
 
-async function buildStripeReportBaseFromBigQuery(body: StripeReportRequest): Promise<StripeReportBaseResponse> {
-  const context = buildStripeReportContext(body);
+async function buildStripeReportBaseFromBigQuery(
+  body: StripeReportRequest,
+  options?: StripeReportOptions,
+): Promise<StripeReportBaseResponse> {
+  const context = buildStripeReportContext(body, resolveTargetCurrency(options));
+  const bigQueryOptions = options?.bigQueryProfile ? { profile: options.bigQueryProfile } : undefined;
   const bigQueryResult = await queryStripeReportAllRowsFromBigQuery(
     buildBigQueryRequest(body, context, 1, STRIPE_REPORT_PAGE_SIZE),
+    bigQueryOptions,
   );
   return {
     periods: context.outputPeriods,
@@ -653,14 +688,14 @@ async function buildStripeReportBaseFromBigQuery(body: StripeReportRequest): Pro
   };
 }
 
-export async function generateStripeReport(body: StripeReportRequest): Promise<ReportResponse> {
-  const source = (process.env.STRIPE_DATA_SOURCE || "blob").toLowerCase();
+export async function generateStripeReport(body: StripeReportRequest, options?: StripeReportOptions): Promise<ReportResponse> {
+  const source = resolveStripeDataSource(options);
   if (source === "bigquery") {
-    return generateStripeReportFromBigQuery(body);
+    return generateStripeReportFromBigQuery(body, options);
   }
 
   const page = Math.max(1, Math.floor(Number(body.page || 1)));
-  const base = await buildStripeReportBase(body);
+  const base = await buildStripeReportBase(body, options);
   const totalRows = base.rows.length;
   const totalPages = totalRows > 0 ? Math.ceil(totalRows / STRIPE_REPORT_PAGE_SIZE) : 1;
   const clampedPage = Math.min(page, totalPages);
@@ -711,10 +746,10 @@ function monthToDateRange(month: string) {
   };
 }
 
-export async function generateStripeCustomerArrForMonth(month: string): Promise<{
-  month: string;
-  rows: StripeMonthCustomerArrRow[];
-}> {
+export async function generateStripeCustomerArrForMonth(
+  month: string,
+  options?: StripeReportOptions,
+): Promise<{ month: string; rows: StripeMonthCustomerArrRow[] }> {
   const { month: normalizedMonth, startDate, endDate } = monthToDateRange(month);
   const request: StripeReportRequest = {
     startDate,
@@ -728,8 +763,11 @@ export async function generateStripeCustomerArrForMonth(month: string): Promise<
     page: 1,
   };
 
-  const source = (process.env.STRIPE_DATA_SOURCE || "blob").toLowerCase();
-  const base = source === "bigquery" ? await buildStripeReportBaseFromBigQuery(request) : await buildStripeReportBase(request);
+  const source = resolveStripeDataSource(options);
+  const base =
+    source === "bigquery"
+      ? await buildStripeReportBaseFromBigQuery(request, options)
+      : await buildStripeReportBase(request, options);
   const primaryPeriodKey = base.periods[0]?.key;
 
   const rows = base.rows
@@ -760,9 +798,12 @@ function escapeCsvCell(value: string | number) {
   return text;
 }
 
-export async function generateStripeReportCsv(body: StripeReportRequest) {
-  const source = (process.env.STRIPE_DATA_SOURCE || "blob").toLowerCase();
-  const base = source === "bigquery" ? await buildStripeReportBaseFromBigQuery(body) : await buildStripeReportBase(body);
+export async function generateStripeReportCsv(body: StripeReportRequest, options?: StripeReportOptions) {
+  const source = resolveStripeDataSource(options);
+  const base =
+    source === "bigquery"
+      ? await buildStripeReportBaseFromBigQuery(body, options)
+      : await buildStripeReportBase(body, options);
   const groupByFields = normalizeGroupByFields(body.groupByFields);
   const showDefaultColumns = groupByFields.length === 0;
 

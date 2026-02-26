@@ -4,9 +4,12 @@ This is a Next.js ARR dashboard.
 
 - `/` HubSpot ARR report
 - `/stripe` Stripe ARR report
+- `/stripe-arr-correct` Stripe ARR (Correct) report
 - `POST /api/report` HubSpot report API
 - `GET|POST /api/stripe-report` Stripe report API
 - `GET /api/stripe-report/export` Stripe full CSV export API (all filtered/grouped rows)
+- `GET|POST /api/stripe-arr-correct-report` Stripe ARR (Correct) API (BigQuery profile)
+- `GET /api/stripe-arr-correct-report/export` Stripe ARR (Correct) CSV export API
 - `GET|POST /api/stripe-sync` Stripe sync API
 - `GET /api/stripe-sync/status` Stripe sync health/status API
 
@@ -73,6 +76,27 @@ To keep Blob as source (default), set:
 
 - `STRIPE_DATA_SOURCE=blob`
 
+### Stripe ARR (Correct) BigQuery Profile
+
+`/stripe-arr-correct` is pinned to BigQuery and uses profile-specific env vars when present, with fallback to default Stripe BigQuery vars.
+
+Set these for the corrected source:
+
+- `BIGQUERY_STRIPE_ARR_CORRECT_PROJECT_ID`
+- `BIGQUERY_STRIPE_ARR_CORRECT_LOCATION` (optional, default fallback `BIGQUERY_LOCATION` then `US`)
+- `BIGQUERY_STRIPE_ARR_CORRECT_TABLE` (full table id: `project.dataset.table`)
+- `BIGQUERY_STRIPE_ARR_CORRECT_SERVING_TABLE` (optional)
+- `BIGQUERY_STRIPE_ARR_CORRECT_SCHEMA_MODE` (optional; default fallback `BIGQUERY_SCHEMA_MODE`)
+- `BIGQUERY_STRIPE_ARR_CORRECT_TS_UNIT` (optional; default fallback `BIGQUERY_TS_UNIT`)
+- `BIGQUERY_STRIPE_ARR_CORRECT_SERVING_SCHEMA_MODE` (optional; default fallback `BIGQUERY_SERVING_SCHEMA_MODE`)
+- `BIGQUERY_STRIPE_ARR_CORRECT_SERVING_TS_UNIT` (optional; default fallback `BIGQUERY_SERVING_TS_UNIT`)
+
+Optional profile-specific credential and currency overrides:
+
+- `GOOGLE_SERVICE_ACCOUNT_JSON_STRIPE_ARR_CORRECT` (or `GOOGLE_SERVICE_ACCOUNT_JSON_BASE64_STRIPE_ARR_CORRECT`)
+- `STRIPE_ARR_CORRECT_TARGET_CURRENCY`
+- `STRIPE_ARR_CORRECT_DATA_SOURCE` (`bigquery` or `blob`; route currently forces BigQuery)
+
 Expected BigQuery columns (or aliases in a view):
 
 - `customer_id`, `invoice_id`
@@ -85,6 +109,29 @@ If using raw TIMESTAMP columns (`amount`, `id`, `description`, `period_start`, `
 - `BIGQUERY_SCHEMA_MODE=timestamp`
 
 For fastest performance and to avoid timeout on large ranges, use a serving table (`BIGQUERY_STRIPE_SERVING_TABLE`) that already contains the standardized columns above.
+
+### Create One Stripe Table Per `livemode` Folder
+
+If your Stripe lake is in GCS (for example `gs://YOUR_BUCKET/livemode/<folder>/...`) and you want one BigQuery table per folder in `project.stripe`, run:
+
+```bash
+cd arr_calculator
+GCS_BUCKET=YOUR_BUCKET \
+BQ_PROJECT_ID=YOUR_PROJECT_ID \
+BQ_DATASET=stripe \
+BQ_LOCATION=US \
+SOURCE_FORMAT=PARQUET \
+GOOGLE_SERVICE_ACCOUNT_JSON="$(cat /path/to/service-account.json)" \
+node scripts/create-livemode-folder-tables.mjs
+```
+
+Optional env vars:
+
+- `LIVEMODE_PREFIX` (default `livemode/`)
+- `GCS_FILE_GLOB` (default `*`; example `*.parquet`)
+- `DRY_RUN=true` (prints SQL without creating tables)
+
+This script creates/replaces **external tables** named from each immediate child folder under `livemode/`.
 
 ### Stripe Discount Handling (BigQuery)
 

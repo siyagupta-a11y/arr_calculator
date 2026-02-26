@@ -350,6 +350,7 @@ export default function Home() {
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <h1 style={{ fontSize: 24, marginBottom: 8 }}>ARR Report</h1>
         <Link href="/stripe">Open Stripe ARR report</Link>
+        <Link href="/stripe-arr-correct">Open Stripe ARR (Correct)</Link>
         <Link href="/diff-sheet">Open Diff Sheet</Link>
       </div>
       <p style={{ marginTop: 0, color: "#666" }}>

@@ -34,6 +34,7 @@ export type StripeBigQueryPeriodSpec = {
 };
 
 export type StripeBigQueryGroupField = "customerId" | "lineItemDescription" | "lineItemDescriptionPrefix";
+export type StripeBigQueryProfile = "default" | "stripe_arr_correct";
 
 export type StripeBigQueryReportRequest = {
   startTsMs: number;
@@ -65,24 +66,59 @@ type BigQueryNamedParameter = {
   value: string;
 };
 
+type StripeBigQueryOptions = {
+  profile?: StripeBigQueryProfile;
+};
+
 const TOKEN_AUDIENCE = "https://oauth2.googleapis.com/token";
 const BQ_SCOPE = "https://www.googleapis.com/auth/bigquery";
 const BQ_MAX_RESULTS = Number(process.env.BIGQUERY_MAX_RESULTS || "50000");
+const STRIPE_ARR_CORRECT_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.invoice_lines_helper";
+const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
+  GOOGLE_SERVICE_ACCOUNT_JSON: "GOOGLE_SERVICE_ACCOUNT_JSON_STRIPE_ARR_CORRECT",
+  GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64_STRIPE_ARR_CORRECT",
+  BIGQUERY_PROJECT_ID: "BIGQUERY_STRIPE_ARR_CORRECT_PROJECT_ID",
+  BIGQUERY_LOCATION: "BIGQUERY_STRIPE_ARR_CORRECT_LOCATION",
+  BIGQUERY_STRIPE_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_TABLE",
+  BIGQUERY_STRIPE_SERVING_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_SERVING_TABLE",
+  BIGQUERY_SERVING_SCHEMA_MODE: "BIGQUERY_STRIPE_ARR_CORRECT_SERVING_SCHEMA_MODE",
+  BIGQUERY_SCHEMA_MODE: "BIGQUERY_STRIPE_ARR_CORRECT_SCHEMA_MODE",
+  BIGQUERY_SERVING_TS_UNIT: "BIGQUERY_STRIPE_ARR_CORRECT_SERVING_TS_UNIT",
+  BIGQUERY_TS_UNIT: "BIGQUERY_STRIPE_ARR_CORRECT_TS_UNIT",
+};
 
 function base64Url(input: Buffer | string) {
   const b = Buffer.isBuffer(input) ? input : Buffer.from(input, "utf8");
   return b.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
-function mustEnv(name: string) {
-  const v = process.env[name];
+function normalizeProfile(profile?: StripeBigQueryProfile): StripeBigQueryProfile {
+  return profile === "stripe_arr_correct" ? "stripe_arr_correct" : "default";
+}
+
+function readEnv(name: string, profile: StripeBigQueryProfile = "default") {
+  if (profile === "stripe_arr_correct") {
+    const mappedName = STRIPE_ARR_CORRECT_ENV_MAP[name];
+    if (mappedName) {
+      const mappedValue = process.env[mappedName];
+      if (mappedValue) return mappedValue;
+    }
+    if (name === "BIGQUERY_STRIPE_TABLE") {
+      return STRIPE_ARR_CORRECT_DEFAULT_TABLE;
+    }
+  }
+  return process.env[name];
+}
+
+function mustEnv(name: string, profile: StripeBigQueryProfile = "default") {
+  const v = readEnv(name, profile);
   if (!v) throw new Error(`Missing env var: ${name}`);
   return v;
 }
 
-function getServiceAccount(): ServiceAccount {
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  const rawB64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64;
+function getServiceAccount(profile: StripeBigQueryProfile = "default"): ServiceAccount {
+  const raw = readEnv("GOOGLE_SERVICE_ACCOUNT_JSON", profile);
+  const rawB64 = readEnv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", profile);
 
   if (!raw && !rawB64) {
     throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_JSON_BASE64");
@@ -353,14 +389,14 @@ type BigQuerySourceConfig = {
   tsMultiplier: number;
 };
 
-function getBigQuerySourceConfig(): BigQuerySourceConfig {
-  const table = mustEnv("BIGQUERY_STRIPE_TABLE");
-  const servingTable = (process.env.BIGQUERY_STRIPE_SERVING_TABLE || "").trim();
-  const servingSchemaMode = (process.env.BIGQUERY_SERVING_SCHEMA_MODE || "int").toLowerCase();
-  const schemaMode = servingTable ? "int_ts" : (process.env.BIGQUERY_SCHEMA_MODE || "int_ts").toLowerCase();
+function getBigQuerySourceConfig(profile: StripeBigQueryProfile = "default"): BigQuerySourceConfig {
+  const table = mustEnv("BIGQUERY_STRIPE_TABLE", profile);
+  const servingTable = (readEnv("BIGQUERY_STRIPE_SERVING_TABLE", profile) || "").trim();
+  const servingSchemaMode = (readEnv("BIGQUERY_SERVING_SCHEMA_MODE", profile) || "int").toLowerCase();
+  const schemaMode = servingTable ? "int_ts" : (readEnv("BIGQUERY_SCHEMA_MODE", profile) || "int_ts").toLowerCase();
   const tsUnit = servingTable
-    ? (process.env.BIGQUERY_SERVING_TS_UNIT || "milliseconds").toLowerCase()
-    : (process.env.BIGQUERY_TS_UNIT || "milliseconds").toLowerCase();
+    ? (readEnv("BIGQUERY_SERVING_TS_UNIT", profile) || "milliseconds").toLowerCase()
+    : (readEnv("BIGQUERY_TS_UNIT", profile) || "milliseconds").toLowerCase();
   const tsMultiplier = schemaMode === "timestamp" ? 1 : tsUnit === "seconds" ? 1000 : 1;
   return { table, servingTable, servingSchemaMode, schemaMode, tsUnit, tsMultiplier };
 }
@@ -937,13 +973,15 @@ function mapBigQueryReportRows(
 async function queryStripeReportBigQueryBase(
   request: StripeBigQueryReportRequest,
   mode: "page" | "all",
+  options?: StripeBigQueryOptions,
 ): Promise<StripeBigQueryReportBase & { totalPages: number; page: number }> {
-  const sa = getServiceAccount();
-  const projectId = process.env.BIGQUERY_PROJECT_ID || sa.project_id;
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
 
-  const sourceConfig = getBigQuerySourceConfig();
-  const location = process.env.BIGQUERY_LOCATION || "US";
+  const sourceConfig = getBigQuerySourceConfig(profile);
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const rangeStart = toQueryTimestamp(request.startTsMs, sourceConfig);
   const rangeEnd = toQueryTimestamp(request.endTsMs, sourceConfig);
   const built = buildStripeBigQueryReportQuery(request, sourceConfig, rangeStart, rangeEnd);
@@ -1017,8 +1055,9 @@ OFFSET @offset_rows`;
 
 export async function queryStripeReportPageFromBigQuery(
   request: StripeBigQueryReportRequest,
+  options?: StripeBigQueryOptions,
 ): Promise<StripeBigQueryReportPageResult> {
-  const result = await queryStripeReportBigQueryBase(request, "page");
+  const result = await queryStripeReportBigQueryBase(request, "page", options);
   return {
     rows: result.rows,
     totalsByPeriod: result.totalsByPeriod,
@@ -1031,8 +1070,9 @@ export async function queryStripeReportPageFromBigQuery(
 
 export async function queryStripeReportAllRowsFromBigQuery(
   request: StripeBigQueryReportRequest,
+  options?: StripeBigQueryOptions,
 ): Promise<StripeBigQueryReportBase> {
-  const result = await queryStripeReportBigQueryBase(request, "all");
+  const result = await queryStripeReportBigQueryBase(request, "all", options);
   return {
     rows: result.rows,
     totalsByPeriod: result.totalsByPeriod,
@@ -1045,40 +1085,24 @@ export async function loadStripeLineItemsFromBigQuery(
   startTsMs: number,
   endTsMs: number,
   filters?: StripeBigQueryFilters,
+  options?: StripeBigQueryOptions,
 ): Promise<SyncedStripeLineItem[]> {
-  const sa = getServiceAccount();
-  const projectId = process.env.BIGQUERY_PROJECT_ID || sa.project_id;
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
 
-  const table = mustEnv("BIGQUERY_STRIPE_TABLE");
-  const servingTable = (process.env.BIGQUERY_STRIPE_SERVING_TABLE || "").trim();
-  const servingSchemaMode = (process.env.BIGQUERY_SERVING_SCHEMA_MODE || "int").toLowerCase();
-  const location = process.env.BIGQUERY_LOCATION || "US";
-  const schemaMode = servingTable ? "int_ts" : (process.env.BIGQUERY_SCHEMA_MODE || "int_ts").toLowerCase();
-  const tsUnit = servingTable
-    ? (process.env.BIGQUERY_SERVING_TS_UNIT || "milliseconds").toLowerCase()
-    : (process.env.BIGQUERY_TS_UNIT || "milliseconds").toLowerCase();
-  const tsMultiplier = schemaMode === "timestamp" ? 1 : tsUnit === "seconds" ? 1000 : 1;
-
-  const rangeStart =
-    schemaMode === "timestamp"
-      ? Math.floor(startTsMs)
-      : tsUnit === "seconds"
-        ? Math.floor(startTsMs / 1000)
-        : Math.floor(startTsMs);
-  const rangeEnd =
-    schemaMode === "timestamp"
-      ? Math.floor(endTsMs)
-      : tsUnit === "seconds"
-        ? Math.floor(endTsMs / 1000)
-        : Math.floor(endTsMs);
+  const sourceConfig = getBigQuerySourceConfig(profile);
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const rangeStart = toQueryTimestamp(startTsMs, sourceConfig);
+  const rangeEnd = toQueryTimestamp(endTsMs, sourceConfig);
 
   const accessToken = await getAccessToken(sa);
-  const built = servingTable
-    ? servingSchemaMode === "int"
-      ? buildServingQueryIntColumns(servingTable, filters)
-      : buildServingQueryTimestampColumns(servingTable, filters)
-    : { query: buildQuery(table), filterParams: [] as BigQueryNamedParameter[] };
+  const built = sourceConfig.servingTable
+    ? sourceConfig.servingSchemaMode === "int"
+      ? buildServingQueryIntColumns(sourceConfig.servingTable, filters)
+      : buildServingQueryTimestampColumns(sourceConfig.servingTable, filters)
+    : { query: buildQuery(sourceConfig.table), filterParams: [] as BigQueryNamedParameter[] };
   const query = built.query;
   const extraParams = built.filterParams;
   const queryParams: BigQueryNamedParameter[] = [
@@ -1094,12 +1118,12 @@ export async function loadStripeLineItemsFromBigQuery(
   while (true) {
     let json = await fetchBigQueryResultsPage(
       accessToken,
-        projectId,
-        location,
-        query,
-        queryParams,
-        pageToken,
-      );
+      projectId,
+      location,
+      query,
+      queryParams,
+      pageToken,
+    );
     if (!json.jobComplete && json.jobReference?.jobId) {
       const jobProjectId = json.jobReference.projectId || projectId;
       const jobLocation = json.jobReference.location || location;
@@ -1109,7 +1133,7 @@ export async function loadStripeLineItemsFromBigQuery(
     const fields = (json.schema?.fields || []).map((f) => f.name);
     for (const row of json.rows || []) {
       const obj = rowToObject(fields, row);
-      const item = mapBigQueryRowToSyncedItem(obj, tsMultiplier);
+      const item = mapBigQueryRowToSyncedItem(obj, sourceConfig.tsMultiplier);
       const dedupeKey = [
         item.invoiceId,
         item.lineItemId,

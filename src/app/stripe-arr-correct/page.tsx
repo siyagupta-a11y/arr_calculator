@@ -124,7 +124,7 @@ function stickyClassForColumn(idx: number, leadColumnCount: number) {
   return `stripe-ui__sticky-col-${idx}`;
 }
 
-export default function StripePage() {
+export default function StripeArrCorrectPage() {
   const defaultRange = useMemo(() => defaultDateRange(), []);
 
   const [startDate, setStartDate] = useState(defaultRange.startDate);
@@ -180,7 +180,7 @@ export default function StripePage() {
     setData(null);
 
     try {
-      let res = await fetch("/api/stripe-report", {
+      let res = await fetch("/api/stripe-arr-correct-report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -207,7 +207,7 @@ export default function StripePage() {
           sortByPeriodKey,
           page: String(page),
         });
-        res = await fetch(`/api/stripe-report?${qs.toString()}`, { method: "GET" });
+        res = await fetch(`/api/stripe-arr-correct-report?${qs.toString()}`, { method: "GET" });
       }
       const text = await res.text();
       let json: unknown = null;
@@ -377,7 +377,7 @@ export default function StripePage() {
         groupByFields: groupByFields.join(","),
         sortByPeriodKey,
       });
-      const res = await fetch(`/api/stripe-report/export?${qs.toString()}`, { method: "GET" });
+      const res = await fetch(`/api/stripe-arr-correct-report/export?${qs.toString()}`, { method: "GET" });
       if (!res.ok) {
         const text = await res.text();
         const snippet = text.trim().slice(0, 500);
@@ -391,7 +391,7 @@ export default function StripePage() {
       const filenameMatch = /filename="?([^"]+)"?/i.exec(contentDisposition);
       const stamp = new Date().toISOString().slice(0, 10);
       a.href = url;
-      a.download = filenameMatch?.[1] || `stripe-arr-breakdown-full-${stamp}.csv`;
+      a.download = filenameMatch?.[1] || `stripe-arr-correct-breakdown-full-${stamp}.csv`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e: unknown) {
@@ -428,15 +428,15 @@ export default function StripePage() {
         <div className="stripe-ui__eyebrow">Revenue intelligence</div>
         <div className="stripe-ui__hero-row">
           <div>
-            <h1 className="stripe-ui__title">Stripe ARR Report</h1>
+            <h1 className="stripe-ui__title">Stripe ARR (Correct)</h1>
             <p className="stripe-ui__subtitle">
               Tracks Stripe invoice lines and annualizes each value from its billing window (`period.start` to `period.end`) with
-              backend-driven pagination and full CSV export. The total amount on this page reflects self serve ARR + AI spend.
+              backend-driven pagination and full CSV export. The total amount on this page reflects self serve ARR + AI spend using the corrected Stripe ARR source.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <Link href="/stripe-arr-correct" className="stripe-ui__hero-link">
-              Open Stripe ARR (Correct)
+            <Link href="/stripe" className="stripe-ui__hero-link">
+              Open Stripe report
             </Link>
             <Link href="/diff-sheet" className="stripe-ui__hero-link">
               Open Diff Sheet
@@ -540,8 +540,8 @@ export default function StripePage() {
             <label className="stripe-ui__field-label" htmlFor="stripe-run-btn">
               Run query
             </label>
-            <button id="stripe-run-btn" className="stripe-ui__btn stripe-ui__btn--primary" onClick={run} disabled={loading} aria-label="Run Stripe ARR report">
-              {loading ? "Running..." : "Run Stripe ARR"}
+            <button id="stripe-run-btn" className="stripe-ui__btn stripe-ui__btn--primary" onClick={run} disabled={loading} aria-label="Run Stripe ARR (Correct) report">
+              {loading ? "Running..." : "Run Stripe ARR (Correct)"}
             </button>
           </div>
         </div>
