@@ -74,6 +74,7 @@ const TOKEN_AUDIENCE = "https://oauth2.googleapis.com/token";
 const BQ_SCOPE = "https://www.googleapis.com/auth/bigquery";
 const BQ_MAX_RESULTS = Number(process.env.BIGQUERY_MAX_RESULTS || "50000");
 const STRIPE_ARR_CORRECT_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.invoice_lines_helper";
+const STRIPE_ARR_CORRECT_DEFAULT_PROJECT_ID = "botpress-stripe-data-pipeline";
 const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   GOOGLE_SERVICE_ACCOUNT_JSON: "GOOGLE_SERVICE_ACCOUNT_JSON_STRIPE_ARR_CORRECT",
   GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64_STRIPE_ARR_CORRECT",
@@ -97,15 +98,23 @@ function normalizeProfile(profile?: StripeBigQueryProfile): StripeBigQueryProfil
 }
 
 function readEnv(name: string, profile: StripeBigQueryProfile = "default") {
-  if (profile === "stripe_arr_correct") {
-    const mappedName = STRIPE_ARR_CORRECT_ENV_MAP[name];
-    if (mappedName) {
-      const mappedValue = process.env[mappedName];
-      if (mappedValue) return mappedValue;
-    }
-    if (name === "BIGQUERY_STRIPE_TABLE") {
-      return STRIPE_ARR_CORRECT_DEFAULT_TABLE;
-    }
+  if (profile !== "stripe_arr_correct") return process.env[name];
+
+  const mappedName = STRIPE_ARR_CORRECT_ENV_MAP[name];
+  const mappedValue = mappedName ? process.env[mappedName] : undefined;
+  if (mappedValue) return mappedValue;
+
+  // For the corrected profile, pin table/project defaults and avoid inheriting
+  // the default Stripe serving table by accident.
+  if (name === "BIGQUERY_STRIPE_TABLE") return STRIPE_ARR_CORRECT_DEFAULT_TABLE;
+  if (name === "BIGQUERY_PROJECT_ID") return STRIPE_ARR_CORRECT_DEFAULT_PROJECT_ID;
+  if (name === "BIGQUERY_STRIPE_SERVING_TABLE") return "";
+
+  if (name === "GOOGLE_SERVICE_ACCOUNT_JSON" || name === "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64") {
+    return process.env[name];
+  }
+  if (name === "BIGQUERY_LOCATION") {
+    return process.env[name];
   }
   return process.env[name];
 }
