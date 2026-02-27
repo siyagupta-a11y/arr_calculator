@@ -602,6 +602,10 @@ function buildStripeBigQueryReportQuery(
   const groupByFields = normalizeGroupByFields(request.groupByFields);
   const rawDescriptionExpr =
     "COALESCE(NULLIF(TRIM(CAST(line_item_description AS STRING)), ''), NULLIF(TRIM(CAST(line_item_id AS STRING)), ''), '(no description)')";
+  const normalizedDescriptionExpr = `TRIM(REGEXP_REPLACE(LOWER(${rawDescriptionExpr}), r'\\s+', ' '))`;
+  const forceTwelveByDescriptionCondition = useSimpleDiscountAnnualization
+    ? `(${normalizedDescriptionExpr} = 'web search and crawl' OR STARTS_WITH(${normalizedDescriptionExpr}, 'ai tokens'))`
+    : `${normalizedDescriptionExpr} IN ('web search and crawl', 'ai tokens')`;
   const descriptionPrefixExpr = `COALESCE(NULLIF(TRIM(SPLIT(${rawDescriptionExpr}, ' - ')[SAFE_OFFSET(0)]), ''), '(blank)')`;
   const descriptionBucketExpr = normalizeDescriptionBucketSql(rawDescriptionExpr);
   const descriptionPrefixBucketExpr = normalizeDescriptionBucketSql(descriptionPrefixExpr);
@@ -722,7 +726,7 @@ function buildStripeBigQueryReportQuery(
         )
       ) = period_end_ts
       THEN 1.0
-      WHEN LOWER(TRIM(${rawDescriptionExpr})) IN ('web search and crawl', 'ai tokens')
+      WHEN ${forceTwelveByDescriptionCondition}
       THEN 12.0
       WHEN CAST(period_end_ts AS INT64) <= CAST(period_start_ts AS INT64)
       THEN 0.0
