@@ -82,7 +82,6 @@ To keep Blob as source (default), set:
 Defaults are pinned to avoid inheriting old Stripe settings:
 
 - table: `botpress-stripe-data-pipeline.stripe.invoice_lines_helper`
-- project: `botpress-stripe-data-pipeline`
 - schema mode: `int_ts`
 - ts unit: `milliseconds`
 - target currency: `USD`

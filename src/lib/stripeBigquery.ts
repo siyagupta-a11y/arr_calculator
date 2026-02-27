@@ -74,7 +74,6 @@ const TOKEN_AUDIENCE = "https://oauth2.googleapis.com/token";
 const BQ_SCOPE = "https://www.googleapis.com/auth/bigquery";
 const BQ_MAX_RESULTS = Number(process.env.BIGQUERY_MAX_RESULTS || "50000");
 const STRIPE_ARR_CORRECT_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.invoice_lines_helper";
-const STRIPE_ARR_CORRECT_DEFAULT_PROJECT_ID = "botpress-stripe-data-pipeline";
 const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   GOOGLE_SERVICE_ACCOUNT_JSON: "GOOGLE_SERVICE_ACCOUNT_JSON_STRIPE_ARR_CORRECT",
   GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64_STRIPE_ARR_CORRECT",
@@ -107,7 +106,6 @@ function readEnv(name: string, profile: StripeBigQueryProfile = "default") {
   // For the corrected profile, pin table/project defaults and avoid inheriting
   // the default Stripe serving table by accident.
   if (name === "BIGQUERY_STRIPE_TABLE") return STRIPE_ARR_CORRECT_DEFAULT_TABLE;
-  if (name === "BIGQUERY_PROJECT_ID") return STRIPE_ARR_CORRECT_DEFAULT_PROJECT_ID;
   if (name === "BIGQUERY_STRIPE_SERVING_TABLE") return "";
   if (name === "BIGQUERY_SCHEMA_MODE") return "int_ts";
   if (name === "BIGQUERY_TS_UNIT") return "milliseconds";
