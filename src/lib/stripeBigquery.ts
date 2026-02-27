@@ -604,7 +604,7 @@ function buildStripeBigQueryReportQuery(
     "COALESCE(NULLIF(TRIM(CAST(line_item_description AS STRING)), ''), NULLIF(TRIM(CAST(line_item_id AS STRING)), ''), '(no description)')";
   const normalizedDescriptionExpr = `TRIM(REGEXP_REPLACE(LOWER(${rawDescriptionExpr}), r'\\s+', ' '))`;
   const forceTwelveByDescriptionCondition = useSimpleDiscountAnnualization
-    ? `(${normalizedDescriptionExpr} = 'web search and crawl' OR STARTS_WITH(${normalizedDescriptionExpr}, 'ai tokens'))`
+    ? `(${normalizedDescriptionExpr} = 'web search and crawl' OR STRPOS(${normalizedDescriptionExpr}, 'ai tokens') > 0)`
     : `${normalizedDescriptionExpr} IN ('web search and crawl', 'ai tokens')`;
   const descriptionPrefixExpr = `COALESCE(NULLIF(TRIM(SPLIT(${rawDescriptionExpr}, ' - ')[SAFE_OFFSET(0)]), ''), '(blank)')`;
   const descriptionBucketExpr = normalizeDescriptionBucketSql(rawDescriptionExpr);
