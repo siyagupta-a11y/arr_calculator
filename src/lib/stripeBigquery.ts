@@ -595,7 +595,9 @@ function buildStripeBigQueryReportQuery(
   sourceConfig: BigQuerySourceConfig,
   rangeStart: number,
   rangeEnd: number,
+  profile: StripeBigQueryProfile,
 ): BuiltStripeBigQueryReport {
+  const useSimpleDiscountAnnualization = profile === "stripe_arr_correct";
   const rawSourceQuery = buildRawSourceQuery(sourceConfig);
   const groupByFields = normalizeGroupByFields(request.groupByFields);
   const rawDescriptionExpr =
@@ -792,7 +794,11 @@ function buildStripeBigQueryReportQuery(
       WHEN LOWER(TRIM(p.raw_description)) = 'refund'
       THEN p.amount_major * IFNULL(a.invoice_refund_anchor_multiplier, 0.0)
       WHEN LOWER(TRIM(p.raw_description)) = 'discount'
-      THEN p.amount_major * IFNULL(a.invoice_discount_anchor_multiplier, 0.0)
+      THEN ${
+        useSimpleDiscountAnnualization
+          ? "p.amount_major * p.annualization_multiplier_base"
+          : "p.amount_major * IFNULL(a.invoice_discount_anchor_multiplier, 0.0)"
+      }
       ELSE p.amount_major * p.annualization_multiplier_base
     END AS annualized
   FROM prepared AS p
@@ -800,10 +806,12 @@ function buildStripeBigQueryReportQuery(
     ON a.invoice_id = p.invoice_id
   LEFT JOIN invoice_percent_flag AS f
     ON f.invoice_id = p.invoice_id
-  WHERE NOT (
+  ${useSimpleDiscountAnnualization
+    ? ""
+    : `WHERE NOT (
     LOWER(TRIM(p.raw_description)) = 'discount'
     AND IFNULL(f.has_percent_description, 0) = 1
-  )
+  )`}
 )`);
   ctes.push(`scored AS (
   SELECT
@@ -995,7 +1003,7 @@ async function queryStripeReportBigQueryBase(
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const rangeStart = toQueryTimestamp(request.startTsMs, sourceConfig);
   const rangeEnd = toQueryTimestamp(request.endTsMs, sourceConfig);
-  const built = buildStripeBigQueryReportQuery(request, sourceConfig, rangeStart, rangeEnd);
+  const built = buildStripeBigQueryReportQuery(request, sourceConfig, rangeStart, rangeEnd, profile);
   const accessToken = await getAccessToken(sa);
 
   const summaryQuery = `${built.ctesSql}
