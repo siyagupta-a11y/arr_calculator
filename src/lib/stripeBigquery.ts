@@ -109,6 +109,10 @@ function readEnv(name: string, profile: StripeBigQueryProfile = "default") {
   if (name === "BIGQUERY_STRIPE_TABLE") return STRIPE_ARR_CORRECT_DEFAULT_TABLE;
   if (name === "BIGQUERY_PROJECT_ID") return STRIPE_ARR_CORRECT_DEFAULT_PROJECT_ID;
   if (name === "BIGQUERY_STRIPE_SERVING_TABLE") return "";
+  if (name === "BIGQUERY_SCHEMA_MODE") return "int_ts";
+  if (name === "BIGQUERY_TS_UNIT") return "milliseconds";
+  if (name === "BIGQUERY_SERVING_SCHEMA_MODE") return "int";
+  if (name === "BIGQUERY_SERVING_TS_UNIT") return "milliseconds";
 
   if (name === "GOOGLE_SERVICE_ACCOUNT_JSON" || name === "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64") {
     return process.env[name];

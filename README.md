@@ -78,8 +78,15 @@ To keep Blob as source (default), set:
 
 ### Stripe ARR (Correct) BigQuery Profile
 
-`/stripe-arr-correct` is pinned to BigQuery and uses profile-specific env vars when present, with fallback to default Stripe BigQuery vars.
-It is also pinned to `botpress-stripe-data-pipeline.stripe.invoice_lines_helper` by default and will not inherit `BIGQUERY_STRIPE_SERVING_TABLE` unless you set `BIGQUERY_STRIPE_ARR_CORRECT_SERVING_TABLE`.
+`/stripe-arr-correct` is pinned to BigQuery and uses profile-specific env vars when present.
+Defaults are pinned to avoid inheriting old Stripe settings:
+
+- table: `botpress-stripe-data-pipeline.stripe.invoice_lines_helper`
+- project: `botpress-stripe-data-pipeline`
+- schema mode: `int_ts`
+- ts unit: `milliseconds`
+- target currency: `USD`
+- serving table: disabled unless `BIGQUERY_STRIPE_ARR_CORRECT_SERVING_TABLE` is explicitly set
 
 Set these for the corrected source:
 

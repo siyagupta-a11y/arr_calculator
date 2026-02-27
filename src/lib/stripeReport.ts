@@ -264,9 +264,7 @@ function resolveStripeDataSource(options?: StripeReportOptions): "blob" | "bigqu
 
 function resolveTargetCurrency(options?: StripeReportOptions): string {
   if (options?.bigQueryProfile === "stripe_arr_correct") {
-    return (process.env.STRIPE_ARR_CORRECT_TARGET_CURRENCY || process.env.STRIPE_TARGET_CURRENCY || "USD")
-      .trim()
-      .toLowerCase();
+    return (process.env.STRIPE_ARR_CORRECT_TARGET_CURRENCY || "USD").trim().toLowerCase();
   }
   return (process.env.STRIPE_TARGET_CURRENCY || "USD").trim().toLowerCase();
 }
