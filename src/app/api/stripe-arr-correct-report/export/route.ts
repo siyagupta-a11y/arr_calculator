@@ -7,6 +7,7 @@ export const maxDuration = 300;
 const STRIPE_ARR_CORRECT_OPTIONS = {
   forceSource: "bigquery",
   bigQueryProfile: "stripe_arr_correct",
+  strictCsv: true,
 } as const;
 
 function buildRequestFromSearchParams(searchParams: URLSearchParams): StripeReportRequest {

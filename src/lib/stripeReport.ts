@@ -32,6 +32,7 @@ export type StripeReportRequest = {
 export type StripeReportOptions = {
   forceSource?: "blob" | "bigquery";
   bigQueryProfile?: StripeBigQueryProfile;
+  strictCsv?: boolean;
 };
 
 type StripeReportBaseResponse = {
@@ -788,8 +789,11 @@ export async function generateStripeCustomerArrForMonth(
   return { month: normalizedMonth, rows };
 }
 
-function escapeCsvCell(value: string | number) {
-  const text = String(value ?? "");
+function escapeCsvCell(value: string | number, strictCsv = false) {
+  const text = String(value ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (strictCsv) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
   if (text.includes(",") || text.includes('"') || text.includes("\n")) {
     return `"${text.replace(/"/g, '""')}"`;
   }
@@ -805,6 +809,7 @@ export async function generateStripeReportCsv(body: StripeReportRequest, options
   const groupByFields = normalizeGroupByFields(body.groupByFields);
   const showDefaultColumns = groupByFields.length === 0;
 
+  const strictCsv = options?.strictCsv === true;
   const headers = [
     ...(showDefaultColumns
       ? ["Customer ID", "Line Item ID", "Line Item Description"]
@@ -812,14 +817,18 @@ export async function generateStripeReportCsv(body: StripeReportRequest, options
     ...base.periods.map((p) => p.label),
   ];
 
-  const lines: string[] = [headers.map(escapeCsvCell).join(",")];
+  const lines: string[] = [headers.map((value) => escapeCsvCell(value, strictCsv)).join(",")];
   for (const row of base.rows) {
     const leadingColumns = showDefaultColumns
       ? [row.dealId || "", row.lineItemId || "", row.lineItemDescription || ""]
       : groupByFields.map((field) => row.groupValues?.[field] || "(blank)");
     const valueColumns = base.periods.map((p) => round2(row.valuesByPeriod[p.key] || 0));
-    lines.push([...leadingColumns, ...valueColumns].map(escapeCsvCell).join(","));
+    const csvRow = [...leadingColumns, ...valueColumns];
+    if (csvRow.length !== headers.length) {
+      throw new Error("CSV row width mismatch");
+    }
+    lines.push(csvRow.map((value) => escapeCsvCell(value, strictCsv)).join(","));
   }
 
-  return lines.join("\n");
+  return lines.join(strictCsv ? "\r\n" : "\n");
 }
