@@ -597,13 +597,13 @@ function buildStripeBigQueryReportQuery(
   rangeEnd: number,
   profile: StripeBigQueryProfile,
 ): BuiltStripeBigQueryReport {
-  const useSimpleDiscountAnnualization = profile === "stripe_arr_correct";
+  const useStripeArrCorrectAnnualizationRules = profile === "stripe_arr_correct";
   const rawSourceQuery = buildRawSourceQuery(sourceConfig);
   const groupByFields = normalizeGroupByFields(request.groupByFields);
   const rawDescriptionExpr =
     "COALESCE(NULLIF(TRIM(CAST(line_item_description AS STRING)), ''), NULLIF(TRIM(CAST(line_item_id AS STRING)), ''), '(no description)')";
   const normalizedDescriptionExpr = `TRIM(REGEXP_REPLACE(LOWER(${rawDescriptionExpr}), r'\\s+', ' '))`;
-  const forceTwelveByDescriptionCondition = useSimpleDiscountAnnualization
+  const forceTwelveByDescriptionCondition = useStripeArrCorrectAnnualizationRules
     ? `(${normalizedDescriptionExpr} = 'web search and crawl' OR STRPOS(${normalizedDescriptionExpr}, 'ai tokens') > 0)`
     : `${normalizedDescriptionExpr} IN ('web search and crawl', 'ai tokens')`;
   const descriptionPrefixExpr = `COALESCE(NULLIF(TRIM(SPLIT(${rawDescriptionExpr}, ' - ')[SAFE_OFFSET(0)]), ''), '(blank)')`;
@@ -796,10 +796,14 @@ function buildStripeBigQueryReportQuery(
     p.*,
     CASE
       WHEN LOWER(TRIM(p.raw_description)) = 'refund'
-      THEN p.amount_major * IFNULL(a.invoice_refund_anchor_multiplier, 0.0)
+      THEN ${
+        useStripeArrCorrectAnnualizationRules
+          ? "p.amount_major * 12.0"
+          : "p.amount_major * IFNULL(a.invoice_refund_anchor_multiplier, 0.0)"
+      }
       WHEN LOWER(TRIM(p.raw_description)) = 'discount'
       THEN ${
-        useSimpleDiscountAnnualization
+        useStripeArrCorrectAnnualizationRules
           ? "p.amount_major * p.annualization_multiplier_base"
           : "p.amount_major * IFNULL(a.invoice_discount_anchor_multiplier, 0.0)"
       }
@@ -810,7 +814,7 @@ function buildStripeBigQueryReportQuery(
     ON a.invoice_id = p.invoice_id
   LEFT JOIN invoice_percent_flag AS f
     ON f.invoice_id = p.invoice_id
-  ${useSimpleDiscountAnnualization
+  ${useStripeArrCorrectAnnualizationRules
     ? ""
     : `WHERE NOT (
     LOWER(TRIM(p.raw_description)) = 'discount'
