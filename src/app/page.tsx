@@ -59,6 +59,15 @@ function groupValueForRow(r: UiRow, field: GroupField) {
   return r.accountId || "(blank)";
 }
 
+function normalizeCaseInsensitiveValue(value: string) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeGroupKeyValue(field: GroupField, value: string) {
+  if (field === "country") return normalizeCaseInsensitiveValue(value);
+  return String(value || "").trim();
+}
+
 function round2(n: number) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -154,12 +163,14 @@ export default function Home() {
 
   const countryOptions = useMemo(() => {
     if (!data) return [];
-    const values = new Set<string>();
+    const valuesByNormalized = new Map<string, string>();
     for (const r of data.rows || []) {
       const value = String(r.country || "").trim();
-      if (value) values.add(value);
+      if (!value) continue;
+      const normalized = normalizeCaseInsensitiveValue(value);
+      if (!valuesByNormalized.has(normalized)) valuesByNormalized.set(normalized, value);
     }
-    return Array.from(values).sort((a, b) => a.localeCompare(b));
+    return Array.from(valuesByNormalized.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   }, [data]);
 
   const industryOptions = useMemo(() => {
@@ -208,7 +219,9 @@ export default function Home() {
         filterDeploymentType === "all" || (r.deploymentType || "") === filterDeploymentType;
       const accountIdOk = !accountIdNeedle || (r.accountId || "").toLowerCase().includes(accountIdNeedle);
       const territoryOk = filterTerritory === "all" || (r.territory || "") === filterTerritory;
-      const countryOk = filterCountry === "all" || (r.country || "") === filterCountry;
+      const countryOk =
+        filterCountry === "all" ||
+        normalizeCaseInsensitiveValue(r.country || "") === normalizeCaseInsensitiveValue(filterCountry);
       const industryOk = filterIndustry === "all" || (r.industry || "") === filterIndustry;
       const dealTypeOk = filterDealType === "all" || (r.dealType || "") === filterDealType;
       return dealNameOk && deploymentTypeOk && accountIdOk && territoryOk && countryOk && industryOk && dealTypeOk;
@@ -221,7 +234,9 @@ export default function Home() {
     const map = new Map<string, UiRow>();
 
     for (const r of filteredBaseRows) {
-      const key = groupByFields.map((field) => `${field}:${groupValueForRow(r, field)}`).join("|");
+      const key = groupByFields
+        .map((field) => `${field}:${normalizeGroupKeyValue(field, groupValueForRow(r, field))}`)
+        .join("|");
 
       if (!map.has(key)) {
         const groupValues: Partial<Record<GroupField, string>> = {};

@@ -53,6 +53,17 @@ function parsePrimaryCompanyId(raw: string) {
   );
 }
 
+function isCompanyScopesError(err: unknown) {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message || "";
+  return (
+    msg.includes("HubSpot API error 403") &&
+    (msg.includes("\"category\":\"MISSING_SCOPES\"") ||
+      msg.includes("requiredGranularScopes") ||
+      msg.includes("crm.objects.companies"))
+  );
+}
+
 function formatDayKey(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
@@ -184,9 +195,15 @@ export async function generateReport(
         .filter((id) => !!id),
     ),
   );
-  const companiesById: Map<string, HubspotCompany> = companyIds.length
-    ? await batchReadCompanies(companyIds, companyCountryProps)
-    : new Map<string, HubspotCompany>();
+  let companiesById: Map<string, HubspotCompany> = new Map<string, HubspotCompany>();
+  if (companyIds.length) {
+    try {
+      companiesById = await batchReadCompanies(companyIds, companyCountryProps);
+    } catch (err) {
+      if (!isCompanyScopesError(err)) throw err;
+      console.warn("Skipping company-country enrichment: missing HubSpot company read scopes.");
+    }
+  }
 
   for (const meta of allDealMeta) {
     const companyId = parsePrimaryCompanyId(meta.accountId);
