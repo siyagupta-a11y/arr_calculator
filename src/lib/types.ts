@@ -10,6 +10,11 @@ export type HubspotDeal = {
   properties?: Record<string, unknown>;
 };
 
+export type HubspotCompany = {
+  id: string;
+  properties?: Record<string, unknown>;
+};
+
 export type HubspotLineItem = {
   id: string;
   properties?: HubspotLineItemProps;
@@ -68,6 +73,7 @@ export type ReportRow = {
   accountId?: string;
   territory?: string;
   country?: string;
+  companyCountry?: string;
   industry?: string;
   lineItemDescription?: string;
   groupValues?: Record<string, string>;

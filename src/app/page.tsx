@@ -38,6 +38,7 @@ const GROUP_BY_OPTIONS: Array<{ key: GroupField; label: string }> = [
 type UiRow = {
   dealName: string;
   dealId: string;
+  companyCountry?: string;
   deploymentType?: string;
   accountId?: string;
   territory?: string;
@@ -187,6 +188,7 @@ export default function Home() {
     const baseRows: UiRow[] = (data.rows || []).map((r: ReportRow) => ({
       dealName: r.dealName || "",
       dealId: r.dealId || "",
+      companyCountry: r.companyCountry || "",
       deploymentType: r.deploymentType || "",
       accountId: r.accountId || "",
       territory: r.territory || "",
@@ -230,6 +232,7 @@ export default function Home() {
         map.set(key, {
           dealName: r.dealName,
           dealId: r.dealId,
+          companyCountry: r.companyCountry,
           deploymentType: r.deploymentType,
           accountId: r.accountId,
           territory: r.territory,
@@ -283,6 +286,7 @@ export default function Home() {
       ? ["Deal name"]
       : groupByFields.map((field) => GROUP_BY_OPTIONS.find((opt) => opt.key === field)?.label || field)),
     ...(showDealIdColumn ? ["Deal ID"] : []),
+    ...(showDealIdColumn ? ["Company Country"] : []),
     ...(data?.periods.map((p) => p.label) || []),
   ];
 
@@ -310,7 +314,7 @@ export default function Home() {
     if (!data) return;
 
     const csvHeaders = breakdownHeaders.map((h) =>
-      h !== "Deal name" && h !== "Deal ID" ? `${h}${currencySuffix()}` : h,
+      h !== "Deal name" && h !== "Deal ID" && h !== "Company Country" ? `${h}${currencySuffix()}` : h,
     );
     const lines: string[] = [csvHeaders.map(escapeCsvCell).join(",")];
 
@@ -320,8 +324,9 @@ export default function Home() {
           ? [r.dealName]
           : groupByFields.map((field) => r.groupValues[field] || "(blank)");
       const dealIdCol = showDealIdColumn ? [r.dealId] : [];
+      const companyCountryCol = showDealIdColumn ? [r.companyCountry || "(blank)"] : [];
       const valueCols = (data.periods || []).map((p) => round2(scaleCurrency(r.valuesByPeriod[p.key] || 0)));
-      const row = [...leadingColumns, ...dealIdCol, ...valueCols];
+      const row = [...leadingColumns, ...dealIdCol, ...companyCountryCol, ...valueCols];
       lines.push(row.map(escapeCsvCell).join(","));
     }
 
@@ -620,6 +625,9 @@ export default function Home() {
                       ))
                     )}
                     {showDealIdColumn && <td style={{ padding: 8, whiteSpace: "nowrap" }}>{r.dealId}</td>}
+                    {showDealIdColumn && (
+                      <td style={{ padding: 8, whiteSpace: "nowrap" }}>{r.companyCountry || "(blank)"}</td>
+                    )}
 
                     {data.periods.map((p) => (
                       <td key={p.key} style={{ padding: 8, textAlign: "right", whiteSpace: "nowrap" }}>

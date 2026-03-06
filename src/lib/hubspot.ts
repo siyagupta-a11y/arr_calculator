@@ -1,5 +1,5 @@
 // lib/hubspot.ts
-import { HubspotDeal, HubspotLineItem, HubspotSearchResponse } from "./types";
+import { HubspotCompany, HubspotDeal, HubspotLineItem, HubspotSearchResponse } from "./types";
 
 const HUBSPOT_BASE = "https://api.hubapi.com";
 const HUBSPOT_ASSOC_CONCURRENCY = 4;
@@ -13,6 +13,7 @@ type CacheEntry<T> = { value: T; expiresAt: number };
 
 const DEALS_CACHE = new Map<string, CacheEntry<HubspotDeal[]>>();
 const DEAL_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
+const COMPANY_CACHE = new Map<string, CacheEntry<HubspotCompany>>();
 const LINE_ITEM_CACHE = new Map<string, CacheEntry<HubspotLineItem>>();
 
 function getToken() {
@@ -277,6 +278,47 @@ export async function batchReadLineItems(ids: string[], properties: string[]) {
       const id = String(li.id);
       map.set(id, li);
       writeCache(LINE_ITEM_CACHE, id, li);
+    });
+  }
+
+  return map;
+}
+
+export async function batchReadCompanies(ids: string[], properties: string[]) {
+  const url = `${HUBSPOT_BASE}/crm/v3/objects/companies/batch/read`;
+  const map = new Map<string, HubspotCompany>();
+
+  const dedupedIds = Array.from(new Set(ids.filter((id) => !!id)));
+  const missingIds: string[] = [];
+
+  for (const id of dedupedIds) {
+    const cached = readCache(COMPANY_CACHE, id);
+    if (cached) map.set(id, cached);
+    else missingIds.push(id);
+  }
+
+  if (!missingIds.length) return map;
+
+  const chunkSize = 100;
+  const chunks: string[][] = [];
+  for (let i = 0; i < missingIds.length; i += chunkSize) chunks.push(missingIds.slice(i, i + chunkSize));
+
+  const chunkResults = await mapWithConcurrency(chunks, HUBSPOT_BATCH_READ_CONCURRENCY, async (chunk) => {
+    const json = await hsFetch(url, {
+      method: "POST",
+      body: JSON.stringify({
+        properties,
+        inputs: chunk.map((id) => ({ id })),
+      }),
+    });
+    return (json.results || []) as HubspotCompany[];
+  });
+
+  for (const companies of chunkResults) {
+    companies.forEach((company) => {
+      const id = String(company.id);
+      map.set(id, company);
+      writeCache(COMPANY_CACHE, id, company);
     });
   }
 

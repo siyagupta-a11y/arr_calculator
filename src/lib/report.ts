@@ -1,4 +1,4 @@
-import { fetchDealsInStage, fetchLineItemIdsForDeals, batchReadLineItems } from "@/lib/hubspot";
+import { fetchDealsInStage, fetchLineItemIdsForDeals, batchReadCompanies, batchReadLineItems } from "@/lib/hubspot";
 import { getMonthlyAverageFxRateForCloseMonth } from "@/lib/fx";
 import {
   LI_PROPS,
@@ -12,7 +12,7 @@ import {
   aggregatePeriodsFromMonthly,
   round2,
 } from "@/lib/logic";
-import type { ReportRequest, ReportResponse, ReportRow, HubspotLineItem } from "@/lib/types";
+import type { ReportRequest, ReportResponse, ReportRow, HubspotCompany, HubspotLineItem } from "@/lib/types";
 
 function mustEnv(name: string) {
   const v = process.env[name];
@@ -27,6 +27,7 @@ type DealMeta = {
   accountId: string;
   territory: string;
   country: string;
+  companyCountry: string;
   industry: string;
   closeDate: Date | null;
   closeMonth: Date | null;
@@ -34,6 +35,23 @@ type DealMeta = {
   dealCurrency: string;
   dealType: string;
 };
+
+function firstNonEmptyProp(properties: Record<string, unknown>, candidates: string[]) {
+  for (const key of candidates) {
+    const value = String(properties[key] || "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function parsePrimaryCompanyId(raw: string) {
+  return (
+    raw
+      .split(/[,\s;|]+/)
+      .map((part) => part.trim())
+      .find((part) => /^\d+$/.test(part)) || ""
+  );
+}
 
 function formatDayKey(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -110,6 +128,11 @@ export async function generateReport(
   const TERRITORY_PROP = process.env.DEAL_TERRITORY_PROP || "territory";
   const COUNTRY_PROP = process.env.DEAL_COUNTRY_PROP || "country";
   const INDUSTRY_PROP = process.env.DEAL_INDUSTRY_PROP || "industry";
+  const COMPANY_COUNTRY_PROP = process.env.COMPANY_COUNTRY_PROP || "country";
+  const dealCountryProps = Array.from(new Set([COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]));
+  const companyCountryProps = Array.from(
+    new Set([COMPANY_COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]),
+  );
 
   const dealProps = [
     "dealname",
@@ -143,7 +166,8 @@ export async function generateReport(
       deploymentType: String(pDeal[DEPLOYMENT_TYPE_PROP] || ""),
       accountId: String(pDeal[ACCOUNT_ID_PROP] || ""),
       territory: String(pDeal[TERRITORY_PROP] || ""),
-      country: String(pDeal[COUNTRY_PROP] || ""),
+      country: firstNonEmptyProp(pDeal, dealCountryProps),
+      companyCountry: "",
       industry: String(pDeal[INDUSTRY_PROP] || ""),
       closeDate,
       closeMonth,
@@ -152,6 +176,28 @@ export async function generateReport(
       dealType: String(pDeal.dealtype || "").trim(),
     };
   });
+
+  const companyIds = Array.from(
+    new Set(
+      allDealMeta
+        .map((m) => parsePrimaryCompanyId(m.accountId))
+        .filter((id) => !!id),
+    ),
+  );
+  const companiesById: Map<string, HubspotCompany> = companyIds.length
+    ? await batchReadCompanies(companyIds, companyCountryProps)
+    : new Map<string, HubspotCompany>();
+
+  for (const meta of allDealMeta) {
+    const companyId = parsePrimaryCompanyId(meta.accountId);
+    if (!companyId) continue;
+    const company = companiesById.get(companyId);
+    const companyProps = (company?.properties || {}) as Record<string, unknown>;
+    const companyCountry = firstNonEmptyProp(companyProps, companyCountryProps);
+    if (!companyCountry) continue;
+    meta.companyCountry = companyCountry;
+    if (!meta.country) meta.country = companyCountry;
+  }
 
   const dealMeta =
     body.mode === "contracted" && !body.contractedIncludeAllDeals && body.grain !== "daily"
@@ -201,6 +247,7 @@ export async function generateReport(
       accountId,
       territory,
       country,
+      companyCountry,
       industry,
       closeDate,
       closeMonth,
@@ -365,6 +412,7 @@ export async function generateReport(
         accountId,
         territory,
         country,
+        companyCountry,
         industry,
       });
     }
