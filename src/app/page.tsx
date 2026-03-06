@@ -53,7 +53,10 @@ function groupValueForRow(r: UiRow, field: GroupField) {
   if (field === "dealName") return r.dealName || "(blank)";
   if (field === "deploymentType") return r.deploymentType || "(blank)";
   if (field === "territory") return r.territory || "(blank)";
-  if (field === "country") return r.country || "(blank)";
+  if (field === "country") {
+    const country = String(r.country || "").trim();
+    return country ? canonicalCountryLabel(country) : "(blank)";
+  }
   if (field === "industry") return r.industry || "(blank)";
   if (field === "dealType") return r.dealType || "(blank)";
   return r.accountId || "(blank)";
@@ -63,8 +66,37 @@ function normalizeCaseInsensitiveValue(value: string) {
   return String(value || "").trim().toLowerCase();
 }
 
+function canonicalCountryKey(value: string) {
+  const normalized = normalizeCaseInsensitiveValue(value);
+  if (!normalized) return "";
+
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+
+  if (
+    compact === "us" ||
+    compact === "usa" ||
+    compact === "unitedstates" ||
+    compact === "unitedstatesofamerica"
+  ) {
+    return "united states";
+  }
+
+  if (compact === "uae" || compact === "unitedarabemirates") {
+    return "united arab emirates";
+  }
+
+  return normalized;
+}
+
+function canonicalCountryLabel(value: string) {
+  const key = canonicalCountryKey(value);
+  if (key === "united states") return "United States";
+  if (key === "united arab emirates") return "United Arab Emirates";
+  return String(value || "").trim();
+}
+
 function normalizeGroupKeyValue(field: GroupField, value: string) {
-  if (field === "country") return normalizeCaseInsensitiveValue(value);
+  if (field === "country") return canonicalCountryKey(value);
   return String(value || "").trim();
 }
 
@@ -167,8 +199,8 @@ export default function Home() {
     for (const r of data.rows || []) {
       const value = String(r.country || "").trim();
       if (!value) continue;
-      const normalized = normalizeCaseInsensitiveValue(value);
-      if (!valuesByNormalized.has(normalized)) valuesByNormalized.set(normalized, value);
+      const normalized = canonicalCountryKey(value);
+      if (!valuesByNormalized.has(normalized)) valuesByNormalized.set(normalized, canonicalCountryLabel(value));
     }
     return Array.from(valuesByNormalized.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   }, [data]);
@@ -221,7 +253,7 @@ export default function Home() {
       const territoryOk = filterTerritory === "all" || (r.territory || "") === filterTerritory;
       const countryOk =
         filterCountry === "all" ||
-        normalizeCaseInsensitiveValue(r.country || "") === normalizeCaseInsensitiveValue(filterCountry);
+        canonicalCountryKey(r.country || "") === canonicalCountryKey(filterCountry);
       const industryOk = filterIndustry === "all" || (r.industry || "") === filterIndustry;
       const dealTypeOk = filterDealType === "all" || (r.dealType || "") === filterDealType;
       return dealNameOk && deploymentTypeOk && accountIdOk && territoryOk && countryOk && industryOk && dealTypeOk;
