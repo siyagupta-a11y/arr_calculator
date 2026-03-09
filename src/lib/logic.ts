@@ -94,7 +94,11 @@ export function computeWindowForLineItem(p: HubspotLineItemProps): Window | null
 
   let endIsOpenEnded = false;
 
-  if (!end) {
+  if (end) {
+    // HubSpot recurring/billing end dates behave like exclusive bounds in this report context.
+    // Shift to an inclusive day-end boundary for period coverage logic.
+    end = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 1);
+  } else {
     const term = toNumber(p.hs_term_in_months);
     if (term) {
       end = new Date(start.getFullYear(), start.getMonth() + term, start.getDate() - 1);
