@@ -636,8 +636,7 @@ function buildStripeBigQueryReportQuery(
   ))) IN ('true', '1', 't', 'yes', 'y')`;
   const cancelledInCurrentMonthExpr = `(
     ${cancelledFlagExpr}
-    AND ${cancellationDateExpr} >= DATE_TRUNC(CURRENT_DATE('UTC'), MONTH)
-    AND ${cancellationDateExpr} < DATE_ADD(DATE_TRUNC(CURRENT_DATE('UTC'), MONTH), INTERVAL 1 MONTH)
+    AND DATE_TRUNC(${cancellationDateExpr}, MONTH) = DATE_TRUNC(DATE(TIMESTAMP_MILLIS(period_start_ts)), MONTH)
   )`;
   const descriptionPrefixExpr = `COALESCE(NULLIF(TRIM(SPLIT(${rawDescriptionExpr}, ' - ')[SAFE_OFFSET(0)]), ''), '(blank)')`;
   const descriptionBucketExpr = normalizeDescriptionBucketSql(rawDescriptionExpr);
