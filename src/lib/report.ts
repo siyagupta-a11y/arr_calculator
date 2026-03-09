@@ -295,7 +295,6 @@ export async function generateReport(
 
     const earliestLiId = earliest?.liId || null;
     const earliestStart = earliest?.start || null;
-    const earliestBillingStartMonth = earliestStart ? firstOfMonth(earliestStart) : null;
 
     const allowCarry =
       body.mode === "contracted" &&
@@ -312,6 +311,13 @@ export async function generateReport(
 
       const liArr = computeCalculatedArrForLineItem(p);
       const liArrFx = fx.rate && liArr ? round2(liArr * fx.rate) : 0;
+      const isEarliestRecurring = earliestLiId && liId === earliestLiId;
+      const earliestStartDay = earliestStart
+        ? new Date(earliestStart.getFullYear(), earliestStart.getMonth(), earliestStart.getDate())
+        : null;
+      const closeDay = closeDate
+        ? new Date(closeDate.getFullYear(), closeDate.getMonth(), closeDate.getDate())
+        : null;
 
       const valuesMonthly: Record<string, number> = {};
       for (const mp of monthlyPeriods) {
@@ -320,8 +326,8 @@ export async function generateReport(
           continue;
         }
 
-        const monthEnd = mp.end;
-        const coversMonthEnd = w.start <= monthEnd && w.end >= monthEnd;
+        const monthEndPoint = new Date(mp.end.getFullYear(), mp.end.getMonth(), mp.end.getDate());
+        const coversMonthEnd = w.start <= monthEndPoint && w.end >= monthEndPoint;
 
         if (body.mode === "arr") {
           valuesMonthly[mp.key] = coversMonthEnd ? liArrFx : 0;
@@ -333,24 +339,19 @@ export async function generateReport(
           continue;
         }
 
-        const isEarliestRecurring = earliestLiId && liId === earliestLiId;
-
         if (!isEarliestRecurring) {
           valuesMonthly[mp.key] = coversMonthEnd ? liArrFx : 0;
           continue;
         }
 
-        const isCloseMonth = closeMonth ? mp.start.getTime() === closeMonth.getTime() : false;
-
         const inCarryRange =
           !!allowCarry &&
-          !!closeMonth &&
-          !!earliestBillingStartMonth &&
-          mp.start.getTime() >= closeMonth.getTime() &&
-          mp.start.getTime() <= earliestBillingStartMonth.getTime();
+          !!closeDay &&
+          !!earliestStartDay &&
+          monthEndPoint.getTime() >= closeDay.getTime() &&
+          monthEndPoint.getTime() <= earliestStartDay.getTime();
 
-        const show = isCloseMonth || inCarryRange || coversMonthEnd;
-        valuesMonthly[mp.key] = show ? liArrFx : 0;
+        valuesMonthly[mp.key] = inCarryRange || coversMonthEnd ? liArrFx : 0;
       }
 
       const valuesByPeriod: Record<string, number> = {};
@@ -364,12 +365,6 @@ export async function generateReport(
         }
       } else {
         const closeDayKey = closeDate ? formatDayKey(closeDate) : null;
-        const earliestStartDay = earliestStart
-          ? new Date(earliestStart.getFullYear(), earliestStart.getMonth(), earliestStart.getDate())
-          : null;
-        const closeDay = closeDate
-          ? new Date(closeDate.getFullYear(), closeDate.getMonth(), closeDate.getDate())
-          : null;
 
         for (const dp of dailyPeriods) {
           const dayPoint = dp.day;
@@ -385,7 +380,6 @@ export async function generateReport(
             continue;
           }
 
-          const isEarliestRecurring = earliestLiId && liId === earliestLiId;
           if (!isEarliestRecurring) {
             valuesByPeriod[dp.key] = coversDay ? liArrFx : 0;
             continue;
