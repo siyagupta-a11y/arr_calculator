@@ -71,6 +71,7 @@ export type ReportRow = {
   valuesByPeriod: Record<string, number>;
   deploymentType?: string;
   accountId?: string;
+  accountName?: string;
   territory?: string;
   country?: string;
   companyCountry?: string;
