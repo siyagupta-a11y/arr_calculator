@@ -222,10 +222,7 @@ export async function generateReport(
     if (!meta.country) meta.country = companyCountry;
   }
 
-  const dealMeta =
-    body.mode === "contracted" && !body.contractedIncludeAllDeals && body.grain !== "daily"
-      ? allDealMeta.filter((m) => m.closeDateInRange)
-      : allDealMeta;
+  const dealMeta = allDealMeta;
   if (!dealMeta.length) {
     return { periods: outputPeriods, totalsByPeriod: [], rows: [] };
   }
