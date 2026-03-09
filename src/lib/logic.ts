@@ -64,7 +64,16 @@ export function parseDate(v: unknown): Date | null {
   // epoch ms or seconds
   if (/^\d{10,13}$/.test(s)) {
     const n = Number(s);
-    return new Date(s.length === 10 ? n * 1000 : n);
+    const epochMs = s.length === 10 ? n * 1000 : n;
+    const dt = new Date(epochMs);
+    if (isNaN(dt.getTime())) return null;
+
+    // HubSpot date-type fields are often returned as epoch UTC midnight.
+    // Preserve the calendar day in local time to avoid timezone day-shift.
+    if (dt.getUTCHours() === 0 && dt.getUTCMinutes() === 0 && dt.getUTCSeconds() === 0 && dt.getUTCMilliseconds() === 0) {
+      return new Date(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate());
+    }
+    return dt;
   }
 
   // DATE-ONLY
