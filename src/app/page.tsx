@@ -15,6 +15,7 @@ function fmtMoney(n: number, currencyDisplay: CurrencyDisplay) {
 }
 
 type CurrencyDisplay = "normal" | "thousands" | "millions";
+type ArrDisplayScope = "all" | "cloud";
 
 type GroupField =
   | "dealName"
@@ -106,6 +107,10 @@ function normalizeGroupKeyValue(field: GroupField, value: string) {
   return String(value || "").trim();
 }
 
+function isCloudDeploymentType(value: string) {
+  return normalizeCaseInsensitiveValue(value) === "cloud";
+}
+
 function round2(n: number) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -131,6 +136,7 @@ export default function Home() {
   const [filterIndustry, setFilterIndustry] = useState("all");
   const [filterDealType, setFilterDealType] = useState("all");
   const [currencyDisplay, setCurrencyDisplay] = useState<CurrencyDisplay>("normal");
+  const [arrDisplayScope, setArrDisplayScope] = useState<ArrDisplayScope>("all");
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ReportResponse | null>(null);
@@ -253,6 +259,7 @@ export default function Home() {
     const accountIdNeedle = filterAccountId.trim().toLowerCase();
 
     const filteredBaseRows = baseRows.filter((r) => {
+      const displayScopeOk = arrDisplayScope === "all" || isCloudDeploymentType(r.deploymentType || "");
       const dealNameOk = !dealNameNeedle || (r.dealName || "").toLowerCase().includes(dealNameNeedle);
       const deploymentTypeOk =
         filterDeploymentType === "all" || (r.deploymentType || "") === filterDeploymentType;
@@ -263,7 +270,16 @@ export default function Home() {
         canonicalCountryKey(r.country || "") === canonicalCountryKey(filterCountry);
       const industryOk = filterIndustry === "all" || (r.industry || "") === filterIndustry;
       const dealTypeOk = filterDealType === "all" || (r.dealType || "") === filterDealType;
-      return dealNameOk && deploymentTypeOk && accountIdOk && territoryOk && countryOk && industryOk && dealTypeOk;
+      return (
+        displayScopeOk &&
+        dealNameOk &&
+        deploymentTypeOk &&
+        accountIdOk &&
+        territoryOk &&
+        countryOk &&
+        industryOk &&
+        dealTypeOk
+      );
     });
 
     if (groupByFields.length === 0) {
@@ -322,6 +338,7 @@ export default function Home() {
     filterCountry,
     filterIndustry,
     filterDealType,
+    arrDisplayScope,
   ]);
 
   const totalsByPeriodForDisplayed = useMemo(() => {
@@ -463,6 +480,15 @@ export default function Home() {
             <option value="normal">Normal</option>
             <option value="thousands">Thousands (K)</option>
             <option value="millions">Millions (M)</option>
+          </select>
+        </div>
+
+        <div>
+          <label>ARR display</label>
+          <br />
+          <select value={arrDisplayScope} onChange={(e) => setArrDisplayScope(e.target.value as ArrDisplayScope)}>
+            <option value="all">All</option>
+            <option value="cloud">Cloud</option>
           </select>
         </div>
 
