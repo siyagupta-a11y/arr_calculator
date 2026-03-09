@@ -296,7 +296,8 @@ SELECT
   CAST(COALESCE(quantity, 1) AS FLOAT64) AS quantity,
   CAST(UNIX_MILLIS(period_start) AS INT64) AS period_start_ts,
   CAST(UNIX_MILLIS(period_end) AS INT64) AS period_end_ts,
-  CAST(UNIX_MILLIS(period_start) AS INT64) AS invoice_created_ts
+  CAST(UNIX_MILLIS(period_start) AS INT64) AS invoice_created_ts,
+  TO_JSON_STRING(t) AS raw_row_json
 FROM \`${table}\` AS t
 WHERE
   period_start <= TIMESTAMP_MILLIS(@range_end_ts)
@@ -315,7 +316,8 @@ SELECT
   CAST(quantity AS FLOAT64) AS quantity,
   CAST(period_start_ts AS INT64) AS period_start_ts,
   CAST(period_end_ts AS INT64) AS period_end_ts,
-  CAST(invoice_created_ts AS INT64) AS invoice_created_ts
+  CAST(invoice_created_ts AS INT64) AS invoice_created_ts,
+  TO_JSON_STRING(t) AS raw_row_json
 FROM \`${table}\` AS t
 WHERE
   CAST(period_start_ts AS INT64) <= @range_end_ts
@@ -346,7 +348,8 @@ SELECT
   CAST(quantity AS FLOAT64) AS quantity,
   CAST(UNIX_MILLIS(period_start_ts) AS INT64) AS period_start_ts,
   CAST(UNIX_MILLIS(period_end_ts) AS INT64) AS period_end_ts,
-  CAST(UNIX_MILLIS(COALESCE(invoice_created_ts, period_start_ts)) AS INT64) AS invoice_created_ts
+  CAST(UNIX_MILLIS(COALESCE(invoice_created_ts, period_start_ts)) AS INT64) AS invoice_created_ts,
+  TO_JSON_STRING(t) AS raw_row_json
 FROM \`${table}\` AS t
 WHERE
   period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
@@ -380,7 +383,8 @@ SELECT
   CAST(quantity AS FLOAT64) AS quantity,
   CAST(period_start_ts AS INT64) AS period_start_ts,
   CAST(period_end_ts AS INT64) AS period_end_ts,
-  CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts
+  CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts,
+  TO_JSON_STRING(t) AS raw_row_json
 FROM \`${table}\` AS t
 WHERE
   CAST(period_start_ts AS INT64) <= @range_end_ts
@@ -432,7 +436,8 @@ SELECT
   CAST(quantity AS FLOAT64) AS quantity,
   CAST(period_start_ts AS INT64) AS period_start_ts,
   CAST(period_end_ts AS INT64) AS period_end_ts,
-  CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts
+  CAST(COALESCE(invoice_created_ts, period_start_ts) AS INT64) AS invoice_created_ts,
+  TO_JSON_STRING(t) AS raw_row_json
 FROM \`${sourceConfig.servingTable}\` AS t
 WHERE
   CAST(period_start_ts AS INT64) <= @range_end_ts
@@ -451,7 +456,8 @@ SELECT
   CAST(quantity AS FLOAT64) AS quantity,
   CAST(UNIX_MILLIS(period_start_ts) AS INT64) AS period_start_ts,
   CAST(UNIX_MILLIS(period_end_ts) AS INT64) AS period_end_ts,
-  CAST(UNIX_MILLIS(COALESCE(invoice_created_ts, period_start_ts)) AS INT64) AS invoice_created_ts
+  CAST(UNIX_MILLIS(COALESCE(invoice_created_ts, period_start_ts)) AS INT64) AS invoice_created_ts,
+  TO_JSON_STRING(t) AS raw_row_json
 FROM \`${sourceConfig.servingTable}\` AS t
 WHERE
   period_start_ts <= TIMESTAMP_MILLIS(@range_end_ts)
@@ -606,6 +612,33 @@ function buildStripeBigQueryReportQuery(
   const forceTwelveByDescriptionCondition = useStripeArrCorrectAnnualizationRules
     ? `(${normalizedDescriptionExpr} = 'web search and crawl' OR STRPOS(${normalizedDescriptionExpr}, 'ai tokens') > 0)`
     : `${normalizedDescriptionExpr} IN ('web search and crawl', 'ai tokens')`;
+  const cancellationDateRawExpr = `COALESCE(
+    JSON_VALUE(raw_row_json, '$.cancellation_date'),
+    JSON_VALUE(raw_row_json, '$.cancellationDate'),
+    JSON_VALUE(raw_row_json, '$.canceled_at'),
+    JSON_VALUE(raw_row_json, '$.canceledAt')
+  )`;
+  const cancellationDateIntExpr = `SAFE_CAST(${cancellationDateRawExpr} AS INT64)`;
+  const cancellationDateExpr = `COALESCE(
+    SAFE_CAST(${cancellationDateRawExpr} AS DATE),
+    DATE(SAFE_CAST(${cancellationDateRawExpr} AS TIMESTAMP)),
+    CASE
+      WHEN ${cancellationDateIntExpr} IS NULL THEN NULL
+      WHEN ${cancellationDateIntExpr} >= 100000000000 THEN DATE(TIMESTAMP_MILLIS(${cancellationDateIntExpr}))
+      WHEN ${cancellationDateIntExpr} >= 1000000000 THEN DATE(TIMESTAMP_SECONDS(${cancellationDateIntExpr}))
+      ELSE NULL
+    END
+  )`;
+  const cancelledFlagExpr = `LOWER(TRIM(COALESCE(
+    JSON_VALUE(raw_row_json, '$.cancelled'),
+    JSON_VALUE(raw_row_json, '$.canceled'),
+    'false'
+  ))) IN ('true', '1', 't', 'yes', 'y')`;
+  const cancelledInCurrentMonthExpr = `(
+    ${cancelledFlagExpr}
+    AND ${cancellationDateExpr} >= DATE_TRUNC(CURRENT_DATE('UTC'), MONTH)
+    AND ${cancellationDateExpr} < DATE_ADD(DATE_TRUNC(CURRENT_DATE('UTC'), MONTH), INTERVAL 1 MONTH)
+  )`;
   const descriptionPrefixExpr = `COALESCE(NULLIF(TRIM(SPLIT(${rawDescriptionExpr}, ' - ')[SAFE_OFFSET(0)]), ''), '(blank)')`;
   const descriptionBucketExpr = normalizeDescriptionBucketSql(rawDescriptionExpr);
   const descriptionPrefixBucketExpr = normalizeDescriptionBucketSql(descriptionPrefixExpr);
@@ -718,6 +751,7 @@ function buildStripeBigQueryReportQuery(
     GREATEST(CAST(period_end_ts AS INT64) - CAST(period_start_ts AS INT64), 0) AS duration_ms_base,
     CAST(amount_minor AS FLOAT64) AS amount_major,
     COALESCE(CAST(quantity AS FLOAT64), 1.0) AS quantity,
+    ${cancelledInCurrentMonthExpr} AS is_cancelled_in_current_month_base,
     CASE
       WHEN UNIX_MILLIS(
         TIMESTAMP(
@@ -791,6 +825,20 @@ function buildStripeBigQueryReportQuery(
   FROM prepared
   GROUP BY invoice_id
 )`);
+  ctes.push(`cancelled_current_month_invoices AS (
+  SELECT DISTINCT invoice_id
+  FROM prepared
+  WHERE is_cancelled_in_current_month_base
+)`);
+  const preparedAnnualizedWhereClauses: string[] = [];
+  if (useStripeArrCorrectAnnualizationRules) {
+    preparedAnnualizedWhereClauses.push("NOT p.is_cancelled_in_current_month_base");
+    preparedAnnualizedWhereClauses.push("NOT (LOWER(TRIM(p.raw_description)) = 'refund' AND cmi.invoice_id IS NOT NULL)");
+  } else {
+    preparedAnnualizedWhereClauses.push(
+      "NOT (LOWER(TRIM(p.raw_description)) = 'discount' AND IFNULL(f.has_percent_description, 0) = 1)",
+    );
+  }
   ctes.push(`prepared_with_annualized AS (
   SELECT
     p.*,
@@ -814,12 +862,9 @@ function buildStripeBigQueryReportQuery(
     ON a.invoice_id = p.invoice_id
   LEFT JOIN invoice_percent_flag AS f
     ON f.invoice_id = p.invoice_id
-  ${useStripeArrCorrectAnnualizationRules
-    ? ""
-    : `WHERE NOT (
-    LOWER(TRIM(p.raw_description)) = 'discount'
-    AND IFNULL(f.has_percent_description, 0) = 1
-  )`}
+  LEFT JOIN cancelled_current_month_invoices AS cmi
+    ON cmi.invoice_id = p.invoice_id
+  ${preparedAnnualizedWhereClauses.length ? `WHERE ${preparedAnnualizedWhereClauses.join("\n    AND ")}` : ""}
 )`);
   ctes.push(`scored AS (
   SELECT
