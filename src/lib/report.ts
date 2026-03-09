@@ -380,11 +380,6 @@ export async function generateReport(
             continue;
           }
 
-          if (body.mode === "contracted") {
-            valuesByPeriod[dp.key] = coversDay ? liArrFx : 0;
-            continue;
-          }
-
           if (isExistingBusiness) {
             valuesByPeriod[dp.key] = coversDay ? liArrFx : 0;
             continue;
