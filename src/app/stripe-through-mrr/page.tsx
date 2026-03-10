@@ -216,6 +216,9 @@ export default function StripeThroughMrrPage() {
             <Link href="/stripe-arr-correct" className="stripe-ui__hero-link">
               Open Stripe ARR (Correct)
             </Link>
+            <Link href="/stripe-billing-overview" className="stripe-ui__hero-link">
+              Open Stripe Billing Overview
+            </Link>
             <Link href="/diff-sheet" className="stripe-ui__hero-link">
               Open Diff Sheet
             </Link>

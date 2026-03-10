@@ -451,6 +451,9 @@ export default function StripeArrCorrectPage() {
             <Link href="/stripe-through-mrr" className="stripe-ui__hero-link">
               Open Stripe through MRR
             </Link>
+            <Link href="/stripe-billing-overview" className="stripe-ui__hero-link">
+              Open Stripe Billing Overview
+            </Link>
             <Link href="/diff-sheet" className="stripe-ui__hero-link">
               Open Diff Sheet
             </Link>

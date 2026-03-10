@@ -435,6 +435,7 @@ export default function Home() {
         <Link href="/stripe">Open Stripe ARR report</Link>
         <Link href="/stripe-arr-correct">Open Stripe ARR (Correct)</Link>
         <Link href="/stripe-through-mrr">Open Stripe through MRR</Link>
+        <Link href="/stripe-billing-overview">Open Stripe Billing Overview</Link>
         <Link href="/diff-sheet">Open Diff Sheet</Link>
       </div>
       <p style={{ marginTop: 0, color: "#666" }}>

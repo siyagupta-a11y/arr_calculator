@@ -140,6 +140,41 @@ export type StripeThroughMrrReportResult = {
   };
 };
 
+export type StripeBillingOverviewGrain = "daily" | "weekly" | "monthly" | "quarterly";
+
+export type StripeBillingOverviewRequest = {
+  startDate: string;
+  endDate: string;
+  grain: StripeBillingOverviewGrain;
+  targetCurrency: string;
+};
+
+export type StripeBillingOverviewPoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  mrrEnd: number;
+  newMrr: number;
+  expansionMrr: number;
+  contractionMrr: number;
+  churnMrr: number;
+  netMrrChange: number;
+  mrrGrowthRatePct: number;
+  arr: number;
+  arrGrowth: number;
+};
+
+export type StripeBillingOverviewResult = {
+  startDate: string;
+  endDate: string;
+  grain: StripeBillingOverviewGrain;
+  targetCurrency: string;
+  currentMrr: number;
+  currentArr: number;
+  points: StripeBillingOverviewPoint[];
+};
+
 type BigQueryNamedParameter = {
   name: string;
   type: "INT64" | "STRING";
@@ -1375,6 +1410,14 @@ function normalizeStripeThroughMrrGroupBy(groupBy: string | undefined): StripeTh
   return "none";
 }
 
+function normalizeStripeBillingOverviewGrain(grain: string | undefined): StripeBillingOverviewGrain {
+  const candidate = String(grain || "").trim().toLowerCase();
+  if (candidate === "daily") return "daily";
+  if (candidate === "weekly") return "weekly";
+  if (candidate === "quarterly") return "quarterly";
+  return "monthly";
+}
+
 function buildStripeThroughMrrDetailBaseCte(table: string, productsTable: string) {
   return `
 WITH source AS (
@@ -1753,6 +1796,233 @@ OFFSET @offset_rows`;
       totalPages,
       hasMore: clampedPage < totalPages,
     },
+  };
+}
+
+export async function queryStripeBillingOverviewFromBigQuery(
+  request: StripeBillingOverviewRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeBillingOverviewResult> {
+  const startDate = parseIsoDateUtc(request.startDate);
+  const endDate = parseIsoDateUtc(request.endDate);
+  if (!startDate || !endDate) {
+    throw new Error("Invalid startDate/endDate");
+  }
+  if (endDate.getTime() < startDate.getTime()) {
+    throw new Error("endDate must be >= startDate");
+  }
+
+  const startDateIso = startDate.toISOString().slice(0, 10);
+  const endDateIso = endDate.toISOString().slice(0, 10);
+  const grain = normalizeStripeBillingOverviewGrain(request.grain);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const table = getStripeArrCorrectMrrChangeTable();
+
+  const query = `
+WITH bounds AS (
+  SELECT
+    DATE(@start_date) AS range_start_date,
+    DATE(@end_date) AS range_end_date,
+    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS range_end_exclusive_date
+),
+bucket_candidates AS (
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 DAY) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.range_start_date, b.range_end_date, INTERVAL 1 DAY)) AS d
+  WHERE @grain = 'daily'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 WEEK) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.range_start_date, WEEK(MONDAY)),
+      DATE_TRUNC(b.range_end_date, WEEK(MONDAY)),
+      INTERVAL 1 WEEK
+    )
+  ) AS d
+  WHERE @grain = 'weekly'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 MONTH) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.range_start_date, MONTH),
+      DATE_TRUNC(b.range_end_date, MONTH),
+      INTERVAL 1 MONTH
+    )
+  ) AS d
+  WHERE @grain = 'monthly'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 3 MONTH) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.range_start_date, QUARTER),
+      DATE_TRUNC(b.range_end_date, QUARTER),
+      INTERVAL 3 MONTH
+    )
+  ) AS d
+  WHERE @grain = 'quarterly'
+),
+buckets AS (
+  SELECT
+    bc.bucket_start,
+    GREATEST(bc.bucket_start, b.range_start_date) AS effective_start,
+    LEAST(bc.bucket_end_exclusive_raw, b.range_end_exclusive_date) AS effective_end_exclusive
+  FROM bucket_candidates bc
+  CROSS JOIN bounds b
+  WHERE GREATEST(bc.bucket_start, b.range_start_date) < LEAST(bc.bucket_end_exclusive_raw, b.range_end_exclusive_date)
+),
+events_in_range AS (
+  SELECT
+    event_timestamp,
+    UPPER(CAST(event_type AS STRING)) AS event_type,
+    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp >= TIMESTAMP(b.range_start_date)
+    AND event_timestamp < TIMESTAMP(b.range_end_exclusive_date)
+),
+base_before_range AS (
+  SELECT
+    COALESCE(SUM(CAST(COALESCE(mrr_change, 0) AS FLOAT64)) / 100.0, 0.0) AS base_mrr
+  FROM \`${table}\` t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp < TIMESTAMP(b.range_start_date)
+),
+bucket_flows AS (
+  SELECT
+    bu.bucket_start,
+    bu.effective_start,
+    bu.effective_end_exclusive,
+    COALESCE(SUM(IF(e.event_type = 'ACTIVE_START', e.mrr_change_major, 0.0)), 0.0) AS new_mrr,
+    COALESCE(SUM(IF(e.event_type = 'ACTIVE_UPGRADE', e.mrr_change_major, 0.0)), 0.0) AS expansion_mrr,
+    COALESCE(SUM(IF(e.event_type = 'ACTIVE_DOWNGRADE', e.mrr_change_major, 0.0)), 0.0) AS contraction_mrr,
+    COALESCE(SUM(IF(e.event_type = 'ACTIVE_END', e.mrr_change_major, 0.0)), 0.0) AS churn_mrr,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS net_mrr_change
+  FROM buckets bu
+  LEFT JOIN events_in_range e
+    ON e.event_timestamp >= TIMESTAMP(bu.effective_start)
+    AND e.event_timestamp < TIMESTAMP(bu.effective_end_exclusive)
+  GROUP BY bu.bucket_start, bu.effective_start, bu.effective_end_exclusive
+),
+series AS (
+  SELECT
+    bf.bucket_start,
+    bf.effective_start,
+    DATE_SUB(bf.effective_end_exclusive, INTERVAL 1 DAY) AS effective_end,
+    bf.new_mrr,
+    bf.expansion_mrr,
+    bf.contraction_mrr,
+    bf.churn_mrr,
+    bf.net_mrr_change,
+    base.base_mrr + SUM(bf.net_mrr_change) OVER (
+      ORDER BY bf.bucket_start
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS mrr_end
+  FROM bucket_flows bf
+  CROSS JOIN base_before_range base
+)
+SELECT
+  CASE
+    WHEN @grain = 'quarterly'
+    THEN CONCAT(CAST(EXTRACT(YEAR FROM bucket_start) AS STRING), '-Q', CAST(EXTRACT(QUARTER FROM bucket_start) AS STRING))
+    ELSE FORMAT_DATE('%Y-%m-%d', effective_start)
+  END AS period_key,
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', effective_start)
+    WHEN @grain = 'weekly' THEN CONCAT('Week of ', FORMAT_DATE('%Y-%m-%d', effective_start))
+    WHEN @grain = 'monthly' THEN FORMAT_DATE('%b %Y', bucket_start)
+    ELSE CONCAT('Q', CAST(EXTRACT(QUARTER FROM bucket_start) AS STRING), ' ', CAST(EXTRACT(YEAR FROM bucket_start) AS STRING))
+  END AS period_label,
+  FORMAT_DATE('%Y-%m-%d', effective_start) AS period_start,
+  FORMAT_DATE('%Y-%m-%d', effective_end) AS period_end,
+  ROUND(mrr_end, 2) AS mrr_end,
+  ROUND(new_mrr, 2) AS new_mrr,
+  ROUND(expansion_mrr, 2) AS expansion_mrr,
+  ROUND(contraction_mrr, 2) AS contraction_mrr,
+  ROUND(churn_mrr, 2) AS churn_mrr,
+  ROUND(net_mrr_change, 2) AS net_mrr_change,
+  ROUND(
+    COALESCE(
+      SAFE_DIVIDE(
+        mrr_end - LAG(mrr_end) OVER (ORDER BY bucket_start),
+        NULLIF(ABS(LAG(mrr_end) OVER (ORDER BY bucket_start)), 0.0)
+      ) * 100.0,
+      0.0
+    ),
+    2
+  ) AS mrr_growth_rate_pct,
+  ROUND(mrr_end * 12.0, 2) AS arr,
+  ROUND(
+    COALESCE(
+      (mrr_end * 12.0) - LAG(mrr_end * 12.0) OVER (ORDER BY bucket_start),
+      0.0
+    ),
+    2
+  ) AS arr_growth
+FROM series
+ORDER BY bucket_start
+`;
+
+  const params: BigQueryNamedParameter[] = [
+    { name: "start_date", type: "STRING", value: startDateIso },
+    { name: "end_date", type: "STRING", value: endDateIso },
+    { name: "grain", type: "STRING", value: grain },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+  ];
+
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+  const points: StripeBillingOverviewPoint[] = rows.map((row) => ({
+    key: asString(row.period_key),
+    label: asString(row.period_label),
+    periodStart: asString(row.period_start),
+    periodEnd: asString(row.period_end),
+    mrrEnd: asNumber(row.mrr_end),
+    newMrr: asNumber(row.new_mrr),
+    expansionMrr: asNumber(row.expansion_mrr),
+    contractionMrr: asNumber(row.contraction_mrr),
+    churnMrr: asNumber(row.churn_mrr),
+    netMrrChange: asNumber(row.net_mrr_change),
+    mrrGrowthRatePct: asNumber(row.mrr_growth_rate_pct),
+    arr: asNumber(row.arr),
+    arrGrowth: asNumber(row.arr_growth),
+  }));
+
+  const currentMrr = points.length ? points[points.length - 1].mrrEnd : 0;
+  return {
+    startDate: startDateIso,
+    endDate: endDateIso,
+    grain,
+    targetCurrency: targetCurrency.toUpperCase(),
+    currentMrr,
+    currentArr: Math.round(currentMrr * 12 * 100) / 100,
+    points,
   };
 }
 
