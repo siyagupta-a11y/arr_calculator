@@ -156,6 +156,7 @@ const BQ_MAX_RESULTS = Number(process.env.BIGQUERY_MAX_RESULTS || "50000");
 const STRIPE_ARR_CORRECT_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.invoice_lines_helper";
 const STRIPE_ARR_CORRECT_MRR_CHANGE_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta";
+const STRIPE_PRODUCTS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.products";
 const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   GOOGLE_SERVICE_ACCOUNT_JSON: "GOOGLE_SERVICE_ACCOUNT_JSON_STRIPE_ARR_CORRECT",
   GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64_STRIPE_ARR_CORRECT",
@@ -501,6 +502,15 @@ function getBigQuerySourceConfig(profile: StripeBigQueryProfile = "default"): Bi
 function getStripeArrCorrectMrrChangeTable() {
   const configured = String(process.env.BIGQUERY_STRIPE_ARR_CORRECT_MRR_CHANGE_TABLE || "").trim();
   return configured || STRIPE_ARR_CORRECT_MRR_CHANGE_DEFAULT_TABLE;
+}
+
+function getStripeProductsTable(profile: StripeBigQueryProfile = "default") {
+  const envName =
+    profile === "stripe_arr_correct"
+      ? "BIGQUERY_STRIPE_ARR_CORRECT_PRODUCTS_TABLE"
+      : "BIGQUERY_STRIPE_PRODUCTS_TABLE";
+  const configured = String(process.env[envName] || "").trim();
+  return configured || STRIPE_PRODUCTS_DEFAULT_TABLE;
 }
 
 function toQueryTimestamp(tsMs: number, sourceConfig: BigQuerySourceConfig) {
@@ -1365,7 +1375,7 @@ function normalizeStripeThroughMrrGroupBy(groupBy: string | undefined): StripeTh
   return "none";
 }
 
-function buildStripeThroughMrrDetailBaseCte(table: string) {
+function buildStripeThroughMrrDetailBaseCte(table: string, productsTable: string) {
   return `
 WITH source AS (
   SELECT
@@ -1379,7 +1389,7 @@ WITH source AS (
     AND event_timestamp >= TIMESTAMP(@range_start_date)
     AND event_timestamp < TIMESTAMP(@detail_end_exclusive_date)
 ),
-enriched AS (
+parsed AS (
   SELECT
     event_timestamp,
     event_type,
@@ -1423,9 +1433,39 @@ enriched AS (
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.name')), ''),
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.display_name')), ''),
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.nickname')), ''),
+      ''
+    ) AS product_description_event
+  FROM source
+) ,
+products_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id,
+    COALESCE(
+      NULLIF(TRIM(CAST(description AS STRING)), ''),
+      NULLIF(TRIM(CAST(name AS STRING)), ''),
+      '(blank)'
+    ) AS product_description_table
+  FROM \`${productsTable}\`
+) ,
+enriched AS (
+  SELECT
+    p.event_timestamp,
+    p.event_type,
+    p.mrr_change_major,
+    p.customer_id,
+    p.subscription_id,
+    p.subscription_item_id,
+    p.price_id,
+    p.product_id,
+    p.price_description,
+    COALESCE(
+      NULLIF(TRIM(pl.product_description_table), ''),
+      NULLIF(TRIM(p.product_description_event), ''),
       '(blank)'
     ) AS product_description
-  FROM source
+  FROM parsed p
+  LEFT JOIN products_lookup pl
+    ON pl.product_id = p.product_id
 )`;
 }
 
@@ -1474,6 +1514,7 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
   const table = getStripeArrCorrectMrrChangeTable();
+  const productsTable = getStripeProductsTable(profile);
 
   const monthlySummaryQuery = `
 WITH bounds AS (
@@ -1583,7 +1624,7 @@ WHERE
   }));
   const totalMrr = asNumber((totalMrrRows[0] || {}).total_mrr);
 
-  const detailBaseCte = buildStripeThroughMrrDetailBaseCte(table);
+  const detailBaseCte = buildStripeThroughMrrDetailBaseCte(table, productsTable);
   const detailBaseParams: BigQueryNamedParameter[] = [
     { name: "target_currency", type: "STRING", value: targetCurrency },
     { name: "range_start_date", type: "STRING", value: startDateIso },
