@@ -172,6 +172,7 @@ export type StripeBillingOverviewResult = {
   targetCurrency: string;
   currentMrr: number;
   currentArr: number;
+  historyPoints: StripeBillingOverviewPoint[];
   points: StripeBillingOverviewPoint[];
 };
 
@@ -1828,16 +1829,22 @@ export async function queryStripeBillingOverviewFromBigQuery(
   const query = `
 WITH bounds AS (
   SELECT
-    DATE(@start_date) AS range_start_date,
-    DATE(@end_date) AS range_end_date,
-    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS range_end_exclusive_date
+    DATE(@start_date) AS requested_start_date,
+    DATE(@end_date) AS requested_end_date,
+    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS requested_end_exclusive_date,
+    CASE
+      WHEN @grain = 'daily' THEN DATE_SUB(DATE(@start_date), INTERVAL 90 DAY)
+      WHEN @grain = 'weekly' THEN DATE_SUB(DATE(@start_date), INTERVAL 13 WEEK)
+      WHEN @grain = 'monthly' THEN DATE_SUB(DATE(@start_date), INTERVAL 3 MONTH)
+      ELSE DATE_SUB(DATE(@start_date), INTERVAL 3 MONTH)
+    END AS series_start_date
 ),
 bucket_candidates AS (
   SELECT
     d AS bucket_start,
     DATE_ADD(d, INTERVAL 1 DAY) AS bucket_end_exclusive_raw
   FROM bounds b
-  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.range_start_date, b.range_end_date, INTERVAL 1 DAY)) AS d
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.series_start_date, b.requested_end_date, INTERVAL 1 DAY)) AS d
   WHERE @grain = 'daily'
 
   UNION ALL
@@ -1848,8 +1855,8 @@ bucket_candidates AS (
   FROM bounds b
   CROSS JOIN UNNEST(
     GENERATE_DATE_ARRAY(
-      DATE_TRUNC(b.range_start_date, WEEK(MONDAY)),
-      DATE_TRUNC(b.range_end_date, WEEK(MONDAY)),
+      DATE_TRUNC(b.series_start_date, WEEK(MONDAY)),
+      DATE_TRUNC(b.requested_end_date, WEEK(MONDAY)),
       INTERVAL 1 WEEK
     )
   ) AS d
@@ -1863,8 +1870,8 @@ bucket_candidates AS (
   FROM bounds b
   CROSS JOIN UNNEST(
     GENERATE_DATE_ARRAY(
-      DATE_TRUNC(b.range_start_date, MONTH),
-      DATE_TRUNC(b.range_end_date, MONTH),
+      DATE_TRUNC(b.series_start_date, MONTH),
+      DATE_TRUNC(b.requested_end_date, MONTH),
       INTERVAL 1 MONTH
     )
   ) AS d
@@ -1878,8 +1885,8 @@ bucket_candidates AS (
   FROM bounds b
   CROSS JOIN UNNEST(
     GENERATE_DATE_ARRAY(
-      DATE_TRUNC(b.range_start_date, QUARTER),
-      DATE_TRUNC(b.range_end_date, QUARTER),
+      DATE_TRUNC(b.series_start_date, QUARTER),
+      DATE_TRUNC(b.requested_end_date, QUARTER),
       INTERVAL 3 MONTH
     )
   ) AS d
@@ -1888,13 +1895,13 @@ bucket_candidates AS (
 buckets AS (
   SELECT
     bc.bucket_start,
-    GREATEST(bc.bucket_start, b.range_start_date) AS effective_start,
-    LEAST(bc.bucket_end_exclusive_raw, b.range_end_exclusive_date) AS effective_end_exclusive
+    GREATEST(bc.bucket_start, b.series_start_date) AS effective_start,
+    LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date) AS effective_end_exclusive
   FROM bucket_candidates bc
   CROSS JOIN bounds b
-  WHERE GREATEST(bc.bucket_start, b.range_start_date) < LEAST(bc.bucket_end_exclusive_raw, b.range_end_exclusive_date)
+  WHERE GREATEST(bc.bucket_start, b.series_start_date) < LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date)
 ),
-events_in_range AS (
+events_in_series AS (
   SELECT
     event_timestamp,
     UPPER(CAST(event_type AS STRING)) AS event_type,
@@ -1903,17 +1910,17 @@ events_in_range AS (
   CROSS JOIN bounds b
   WHERE
     LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
-    AND event_timestamp >= TIMESTAMP(b.range_start_date)
-    AND event_timestamp < TIMESTAMP(b.range_end_exclusive_date)
+    AND event_timestamp >= TIMESTAMP(b.series_start_date)
+    AND event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
 ),
-base_before_range AS (
+base_before_series AS (
   SELECT
     COALESCE(SUM(CAST(COALESCE(mrr_change, 0) AS FLOAT64)) / 100.0, 0.0) AS base_mrr
   FROM \`${table}\` t
   CROSS JOIN bounds b
   WHERE
     LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
-    AND event_timestamp < TIMESTAMP(b.range_start_date)
+    AND event_timestamp < TIMESTAMP(b.series_start_date)
 ),
 bucket_flows AS (
   SELECT
@@ -1926,7 +1933,7 @@ bucket_flows AS (
     COALESCE(SUM(IF(e.event_type = 'ACTIVE_END', e.mrr_change_major, 0.0)), 0.0) AS churn_mrr,
     COALESCE(SUM(e.mrr_change_major), 0.0) AS net_mrr_change
   FROM buckets bu
-  LEFT JOIN events_in_range e
+  LEFT JOIN events_in_series e
     ON e.event_timestamp >= TIMESTAMP(bu.effective_start)
     AND e.event_timestamp < TIMESTAMP(bu.effective_end_exclusive)
   GROUP BY bu.bucket_start, bu.effective_start, bu.effective_end_exclusive
@@ -1946,7 +1953,7 @@ series AS (
       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     ) AS mrr_end
   FROM bucket_flows bf
-  CROSS JOIN base_before_range base
+  CROSS JOIN base_before_series base
 )
 SELECT
   CASE
@@ -1998,7 +2005,7 @@ ORDER BY bucket_start
   ];
 
   const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
-  const points: StripeBillingOverviewPoint[] = rows.map((row) => ({
+  const allPoints: StripeBillingOverviewPoint[] = rows.map((row) => ({
     key: asString(row.period_key),
     label: asString(row.period_label),
     periodStart: asString(row.period_start),
@@ -2014,6 +2021,8 @@ ORDER BY bucket_start
     arrGrowth: asNumber(row.arr_growth),
   }));
 
+  const historyPoints = allPoints.filter((point) => point.periodStart < startDateIso);
+  const points = allPoints.filter((point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso);
   const currentMrr = points.length ? points[points.length - 1].mrrEnd : 0;
   return {
     startDate: startDateIso,
@@ -2022,6 +2031,7 @@ ORDER BY bucket_start
     targetCurrency: targetCurrency.toUpperCase(),
     currentMrr,
     currentArr: Math.round(currentMrr * 12 * 100) / 100,
+    historyPoints,
     points,
   };
 }

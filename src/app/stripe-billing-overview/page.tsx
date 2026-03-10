@@ -28,6 +28,7 @@ type OverviewResponse = {
   targetCurrency: string;
   currentMrr: number;
   currentArr: number;
+  historyPoints?: OverviewPoint[];
   points: OverviewPoint[];
 };
 
@@ -760,7 +761,9 @@ export default function StripeBillingOverviewPage() {
   }
 
   const points = useMemo(() => data?.points ?? [], [data]);
+  const historyPoints = useMemo(() => data?.historyPoints ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
+  const growthInputPoints = useMemo(() => [...historyPoints, ...points], [historyPoints, points]);
   const growthWindowOptions = useMemo(() => growthWindowOptionsForGrain(grain), [grain]);
   const selectedGrowthWindow = useMemo(
     () => growthWindowOptions.find((option) => option.value === mrrGrowthWindow) || growthWindowOptions[0],
@@ -768,14 +771,14 @@ export default function StripeBillingOverviewPage() {
   );
   const selectedGrowthLookback = selectedGrowthWindow?.lookbackPeriods || 1;
   const mrrGrowthSeries = useMemo(
-    () => computeMrrGrowthRates(points, selectedGrowthLookback),
-    [points, selectedGrowthLookback],
+    () => computeMrrGrowthRates(growthInputPoints, selectedGrowthLookback),
+    [growthInputPoints, selectedGrowthLookback],
   );
   const mrrGrowthByKey = useMemo(() => {
     const out = new Map<string, number>();
-    points.forEach((point, idx) => out.set(point.key, mrrGrowthSeries[idx] || 0));
+    growthInputPoints.forEach((point, idx) => out.set(point.key, mrrGrowthSeries[idx] || 0));
     return out;
-  }, [points, mrrGrowthSeries]);
+  }, [growthInputPoints, mrrGrowthSeries]);
 
   return (
     <div className="stripe-ui">
