@@ -449,7 +449,7 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
         <div>
           <h2 className="stripe-ui__panel-title">Growth Breakdown</h2>
           <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-            Account-level movement split into New, Expansion, Contraction, and Churn (MRR).
+            Account-level movement (Contracted ARR, Cloud only) split into New, Expansion, Contraction, and Churn (MRR).
           </p>
         </div>
         <div className="stripe-ui__hint" aria-live="polite">
@@ -751,6 +751,7 @@ export default function Home() {
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ReportResponse | null>(null);
+  const [chartData, setChartData] = useState<ReportResponse | null>(null);
   const [chartHistoryData, setChartHistoryData] = useState<ReportResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -758,12 +759,20 @@ export default function Home() {
     setLoading(true);
     setError(null);
     setData(null);
+    setChartData(null);
     setChartHistoryData(null);
 
     const payload: ReportRequest = {
       startDate,
       endDate,
       mode,
+      grain,
+    };
+
+    const chartPayload: ReportRequest = {
+      startDate,
+      endDate,
+      mode: "contracted",
       grain,
     };
 
@@ -793,23 +802,27 @@ export default function Home() {
         return json as ReportResponse;
       };
 
-      const mainReport = await fetchReport(payload);
+      const [mainReport, chartMainReport] = await Promise.all([
+        fetchReport(payload),
+        fetchReport(chartPayload),
+      ]);
       setData(mainReport);
+      setChartData(chartMainReport);
 
       const historyStart = historyStartForGrain(startDate, grain);
       if (historyStart !== startDate) {
         try {
           const historyPayload: ReportRequest = {
-            ...payload,
+            ...chartPayload,
             startDate: historyStart,
           };
           const historyReport = await fetchReport(historyPayload);
           setChartHistoryData(historyReport);
         } catch {
-          setChartHistoryData(mainReport);
+          setChartHistoryData(chartMainReport);
         }
       } else {
-        setChartHistoryData(mainReport);
+        setChartHistoryData(chartMainReport);
       }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
@@ -871,7 +884,10 @@ export default function Home() {
     return Array.from(values).sort((a, b) => a.localeCompare(b));
   }, [data]);
 
-  const buildFilteredLineItemRows = useCallback((sourceData: ReportResponse | null) => {
+  const buildFilteredLineItemRows = useCallback((
+    sourceData: ReportResponse | null,
+    options?: { forceCloudOnly?: boolean },
+  ) => {
     if (!sourceData) return [] as UiRow[];
 
     const baseRows: UiRow[] = (sourceData.rows || []).map((r: ReportRow) => ({
@@ -893,10 +909,14 @@ export default function Home() {
     const accountIdNeedle = filterAccountId.trim().toLowerCase();
 
     const filteredBaseRows = baseRows.filter((r) => {
-      const displayScopeOk = arrDisplayScope === "all" || isCloudDeploymentType(r.deploymentType || "");
+      const forceCloudOnly = options?.forceCloudOnly === true;
+      const displayScopeOk = forceCloudOnly
+        ? isCloudDeploymentType(r.deploymentType || "")
+        : arrDisplayScope === "all" || isCloudDeploymentType(r.deploymentType || "");
       const dealNameOk = !dealNameNeedle || (r.dealName || "").toLowerCase().includes(dealNameNeedle);
-      const deploymentTypeOk =
-        filterDeploymentType === "all" || (r.deploymentType || "") === filterDeploymentType;
+      const deploymentTypeOk = forceCloudOnly
+        ? isCloudDeploymentType(r.deploymentType || "")
+        : filterDeploymentType === "all" || (r.deploymentType || "") === filterDeploymentType;
       const accountIdOk = !accountIdNeedle || (r.accountId || "").toLowerCase().includes(accountIdNeedle);
       const territoryOk = filterTerritory === "all" || (r.territory || "") === filterTerritory;
       const countryOk =
@@ -933,8 +953,9 @@ export default function Home() {
     data,
   ]);
 
-  const chartSourceData = chartHistoryData || data;
-  const filteredChartLineItemRows: UiRow[] = useMemo(() => buildFilteredLineItemRows(chartSourceData), [
+  const chartDisplayData = chartData || data;
+  const chartSourceData = chartHistoryData || chartDisplayData;
+  const filteredChartLineItemRows: UiRow[] = useMemo(() => buildFilteredLineItemRows(chartSourceData, { forceCloudOnly: true }), [
     buildFilteredLineItemRows,
     chartSourceData,
   ]);
@@ -1015,9 +1036,9 @@ export default function Home() {
   }, [chartSourceData, filteredChartLineItemRows]);
 
   const chartPoints: TrendPoint[] = useMemo(() => {
-    if (!data) return [];
+    if (!chartDisplayData) return [];
 
-    const periodOrder = data.periods || [];
+    const periodOrder = chartDisplayData.periods || [];
     const sourcePeriods = chartSourceData?.periods || periodOrder;
     const sourcePeriodKeys = sourcePeriods.map((period) => period.key);
     const sourcePeriodIndex = new Map<string, number>(sourcePeriodKeys.map((key, idx) => [key, idx]));
@@ -1093,7 +1114,7 @@ export default function Home() {
         arrGrowth,
       };
     });
-  }, [data, chartSourceData, accountArrByPeriod]);
+  }, [chartDisplayData, chartSourceData, accountArrByPeriod]);
 
   const showDealIdColumn = groupByFields.length === 0;
   const groupByLabel = groupByFields
@@ -1406,7 +1427,7 @@ export default function Home() {
           >
             <LineChartCard
               title="MRR Over Time"
-              subtitle="MRR derived from ARR / 12 at the end of each period."
+              subtitle="MRR derived from Contracted ARR / 12 (Cloud deployments, grouped by account ID)."
               points={chartPoints}
               valueAccessor={(p) => p.mrr}
               valueFormatter={(v) => fmtMoney(v, "normal")}
@@ -1417,7 +1438,7 @@ export default function Home() {
 
             <LineChartCard
               title="MRR Growth Rate Over Time"
-              subtitle="Period-over-period MRR growth rate."
+              subtitle="Period-over-period MRR growth rate using prior-period baseline."
               points={chartPoints}
               valueAccessor={(p) => p.mrrGrowthRatePct}
               valueFormatter={(v) => fmtPercent(v)}
@@ -1427,7 +1448,7 @@ export default function Home() {
 
             <LineChartCard
               title="ARR Over Time"
-              subtitle="ARR at the end of each period."
+              subtitle="Contracted ARR at the end of each period (Cloud deployments only)."
               points={chartPoints}
               valueAccessor={(p) => p.arr}
               valueFormatter={(v) => fmtMoney(v, "normal")}
@@ -1436,7 +1457,7 @@ export default function Home() {
 
             <DeltaBarChartCard
               title="ARR Growth Over Time"
-              subtitle="Absolute ARR change per period."
+              subtitle="Absolute Contracted ARR change per period."
               points={chartPoints}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => fmtMoney(v, "normal")}
@@ -1448,7 +1469,7 @@ export default function Home() {
               <div>
                 <h2 className="stripe-ui__panel-title">Filters & Totals</h2>
                 <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-                  Apply filters to rows. Charts and totals follow the filtered dataset.
+                  Apply filters to rows. Charts are always Contracted ARR + Cloud-only, grouped by account ID.
                 </p>
               </div>
               <div className="stripe-ui__hint">
