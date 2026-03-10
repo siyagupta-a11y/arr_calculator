@@ -1978,10 +1978,13 @@ buckets AS (
 events_base AS (
   SELECT
     event_timestamp,
-    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id,
+    COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(blank)') AS customer_id,
     CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
   FROM \`${table}\` AS t
-  WHERE LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
 ),
 events_in_series AS (
   SELECT
@@ -2251,13 +2254,20 @@ requested_buckets AS (
   CROSS JOIN bounds b
   WHERE GREATEST(bc.bucket_start, b.requested_start_date) < LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date)
 ),
+first_requested_bucket AS (
+  SELECT MIN(bucket_start) AS first_bucket_start
+  FROM requested_buckets
+),
 events_base AS (
   SELECT
     event_timestamp,
-    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id,
+    COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(blank)') AS customer_id,
     CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
   FROM \`${table}\` AS t
-  WHERE LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
 ),
 events_before_requested AS (
   SELECT
@@ -2275,19 +2285,7 @@ events_in_requested AS (
     e.mrr_change_major
   FROM events_base e
   CROSS JOIN bounds b
-  WHERE
-    e.event_timestamp >= TIMESTAMP(b.requested_start_date)
-    AND e.event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
-),
-relevant_customers AS (
-  SELECT eb.customer_id
-  FROM events_before_requested eb
-  WHERE ABS(eb.start_mrr) > 1e-9
-
-  UNION DISTINCT
-
-  SELECT er.customer_id
-  FROM events_in_requested er
+  WHERE e.event_timestamp >= TIMESTAMP(b.requested_start_date)
 ),
 requested_bucket_changes AS (
   SELECT
@@ -2302,54 +2300,70 @@ requested_bucket_changes AS (
     rb.bucket_start,
     er.customer_id
 ),
-customer_bucket_grid AS (
+customer_seed_rows AS (
   SELECT
-    rc.customer_id,
-    rb.bucket_start,
-    rb.effective_start,
-    rb.effective_end_exclusive,
-    COALESCE(eb.start_mrr, 0.0) AS start_mrr,
-    COALESCE(rbc.delta_mrr, 0.0) AS delta_mrr
-  FROM relevant_customers rc
-  CROSS JOIN requested_buckets rb
-  LEFT JOIN events_before_requested eb
-    ON eb.customer_id = rc.customer_id
-  LEFT JOIN requested_bucket_changes rbc
-    ON rbc.customer_id = rc.customer_id
-    AND rbc.bucket_start = rb.bucket_start
+    eb.customer_id,
+    fb.first_bucket_start AS bucket_start,
+    0.0 AS delta_mrr
+  FROM events_before_requested eb
+  CROSS JOIN first_requested_bucket fb
+  WHERE ABS(eb.start_mrr) > 1e-9
+    AND fb.first_bucket_start IS NOT NULL
 ),
-customer_bucket_series AS (
+customer_bucket_deltas AS (
   SELECT
-    cbg.customer_id,
-    cbg.bucket_start,
-    cbg.effective_start,
-    DATE_SUB(cbg.effective_end_exclusive, INTERVAL 1 DAY) AS effective_end,
-    cbg.start_mrr
-      + SUM(cbg.delta_mrr) OVER (
-        PARTITION BY cbg.customer_id
-        ORDER BY cbg.bucket_start
+    combined.customer_id,
+    combined.bucket_start,
+    COALESCE(SUM(combined.delta_mrr), 0.0) AS delta_mrr
+  FROM (
+    SELECT
+      rbc.customer_id,
+      rbc.bucket_start,
+      rbc.delta_mrr
+    FROM requested_bucket_changes rbc
+    UNION ALL
+    SELECT
+      csr.customer_id,
+      csr.bucket_start,
+      csr.delta_mrr
+    FROM customer_seed_rows csr
+  ) AS combined
+  GROUP BY combined.customer_id, combined.bucket_start
+),
+customer_bucket_snapshots AS (
+  SELECT
+    cbd.customer_id,
+    cbd.bucket_start,
+    COALESCE(ebr.start_mrr, 0.0)
+      + SUM(cbd.delta_mrr) OVER (
+        PARTITION BY cbd.customer_id
+        ORDER BY cbd.bucket_start
         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
       ) AS mrr_end
-  FROM customer_bucket_grid cbg
+  FROM customer_bucket_deltas cbd
+  LEFT JOIN events_before_requested ebr
+    ON ebr.customer_id = cbd.customer_id
 )
 SELECT
-  cbs.customer_id,
+  cbt.customer_id,
   CASE
     WHEN @grain = 'quarterly'
-    THEN CONCAT(CAST(EXTRACT(YEAR FROM cbs.bucket_start) AS STRING), '-Q', CAST(EXTRACT(QUARTER FROM cbs.bucket_start) AS STRING))
-    ELSE FORMAT_DATE('%Y-%m-%d', cbs.effective_start)
+    THEN CONCAT(CAST(EXTRACT(YEAR FROM rb.bucket_start) AS STRING), '-Q', CAST(EXTRACT(QUARTER FROM rb.bucket_start) AS STRING))
+    ELSE FORMAT_DATE('%Y-%m-%d', rb.effective_start)
   END AS period_key,
   CASE
-    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', cbs.effective_start)
-    WHEN @grain = 'weekly' THEN CONCAT('Week of ', FORMAT_DATE('%Y-%m-%d', cbs.effective_start))
-    WHEN @grain = 'monthly' THEN FORMAT_DATE('%b %Y', cbs.bucket_start)
-    ELSE CONCAT('Q', CAST(EXTRACT(QUARTER FROM cbs.bucket_start) AS STRING), ' ', CAST(EXTRACT(YEAR FROM cbs.bucket_start) AS STRING))
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', rb.effective_start)
+    WHEN @grain = 'weekly' THEN CONCAT('Week of ', FORMAT_DATE('%Y-%m-%d', rb.effective_start))
+    WHEN @grain = 'monthly' THEN FORMAT_DATE('%b %Y', rb.bucket_start)
+    ELSE CONCAT('Q', CAST(EXTRACT(QUARTER FROM rb.bucket_start) AS STRING), ' ', CAST(EXTRACT(YEAR FROM rb.bucket_start) AS STRING))
   END AS period_label,
-  FORMAT_DATE('%Y-%m-%d', cbs.effective_start) AS period_start,
-  FORMAT_DATE('%Y-%m-%d', cbs.effective_end) AS period_end,
-  ROUND(cbs.mrr_end * 12.0, 2) AS arr
-FROM customer_bucket_series cbs
-ORDER BY cbs.customer_id ASC, cbs.bucket_start ASC
+  FORMAT_DATE('%Y-%m-%d', rb.effective_start) AS period_start,
+  FORMAT_DATE('%Y-%m-%d', DATE_SUB(rb.effective_end_exclusive, INTERVAL 1 DAY)) AS period_end,
+  ROUND(cbt.mrr_end * 12.0, 2) AS arr
+FROM customer_bucket_snapshots cbt
+JOIN requested_buckets rb
+  ON rb.bucket_start = cbt.bucket_start
+ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
 `;
 
   const params: BigQueryNamedParameter[] = [

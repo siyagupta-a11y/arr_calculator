@@ -722,6 +722,7 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
 }
 
 export default function StripeBillingOverviewPage() {
+  const customerPageSize = 100;
   const defaults = useMemo(() => defaultDateRange(), []);
 
   const [startDate, setStartDate] = useState(defaults.startDate);
@@ -733,11 +734,13 @@ export default function StripeBillingOverviewPage() {
   const [hasRunOnce, setHasRunOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<OverviewResponse | null>(null);
+  const [customerPage, setCustomerPage] = useState(1);
 
   async function run() {
     setHasRunOnce(true);
     setLoading(true);
     setError(null);
+    setCustomerPage(1);
 
     try {
       const res = await fetch("/api/stripe-billing-overview-report", {
@@ -795,20 +798,28 @@ export default function StripeBillingOverviewPage() {
     return out;
   }, [growthInputPoints, mrrGrowthSeries]);
   const customerArrMatrixRows = useMemo(() => {
-    const byCustomer = new Map<string, Map<string, number>>();
+    const snapshotsByCustomer = new Map<string, Map<string, number>>();
     const periodKeys = new Set(customerPeriodColumns.map((column) => column.key));
 
     for (const row of customerArrRows) {
       if (!periodKeys.has(row.periodKey)) continue;
       const customerId = row.customerId || "(blank)";
-      const existing = byCustomer.get(customerId) || new Map<string, number>();
+      const existing = snapshotsByCustomer.get(customerId) || new Map<string, number>();
       existing.set(row.periodKey, row.arr);
-      byCustomer.set(customerId, existing);
+      snapshotsByCustomer.set(customerId, existing);
     }
 
     const latestPeriodKey = customerPeriodColumns[customerPeriodColumns.length - 1]?.key || "";
-    return Array.from(byCustomer.entries())
-      .map(([customerId, valuesByPeriod]) => {
+    return Array.from(snapshotsByCustomer.entries())
+      .map(([customerId, snapshotsByPeriod]) => {
+        const valuesByPeriod = new Map<string, number>();
+        let currentArr = 0;
+        for (const column of customerPeriodColumns) {
+          if (snapshotsByPeriod.has(column.key)) {
+            currentArr = snapshotsByPeriod.get(column.key) || 0;
+          }
+          valuesByPeriod.set(column.key, currentArr);
+        }
         const latestArr = latestPeriodKey ? valuesByPeriod.get(latestPeriodKey) || 0 : 0;
         const totalArr = customerPeriodColumns.reduce((sum, column) => sum + (valuesByPeriod.get(column.key) || 0), 0);
         return {
@@ -824,6 +835,12 @@ export default function StripeBillingOverviewPage() {
         return a.customerId.localeCompare(b.customerId);
       });
   }, [customerArrRows, customerPeriodColumns]);
+  const totalCustomerPages = Math.max(1, Math.ceil(customerArrMatrixRows.length / customerPageSize));
+  const clampedCustomerPage = Math.min(customerPage, totalCustomerPages);
+  const customerRowsOnPage = useMemo(() => {
+    const start = (clampedCustomerPage - 1) * customerPageSize;
+    return customerArrMatrixRows.slice(start, start + customerPageSize);
+  }, [clampedCustomerPage, customerArrMatrixRows, customerPageSize]);
 
   return (
     <div className="stripe-ui">
@@ -1039,7 +1056,31 @@ export default function StripeBillingOverviewPage() {
                 No customer ARR rows for selected range.
               </p>
             ) : (
-              <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
+              <>
+                <div className="stripe-ui__toolbar">
+                  <div className="stripe-ui__toolbar-group">
+                    <span className="stripe-ui__hint">{`Page ${clampedCustomerPage} of ${totalCustomerPages}`}</span>
+                    <span className="stripe-ui__hint">{`${customerArrMatrixRows.length} rows`}</span>
+                  </div>
+                  <div className="stripe-ui__toolbar-group">
+                    <button
+                      className="stripe-ui__btn stripe-ui__btn--ghost"
+                      onClick={() => setCustomerPage((prev) => Math.max(1, prev - 1))}
+                      disabled={clampedCustomerPage <= 1}
+                    >
+                      Prev
+                    </button>
+                    <button
+                      className="stripe-ui__btn stripe-ui__btn--ghost"
+                      onClick={() => setCustomerPage((prev) => Math.min(totalCustomerPages, prev + 1))}
+                      disabled={clampedCustomerPage >= totalCustomerPages}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+
+                <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
                 <table className="stripe-ui__table" aria-label="Customer ARR by period table">
                   <thead>
                     <tr>
@@ -1052,7 +1093,7 @@ export default function StripeBillingOverviewPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {customerArrMatrixRows.map((row) => (
+                    {customerRowsOnPage.map((row) => (
                       <tr key={row.customerId}>
                         <td>{row.customerId || "(blank)"}</td>
                         {customerPeriodColumns.map((column) => {
@@ -1070,7 +1111,8 @@ export default function StripeBillingOverviewPage() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+                </div>
+              </>
             )}
           </section>
         </>
