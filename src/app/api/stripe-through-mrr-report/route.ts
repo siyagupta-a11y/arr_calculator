@@ -40,6 +40,8 @@ function monthFromDate(dateText: string) {
 type ApiBody = {
   startDate?: string;
   endDate?: string;
+  detailStartMonth?: string;
+  detailEndMonth?: string;
   detailMonth?: string;
   groupBy?: string;
   page?: number;
@@ -53,8 +55,11 @@ function parsePayload(raw: Partial<ApiBody>): StripeThroughMrrReportRequest {
     throw new Error("Invalid startDate/endDate");
   }
 
-  const detailMonthRaw = String(raw.detailMonth || "").trim();
-  const detailMonth = isIsoMonth(detailMonthRaw) ? detailMonthRaw : monthFromDate(endDate);
+  const detailMonthFallbackRaw = String(raw.detailMonth || "").trim();
+  const detailStartMonthRaw = String(raw.detailStartMonth || detailMonthFallbackRaw || "").trim();
+  const detailEndMonthRaw = String(raw.detailEndMonth || detailMonthFallbackRaw || "").trim();
+  const detailStartMonth = isIsoMonth(detailStartMonthRaw) ? detailStartMonthRaw : monthFromDate(startDate);
+  const detailEndMonth = isIsoMonth(detailEndMonthRaw) ? detailEndMonthRaw : monthFromDate(endDate);
 
   const groupByRaw = String(raw.groupBy || "none").trim() as StripeThroughMrrGroupBy;
   const groupBy = GROUP_BY_VALUES.has(groupByRaw) ? groupByRaw : "none";
@@ -73,7 +78,8 @@ function parsePayload(raw: Partial<ApiBody>): StripeThroughMrrReportRequest {
   return {
     startDate,
     endDate,
-    detailMonth,
+    detailStartMonth,
+    detailEndMonth,
     groupBy,
     page,
     pageSize,
@@ -109,6 +115,8 @@ export async function GET(req: Request) {
     const body: Partial<ApiBody> = {
       startDate: searchParams.get("startDate") || "",
       endDate: searchParams.get("endDate") || "",
+      detailStartMonth: searchParams.get("detailStartMonth") || "",
+      detailEndMonth: searchParams.get("detailEndMonth") || "",
       detailMonth: searchParams.get("detailMonth") || "",
       groupBy: searchParams.get("groupBy") || "none",
       page: Number(searchParams.get("page") || 1),

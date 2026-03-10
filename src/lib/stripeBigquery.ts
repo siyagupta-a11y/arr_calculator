@@ -102,6 +102,8 @@ export type StripeThroughMrrRawDetailRow = {
 export type StripeThroughMrrGroupedDetailRow = {
   groupKey: string;
   groupLabel: string;
+  monthKey: string;
+  monthLabel: string;
   eventCount: number;
   netMrrChange: number;
   newMrr: number;
@@ -113,7 +115,8 @@ export type StripeThroughMrrGroupedDetailRow = {
 export type StripeThroughMrrReportRequest = {
   startDate: string;
   endDate: string;
-  detailMonth: string;
+  detailStartMonth: string;
+  detailEndMonth: string;
   groupBy: StripeThroughMrrGroupBy;
   page: number;
   pageSize: number;
@@ -123,7 +126,8 @@ export type StripeThroughMrrReportRequest = {
 export type StripeThroughMrrReportResult = {
   startDate: string;
   endDate: string;
-  detailMonth: string;
+  detailStartMonth: string;
+  detailEndMonth: string;
   groupBy: StripeThroughMrrGroupBy;
   targetCurrency: string;
   totalMrr: number;
@@ -1430,7 +1434,7 @@ WITH source AS (
   FROM \`${table}\` AS t
   WHERE
     LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
-    AND event_timestamp >= TIMESTAMP(@range_start_date)
+    AND event_timestamp >= TIMESTAMP(@detail_range_start_date)
     AND event_timestamp < TIMESTAMP(@detail_end_exclusive_date)
 ),
 parsed AS (
@@ -1528,24 +1532,35 @@ export async function queryStripeThroughMrrReportFromBigQuery(
 
   const startMonth = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1, 0, 0, 0, 0));
   const endMonth = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), 1, 0, 0, 0, 0));
-  let detailMonthDate = parseIsoMonthUtc(request.detailMonth) || endMonth;
-  if (detailMonthDate.getTime() < startMonth.getTime()) detailMonthDate = startMonth;
-  if (detailMonthDate.getTime() > endMonth.getTime()) detailMonthDate = endMonth;
+  let detailStartMonthDate = parseIsoMonthUtc(request.detailStartMonth) || startMonth;
+  let detailEndMonthDate = parseIsoMonthUtc(request.detailEndMonth) || endMonth;
+  if (detailStartMonthDate.getTime() < startMonth.getTime()) detailStartMonthDate = startMonth;
+  if (detailStartMonthDate.getTime() > endMonth.getTime()) detailStartMonthDate = endMonth;
+  if (detailEndMonthDate.getTime() < startMonth.getTime()) detailEndMonthDate = startMonth;
+  if (detailEndMonthDate.getTime() > endMonth.getTime()) detailEndMonthDate = endMonth;
+  if (detailStartMonthDate.getTime() > detailEndMonthDate.getTime()) {
+    const swap = detailStartMonthDate;
+    detailStartMonthDate = detailEndMonthDate;
+    detailEndMonthDate = swap;
+  }
 
   const endExclusiveDate = new Date(
     Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate() + 1, 0, 0, 0, 0),
   );
-  const detailMonthNextStartDate = new Date(
-    Date.UTC(detailMonthDate.getUTCFullYear(), detailMonthDate.getUTCMonth() + 1, 1, 0, 0, 0, 0),
+  const detailRangeStartDate = new Date(Math.max(startDate.getTime(), detailStartMonthDate.getTime()));
+  const detailEndMonthNextStartDate = new Date(
+    Date.UTC(detailEndMonthDate.getUTCFullYear(), detailEndMonthDate.getUTCMonth() + 1, 1, 0, 0, 0, 0),
   );
   const detailEndExclusiveDate =
-    detailMonthNextStartDate.getTime() < endExclusiveDate.getTime() ? detailMonthNextStartDate : endExclusiveDate;
+    detailEndMonthNextStartDate.getTime() < endExclusiveDate.getTime() ? detailEndMonthNextStartDate : endExclusiveDate;
 
   const startDateIso = startDate.toISOString().slice(0, 10);
   const endDateIso = endDate.toISOString().slice(0, 10);
   const endExclusiveDateIso = endExclusiveDate.toISOString().slice(0, 10);
+  const detailRangeStartDateIso = detailRangeStartDate.toISOString().slice(0, 10);
   const detailEndExclusiveDateIso = detailEndExclusiveDate.toISOString().slice(0, 10);
-  const detailMonth = isoMonthFromDateUtc(detailMonthDate);
+  const detailStartMonth = isoMonthFromDateUtc(detailStartMonthDate);
+  const detailEndMonth = isoMonthFromDateUtc(detailEndMonthDate);
   const groupBy = normalizeStripeThroughMrrGroupBy(request.groupBy);
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
   const pageSize = Math.max(1, Math.min(5000, Math.floor(asNumber(request.pageSize) || 1000)));
@@ -1671,7 +1686,7 @@ WHERE
   const detailBaseCte = buildStripeThroughMrrDetailBaseCte(table, productsTable);
   const detailBaseParams: BigQueryNamedParameter[] = [
     { name: "target_currency", type: "STRING", value: targetCurrency },
-    { name: "range_start_date", type: "STRING", value: startDateIso },
+    { name: "detail_range_start_date", type: "STRING", value: detailRangeStartDateIso },
     { name: "detail_end_exclusive_date", type: "STRING", value: detailEndExclusiveDateIso },
   ];
 
@@ -1713,15 +1728,26 @@ OFFSET @offset_rows`;
   } else {
     const groupSql = STRIPE_THROUGH_MRR_GROUP_BY_SQL[groupBy];
     const countQuery = `${detailBaseCte}
-SELECT
-  COUNT(*) AS total_rows
-FROM (
+, grouped_source AS (
   SELECT
     ${groupSql.keyExpr} AS group_key,
-    ${groupSql.labelExpr} AS group_label
+    ${groupSql.labelExpr} AS group_label,
+    event_timestamp,
+    event_type,
+    mrr_change_major
   FROM enriched
+),
+group_totals AS (
+  SELECT
+    group_key,
+    group_label,
+    ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change
+  FROM grouped_source
   GROUP BY group_key, group_label
-)`;
+)
+SELECT
+  COUNT(*) AS total_rows
+FROM group_totals`;
     const countRows = await runBigQueryQueryRows(accessToken, projectId, location, countQuery, detailBaseParams);
     totalRows = asInt((countRows[0] || {}).total_rows);
     const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
@@ -1729,20 +1755,55 @@ FROM (
     const offsetRows = (clampedPage - 1) * pageSize;
     if (totalRows > 0) {
       const rowsQuery = `${detailBaseCte}
+, grouped_source AS (
+  SELECT
+    ${groupSql.keyExpr} AS group_key,
+    ${groupSql.labelExpr} AS group_label,
+    event_timestamp,
+    event_type,
+    mrr_change_major
+  FROM enriched
+),
+group_totals AS (
+  SELECT
+    group_key,
+    group_label,
+    ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change
+  FROM grouped_source
+  GROUP BY group_key, group_label
+),
+paged_groups AS (
+  SELECT
+    group_key,
+    group_label,
+    net_mrr_change
+  FROM group_totals
+  ORDER BY net_mrr_change DESC, group_label ASC
+  LIMIT @limit_rows
+  OFFSET @offset_rows
+)
 SELECT
-  ${groupSql.keyExpr} AS group_key,
-  ${groupSql.labelExpr} AS group_label,
+  pg.group_key,
+  pg.group_label,
+  FORMAT_DATE('%Y-%m', DATE_TRUNC(DATE(gs.event_timestamp), MONTH)) AS month_key,
+  FORMAT_DATE('%b %Y', DATE_TRUNC(DATE(gs.event_timestamp), MONTH)) AS month_label,
   COUNT(*) AS event_count,
-  ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
-  ROUND(COALESCE(SUM(IF(event_type = 'ACTIVE_START', mrr_change_major, 0.0)), 0.0), 2) AS new_mrr,
-  ROUND(COALESCE(SUM(IF(event_type = 'ACTIVE_UPGRADE', mrr_change_major, 0.0)), 0.0), 2) AS expansion_mrr,
-  ROUND(COALESCE(SUM(IF(event_type = 'ACTIVE_DOWNGRADE', mrr_change_major, 0.0)), 0.0), 2) AS contraction_mrr,
-  ROUND(COALESCE(SUM(IF(event_type = 'ACTIVE_END', mrr_change_major, 0.0)), 0.0), 2) AS churn_mrr
-FROM enriched
-GROUP BY group_key, group_label
-ORDER BY net_mrr_change DESC, group_label ASC
-LIMIT @limit_rows
-OFFSET @offset_rows`;
+  ROUND(COALESCE(SUM(gs.mrr_change_major), 0.0), 2) AS net_mrr_change,
+  ROUND(COALESCE(SUM(IF(gs.event_type = 'ACTIVE_START', gs.mrr_change_major, 0.0)), 0.0), 2) AS new_mrr,
+  ROUND(COALESCE(SUM(IF(gs.event_type = 'ACTIVE_UPGRADE', gs.mrr_change_major, 0.0)), 0.0), 2) AS expansion_mrr,
+  ROUND(COALESCE(SUM(IF(gs.event_type = 'ACTIVE_DOWNGRADE', gs.mrr_change_major, 0.0)), 0.0), 2) AS contraction_mrr,
+  ROUND(COALESCE(SUM(IF(gs.event_type = 'ACTIVE_END', gs.mrr_change_major, 0.0)), 0.0), 2) AS churn_mrr
+FROM paged_groups pg
+LEFT JOIN grouped_source gs
+  ON gs.group_key = pg.group_key
+  AND gs.group_label = pg.group_label
+GROUP BY
+  pg.group_key,
+  pg.group_label,
+  pg.net_mrr_change,
+  DATE_TRUNC(DATE(gs.event_timestamp), MONTH)
+HAVING DATE_TRUNC(DATE(gs.event_timestamp), MONTH) IS NOT NULL
+ORDER BY pg.net_mrr_change DESC, pg.group_label ASC, DATE_TRUNC(DATE(gs.event_timestamp), MONTH) ASC`;
       detailRowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, rowsQuery, [
         ...detailBaseParams,
         { name: "limit_rows", type: "INT64", value: String(pageSize) },
@@ -1771,6 +1832,8 @@ OFFSET @offset_rows`;
       : detailRowsRaw.map((row) => ({
           groupKey: asString(row.group_key),
           groupLabel: asString(row.group_label),
+          monthKey: asString(row.month_key),
+          monthLabel: asString(row.month_label),
           eventCount: asInt(row.event_count),
           netMrrChange: asNumber(row.net_mrr_change),
           newMrr: asNumber(row.new_mrr),
@@ -1782,7 +1845,8 @@ OFFSET @offset_rows`;
   return {
     startDate: startDateIso,
     endDate: endDateIso,
-    detailMonth,
+    detailStartMonth,
+    detailEndMonth,
     groupBy,
     targetCurrency: targetCurrency.toUpperCase(),
     totalMrr,
