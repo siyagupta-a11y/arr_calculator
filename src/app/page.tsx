@@ -119,6 +119,535 @@ function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
   return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > 1e-9);
 }
 
+function fmtPercent(n: number) {
+  return `${new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(n || 0)}%`;
+}
+
+function tickIndices(size: number) {
+  if (size <= 1) return [0];
+  if (size <= 4) return Array.from({ length: size }, (_, i) => i);
+  const out = new Set<number>([0, Math.floor((size - 1) / 2), size - 1]);
+  return Array.from(out).sort((a, b) => a - b);
+}
+
+type TrendPoint = {
+  key: string;
+  label: string;
+  mrr: number;
+  arr: number;
+  newMrr: number;
+  expansionMrr: number;
+  contractionMrr: number;
+  churnMrr: number;
+  netMrrChange: number;
+  mrrGrowthRatePct: number;
+  arrGrowth: number;
+};
+
+type LineChartProps = {
+  title: string;
+  subtitle: string;
+  points: TrendPoint[];
+  valueAccessor: (point: TrendPoint) => number;
+  valueFormatter: (value: number) => string;
+  stroke: string;
+  includeZero?: boolean;
+};
+
+function LineChartCard({
+  title,
+  subtitle,
+  points,
+  valueAccessor,
+  valueFormatter,
+  stroke,
+  includeZero = false,
+}: LineChartProps) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  const width = 640;
+  const height = 250;
+  const paddingLeft = 54;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 42;
+  const plotWidth = width - paddingLeft - paddingRight;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  const values = points.map((p) => valueAccessor(p));
+  const minRaw = values.length ? Math.min(...values) : 0;
+  const maxRaw = values.length ? Math.max(...values) : 1;
+  let minValue = includeZero ? Math.min(minRaw, 0) : minRaw;
+  let maxValue = includeZero ? Math.max(maxRaw, 0) : maxRaw;
+  if (Math.abs(maxValue - minValue) < 1e-9) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+
+  const xAt = (idx: number) => {
+    if (points.length <= 1) return paddingLeft + plotWidth / 2;
+    return paddingLeft + (idx / (points.length - 1)) * plotWidth;
+  };
+  const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+
+  const pathD = points
+    .map((p, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(valueAccessor(p))}`)
+    .join(" ");
+
+  const hoveredPoint =
+    hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length ? points[hoverIndex] : null;
+  const hoveredValue = hoveredPoint ? valueAccessor(hoveredPoint) : 0;
+  const hoveredX = hoveredPoint && hoverIndex != null ? xAt(hoverIndex) : 0;
+  const hoveredY = hoveredPoint ? yAt(hoveredValue) : 0;
+
+  const tooltipWidth = 210;
+  const tooltipHeight = 42;
+  const tooltipX = Math.max(
+    paddingLeft,
+    Math.min(paddingLeft + plotWidth - tooltipWidth, hoveredX - tooltipWidth / 2),
+  );
+  const tooltipY = Math.max(paddingTop + 4, hoveredY - tooltipHeight - 10);
+
+  return (
+    <section style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ fontSize: 16, margin: 0 }}>{title}</h2>
+          <p style={{ color: "#666", margin: "4px 0 0 0", fontSize: 13 }}>{subtitle}</p>
+        </div>
+        <div style={{ color: "#666", fontSize: 12 }}>
+          {hoveredPoint ? `${hoveredPoint.label}: ${valueFormatter(hoveredValue)}` : "Hover on chart for values"}
+        </div>
+      </div>
+
+      {points.length === 0 ? (
+        <p style={{ color: "#666", marginTop: 10, marginBottom: 0 }}>No data for selected range.</p>
+      ) : (
+        <div style={{ marginTop: 10 }}>
+          <svg
+            viewBox={`0 0 ${width} ${height}`}
+            role="img"
+            aria-label={title}
+            style={{ width: "100%", display: "block" }}
+            onMouseLeave={() => setHoverIndex(null)}
+            onMouseMove={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const relX = ((e.clientX - rect.left) / rect.width) * width;
+              const clamped = Math.max(paddingLeft, Math.min(paddingLeft + plotWidth, relX));
+              const ratio = points.length > 1 ? (clamped - paddingLeft) / plotWidth : 0;
+              const idx = Math.max(0, Math.min(points.length - 1, Math.round(ratio * Math.max(points.length - 1, 0))));
+              setHoverIndex(idx);
+            }}
+          >
+            <line
+              x1={paddingLeft}
+              y1={paddingTop + plotHeight}
+              x2={paddingLeft + plotWidth}
+              y2={paddingTop + plotHeight}
+              stroke="#ddd"
+              strokeWidth={1}
+            />
+            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#ddd" strokeWidth={1} />
+
+            {points.map((point, idx) => {
+              const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
+              const right = idx === points.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+              return (
+                <rect
+                  key={`hover-${point.key}`}
+                  x={left}
+                  y={paddingTop}
+                  width={Math.max(1, right - left)}
+                  height={plotHeight}
+                  fill="transparent"
+                  onMouseEnter={() => setHoverIndex(idx)}
+                />
+              );
+            })}
+
+            <path d={pathD} fill="none" stroke={stroke} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+
+            {hoverIndex != null && points[hoverIndex] && (
+              <line
+                x1={xAt(hoverIndex)}
+                y1={paddingTop}
+                x2={xAt(hoverIndex)}
+                y2={paddingTop + plotHeight}
+                stroke="#bbb"
+                strokeOpacity={0.6}
+                strokeDasharray="4 4"
+              />
+            )}
+
+            {hoveredPoint && (
+              <g>
+                <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx={6} fill="#111" opacity={0.92} />
+                <text x={tooltipX + 10} y={tooltipY + 16} fill="#e6e6e6" fontSize="11.5">
+                  {hoveredPoint.label}
+                </text>
+                <text x={tooltipX + 10} y={tooltipY + 32} fill={stroke} fontSize="12.5" fontWeight="600">
+                  {valueFormatter(hoveredValue)}
+                </text>
+              </g>
+            )}
+
+            {points.map((point, idx) => (
+              <circle
+                key={point.key}
+                cx={xAt(idx)}
+                cy={yAt(valueAccessor(point))}
+                r={hoverIndex === idx ? 4.6 : 3.2}
+                fill={stroke}
+                onMouseEnter={() => setHoverIndex(idx)}
+              />
+            ))}
+
+            {tickIndices(points.length).map((idx) => (
+              <text
+                key={`tick-${idx}`}
+                x={xAt(idx)}
+                y={height - 12}
+                textAnchor={idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle"}
+                fill="#666"
+                fontSize="12"
+              >
+                {points[idx]?.label || ""}
+              </text>
+            ))}
+
+            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#777" fontSize="12">
+              {valueFormatter(maxValue)}
+            </text>
+            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#777" fontSize="12">
+              {valueFormatter(minValue)}
+            </text>
+          </svg>
+        </div>
+      )}
+    </section>
+  );
+}
+
+type GrowthBreakdownChartProps = {
+  points: TrendPoint[];
+};
+
+function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  const width = 640;
+  const height = 280;
+  const paddingLeft = 54;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 44;
+  const plotWidth = width - paddingLeft - paddingRight;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  const bars = points.map((point) => {
+    const components = [
+      { key: "new", label: "New", value: point.newMrr, color: "#1fc16b" },
+      { key: "expansion", label: "Expansion", value: point.expansionMrr, color: "#2698f0" },
+      { key: "contraction", label: "Contraction", value: point.contractionMrr, color: "#f59e0b" },
+      { key: "churn", label: "Churn", value: point.churnMrr, color: "#ef4444" },
+    ] as const;
+
+    const positiveTotal = components.reduce((sum, component) => sum + Math.max(component.value, 0), 0);
+    const negativeTotal = components.reduce((sum, component) => sum + Math.min(component.value, 0), 0);
+
+    return { point, components, positiveTotal, negativeTotal };
+  });
+
+  const maxPositive = bars.length ? Math.max(...bars.map((b) => b.positiveTotal), 0) : 0;
+  const minNegative = bars.length ? Math.min(...bars.map((b) => b.negativeTotal), 0) : 0;
+  let minValue = minNegative;
+  let maxValue = maxPositive;
+  if (Math.abs(maxValue - minValue) < 1e-9) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+
+  const xAt = (idx: number) => {
+    if (points.length <= 1) return paddingLeft + plotWidth / 2;
+    return paddingLeft + (idx / (points.length - 1)) * plotWidth;
+  };
+  const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+  const zeroY = yAt(0);
+
+  const barWidth = points.length > 0 ? Math.max(8, Math.min(28, (plotWidth / Math.max(points.length, 1)) * 0.62)) : 14;
+  const hovered = hoverIndex != null && hoverIndex >= 0 && hoverIndex < bars.length ? bars[hoverIndex] : null;
+
+  return (
+    <section style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ fontSize: 16, margin: 0 }}>Growth Breakdown</h2>
+          <p style={{ color: "#666", margin: "4px 0 0 0", fontSize: 13 }}>
+            Account-level movement split into New, Expansion, Contraction, and Churn (MRR).
+          </p>
+        </div>
+        <div style={{ color: "#666", fontSize: 12 }}>
+          {hovered ? `${hovered.point.label}: Net ${fmtMoney(hovered.point.netMrrChange, "normal")}` : "Hover on bars for values"}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: "0.8rem", flexWrap: "wrap", marginTop: "0.7rem", fontSize: 12 }}>
+        <span style={{ color: "#1fc16b" }}>New</span>
+        <span style={{ color: "#2698f0" }}>Expansion</span>
+        <span style={{ color: "#f59e0b" }}>Contraction</span>
+        <span style={{ color: "#ef4444" }}>Churn</span>
+      </div>
+
+      {points.length === 0 ? (
+        <p style={{ color: "#666", marginTop: 10, marginBottom: 0 }}>No data for selected range.</p>
+      ) : (
+        <div style={{ marginTop: 10 }}>
+          <svg
+            viewBox={`0 0 ${width} ${height}`}
+            role="img"
+            aria-label="Growth breakdown chart"
+            style={{ width: "100%", display: "block" }}
+            onMouseLeave={() => setHoverIndex(null)}
+            onMouseMove={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const relX = ((e.clientX - rect.left) / rect.width) * width;
+              const clamped = Math.max(paddingLeft, Math.min(paddingLeft + plotWidth, relX));
+              const ratio = points.length > 1 ? (clamped - paddingLeft) / plotWidth : 0;
+              const idx = Math.max(0, Math.min(points.length - 1, Math.round(ratio * Math.max(points.length - 1, 0))));
+              setHoverIndex(idx);
+            }}
+          >
+            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#ddd" strokeWidth={1} />
+            <line x1={paddingLeft} y1={zeroY} x2={paddingLeft + plotWidth} y2={zeroY} stroke="#bbb" strokeWidth={1.2} />
+
+            {bars.map((bar, idx) => {
+              const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
+              const right = idx === bars.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+              return (
+                <rect
+                  key={`hover-zone-${bar.point.key}`}
+                  x={left}
+                  y={paddingTop}
+                  width={Math.max(1, right - left)}
+                  height={plotHeight}
+                  fill="transparent"
+                  onMouseEnter={() => setHoverIndex(idx)}
+                />
+              );
+            })}
+
+            {bars.map((bar, idx) => {
+              const centerX = xAt(idx);
+              let positiveCursor = 0;
+              let negativeCursor = 0;
+
+              return (
+                <g key={bar.point.key}>
+                  {bar.components.map((component) => {
+                    const value = component.value;
+                    if (Math.abs(value) < 1e-9) return null;
+
+                    if (value >= 0) {
+                      const yTop = yAt(positiveCursor + value);
+                      const yBottom = yAt(positiveCursor);
+                      const h = Math.max(1.2, yBottom - yTop);
+                      positiveCursor += value;
+                      return (
+                        <rect
+                          key={`${bar.point.key}-${component.key}`}
+                          x={centerX - barWidth / 2}
+                          y={yTop}
+                          width={barWidth}
+                          height={h}
+                          fill={component.color}
+                          rx={1.2}
+                          onMouseEnter={() => setHoverIndex(idx)}
+                        />
+                      );
+                    }
+
+                    const yTop = yAt(negativeCursor);
+                    const yBottom = yAt(negativeCursor + value);
+                    const h = Math.max(1.2, yBottom - yTop);
+                    negativeCursor += value;
+                    return (
+                      <rect
+                        key={`${bar.point.key}-${component.key}`}
+                        x={centerX - barWidth / 2}
+                        y={yTop}
+                        width={barWidth}
+                        height={h}
+                        fill={component.color}
+                        rx={1.2}
+                        onMouseEnter={() => setHoverIndex(idx)}
+                      />
+                    );
+                  })}
+                </g>
+              );
+            })}
+
+            {tickIndices(points.length).map((idx) => (
+              <text
+                key={`tick-${idx}`}
+                x={xAt(idx)}
+                y={height - 12}
+                textAnchor={idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle"}
+                fill="#666"
+                fontSize="12"
+              >
+                {points[idx]?.label || ""}
+              </text>
+            ))}
+
+            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#777" fontSize="12">
+              {fmtMoney(maxValue, "normal")}
+            </text>
+            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#777" fontSize="12">
+              {fmtMoney(minValue, "normal")}
+            </text>
+          </svg>
+        </div>
+      )}
+    </section>
+  );
+}
+
+type DeltaBarChartProps = {
+  title: string;
+  subtitle: string;
+  points: TrendPoint[];
+  valueAccessor: (point: TrendPoint) => number;
+  valueFormatter: (value: number) => string;
+};
+
+function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormatter }: DeltaBarChartProps) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  const width = 640;
+  const height = 280;
+  const paddingLeft = 54;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 44;
+  const plotWidth = width - paddingLeft - paddingRight;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  const values = points.map(valueAccessor);
+  const maxPositive = values.length ? Math.max(0, ...values) : 0;
+  const minNegative = values.length ? Math.min(0, ...values) : 0;
+  let minValue = minNegative;
+  let maxValue = maxPositive;
+  if (Math.abs(maxValue - minValue) < 1e-9) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+
+  const xAt = (idx: number) => {
+    if (points.length <= 1) return paddingLeft + plotWidth / 2;
+    return paddingLeft + (idx / (points.length - 1)) * plotWidth;
+  };
+  const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+  const zeroY = yAt(0);
+
+  const barWidth = points.length > 0 ? Math.max(8, Math.min(28, (plotWidth / Math.max(points.length, 1)) * 0.62)) : 14;
+  const hovered = hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length ? points[hoverIndex] : null;
+
+  return (
+    <section style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ fontSize: 16, margin: 0 }}>{title}</h2>
+          <p style={{ color: "#666", margin: "4px 0 0 0", fontSize: 13 }}>{subtitle}</p>
+        </div>
+        <div style={{ color: "#666", fontSize: 12 }}>
+          {hovered ? `${hovered.label}: ${valueFormatter(valueAccessor(hovered))}` : "Hover on bars for values"}
+        </div>
+      </div>
+
+      {points.length === 0 ? (
+        <p style={{ color: "#666", marginTop: 10, marginBottom: 0 }}>No data for selected range.</p>
+      ) : (
+        <div style={{ marginTop: 10 }}>
+          <svg
+            viewBox={`0 0 ${width} ${height}`}
+            role="img"
+            aria-label={title}
+            style={{ width: "100%", display: "block" }}
+            onMouseLeave={() => setHoverIndex(null)}
+            onMouseMove={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const relX = ((e.clientX - rect.left) / rect.width) * width;
+              const clamped = Math.max(paddingLeft, Math.min(paddingLeft + plotWidth, relX));
+              const ratio = points.length > 1 ? (clamped - paddingLeft) / plotWidth : 0;
+              const idx = Math.max(0, Math.min(points.length - 1, Math.round(ratio * Math.max(points.length - 1, 0))));
+              setHoverIndex(idx);
+            }}
+          >
+            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#ddd" strokeWidth={1} />
+            <line x1={paddingLeft} y1={zeroY} x2={paddingLeft + plotWidth} y2={zeroY} stroke="#bbb" strokeWidth={1.2} />
+
+            {points.map((point, idx) => {
+              const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
+              const right = idx === points.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+              const value = valueAccessor(point);
+              const yVal = yAt(value);
+              const y0 = yAt(0);
+              const y = Math.min(yVal, y0);
+              const h = Math.max(1.2, Math.abs(yVal - y0));
+              const fill = value >= 0 ? "#1fc16b" : "#ef4444";
+              return (
+                <g key={point.key}>
+                  <rect
+                    x={left}
+                    y={paddingTop}
+                    width={Math.max(1, right - left)}
+                    height={plotHeight}
+                    fill="transparent"
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                  <rect
+                    x={xAt(idx) - barWidth / 2}
+                    y={y}
+                    width={barWidth}
+                    height={h}
+                    fill={fill}
+                    rx={1.2}
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                </g>
+              );
+            })}
+
+            {tickIndices(points.length).map((idx) => (
+              <text
+                key={`tick-${idx}`}
+                x={xAt(idx)}
+                y={height - 12}
+                textAnchor={idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle"}
+                fill="#666"
+                fontSize="12"
+              >
+                {points[idx]?.label || ""}
+              </text>
+            ))}
+
+            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#777" fontSize="12">
+              {valueFormatter(maxValue)}
+            </text>
+            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#777" fontSize="12">
+              {valueFormatter(minValue)}
+            </text>
+          </svg>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function Home() {
   const [startDate, setStartDate] = useState("2025-01-01");
   const [endDate, setEndDate] = useState("2025-12-31");
@@ -237,7 +766,7 @@ export default function Home() {
     return Array.from(values).sort((a, b) => a.localeCompare(b));
   }, [data]);
 
-  const displayedRows: UiRow[] = useMemo(() => {
+  const filteredLineItemRows: UiRow[] = useMemo(() => {
     if (!data) return [];
 
     const baseRows: UiRow[] = (data.rows || []).map((r: ReportRow) => ({
@@ -282,13 +811,25 @@ export default function Home() {
       );
     });
 
-    if (groupByFields.length === 0) {
-      return filteredBaseRows.filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
-    }
+    return filteredBaseRows.filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
+  }, [
+    data,
+    filterDealName,
+    filterDeploymentType,
+    filterAccountId,
+    filterTerritory,
+    filterCountry,
+    filterIndustry,
+    filterDealType,
+    arrDisplayScope,
+  ]);
+
+  const displayedRows: UiRow[] = useMemo(() => {
+    if (groupByFields.length === 0) return filteredLineItemRows;
 
     const map = new Map<string, UiRow>();
 
-    for (const r of filteredBaseRows) {
+    for (const r of filteredLineItemRows) {
       const key = groupByFields
         .map((field) => `${field}:${normalizeGroupKeyValue(field, groupValueForRow(r, field))}`)
         .join("|");
@@ -329,16 +870,8 @@ export default function Home() {
 
     return Array.from(map.values()).filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
   }, [
-    data,
+    filteredLineItemRows,
     groupByFields,
-    filterDealName,
-    filterDeploymentType,
-    filterAccountId,
-    filterTerritory,
-    filterCountry,
-    filterIndustry,
-    filterDealType,
-    arrDisplayScope,
   ]);
 
   const totalsByPeriodForDisplayed = useMemo(() => {
@@ -348,6 +881,83 @@ export default function Home() {
       return { key: p.key, label: p.label, total: round2(total) };
     });
   }, [data, displayedRows]);
+
+  const chartPoints: TrendPoint[] = useMemo(() => {
+    if (!data) return [];
+
+    const periodOrder = data.periods || [];
+    const totalByPeriod = new Map<string, number>(
+      totalsByPeriodForDisplayed.map((periodTotal) => [periodTotal.key, periodTotal.total]),
+    );
+
+    const accountByPeriod = new Map<string, Record<string, number>>();
+    for (const row of filteredLineItemRows) {
+      const accountKey = String(row.accountId || "").trim() || "(blank)";
+      if (!accountByPeriod.has(accountKey)) accountByPeriod.set(accountKey, {});
+      const bucket = accountByPeriod.get(accountKey)!;
+      for (const period of periodOrder) {
+        bucket[period.key] = round2((bucket[period.key] || 0) + (row.valuesByPeriod[period.key] || 0));
+      }
+    }
+
+    return periodOrder.map((period, idx) => {
+      const arr = round2(totalByPeriod.get(period.key) || 0);
+      const mrr = round2(arr / 12);
+      const prevPeriodKey = idx > 0 ? periodOrder[idx - 1].key : "";
+      const prevArr = round2(idx > 0 ? totalByPeriod.get(prevPeriodKey) || 0 : 0);
+      const prevMrr = round2(prevArr / 12);
+      const arrGrowth = round2(arr - prevArr);
+      const mrrGrowthRatePct =
+        idx > 0 && Math.abs(prevMrr) > 1e-9 ? round2(((mrr - prevMrr) / Math.abs(prevMrr)) * 100) : 0;
+
+      let newMrr = 0;
+      let expansionMrr = 0;
+      let contractionMrr = 0;
+      let churnMrr = 0;
+
+      for (const accountTotals of accountByPeriod.values()) {
+        const currArr = round2(accountTotals[period.key] || 0);
+        const prevAccountArr = round2(idx > 0 ? accountTotals[prevPeriodKey] || 0 : 0);
+        const diffArr = round2(currArr - prevAccountArr);
+
+        const currHas = Math.abs(currArr) > 1e-9;
+        const prevHas = Math.abs(prevAccountArr) > 1e-9;
+        if (!currHas && !prevHas) continue;
+
+        if (!prevHas && currHas) {
+          newMrr = round2(newMrr + currArr / 12);
+          continue;
+        }
+
+        if (prevHas && !currHas) {
+          churnMrr = round2(churnMrr - prevAccountArr / 12);
+          continue;
+        }
+
+        if (diffArr > 1e-9) {
+          expansionMrr = round2(expansionMrr + diffArr / 12);
+        } else if (diffArr < -1e-9) {
+          contractionMrr = round2(contractionMrr + diffArr / 12);
+        }
+      }
+
+      const netMrrChange = round2(newMrr + expansionMrr + contractionMrr + churnMrr);
+
+      return {
+        key: period.key,
+        label: period.label,
+        mrr,
+        arr,
+        newMrr,
+        expansionMrr,
+        contractionMrr,
+        churnMrr,
+        netMrrChange,
+        mrrGrowthRatePct,
+        arrGrowth,
+      };
+    });
+  }, [data, totalsByPeriodForDisplayed, filteredLineItemRows]);
 
   const showDealIdColumn = groupByFields.length === 0;
   const groupByLabel = groupByFields
@@ -548,6 +1158,54 @@ export default function Home() {
 
       {data && (
         <>
+          <div
+            style={{
+              marginTop: 20,
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
+              gap: 12,
+              alignItems: "start",
+            }}
+          >
+            <LineChartCard
+              title="MRR Over Time"
+              subtitle="MRR derived from ARR / 12 at the end of each period."
+              points={chartPoints}
+              valueAccessor={(p) => p.mrr}
+              valueFormatter={(v) => fmtMoney(v, "normal")}
+              stroke="#4f8df9"
+            />
+
+            <GrowthBreakdownChart points={chartPoints} />
+
+            <LineChartCard
+              title="MRR Growth Rate Over Time"
+              subtitle="Period-over-period MRR growth rate."
+              points={chartPoints}
+              valueAccessor={(p) => p.mrrGrowthRatePct}
+              valueFormatter={(v) => fmtPercent(v)}
+              stroke="#f59e0b"
+              includeZero
+            />
+
+            <LineChartCard
+              title="ARR Over Time"
+              subtitle="ARR at the end of each period."
+              points={chartPoints}
+              valueAccessor={(p) => p.arr}
+              valueFormatter={(v) => fmtMoney(v, "normal")}
+              stroke="#1fc16b"
+            />
+
+            <DeltaBarChartCard
+              title="ARR Growth Over Time"
+              subtitle="Absolute ARR change per period."
+              points={chartPoints}
+              valueAccessor={(p) => p.arrGrowth}
+              valueFormatter={(v) => fmtMoney(v, "normal")}
+            />
+          </div>
+
           <div style={{ marginTop: 20, padding: 12, border: "1px solid #eee", borderRadius: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
               <div>
