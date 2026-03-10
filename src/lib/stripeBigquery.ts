@@ -1335,12 +1335,12 @@ const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
   product_id: {
     keyExpr: "product_id",
     labelExpr:
-      "CASE WHEN product_description = '' OR product_description = '(blank)' THEN product_id ELSE CONCAT(product_id, ' (', product_description, ')') END",
+      "CASE WHEN product_description = '' OR product_description = '(blank)' OR LOWER(product_description) = LOWER(product_id) THEN product_id WHEN product_id = '' OR product_id = '(blank)' THEN product_description ELSE CONCAT(product_id, ' (', product_description, ')') END",
   },
   price_id: {
     keyExpr: "price_id",
     labelExpr:
-      "CASE WHEN price_description = '' OR price_description = '(blank)' THEN price_id ELSE CONCAT(price_id, ' (', price_description, ')') END",
+      "CASE WHEN price_description = '' OR price_description = '(blank)' OR LOWER(price_description) = LOWER(price_id) THEN price_id WHEN price_id = '' OR price_id = '(blank)' THEN price_description ELSE CONCAT(price_id, ' (', price_description, ')') END",
   },
   subscription_id: {
     keyExpr: "subscription_id",
@@ -1394,18 +1394,35 @@ enriched AS (
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item')), ''),
       '(blank)'
     ) AS subscription_item_id,
-    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_id')), ''), '(blank)') AS price_id,
-    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_id')), ''), '(blank)') AS product_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price')), ''),
+      '(blank)'
+    ) AS price_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product')), ''),
+      '(blank)'
+    ) AS product_id,
     COALESCE(
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_nickname')), ''),
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_description')), ''),
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_name')), ''),
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.lookup_key')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.product_name')), ''),
       '(blank)'
     ) AS price_description,
     COALESCE(
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_name')), ''),
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.nickname')), ''),
       '(blank)'
     ) AS product_description
   FROM source
