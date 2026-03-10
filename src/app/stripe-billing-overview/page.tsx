@@ -62,11 +62,107 @@ function formatPercent(value: number) {
   }).format(value || 0)}%`;
 }
 
-function useTickIndices(size: number) {
+function tickIndices(size: number) {
   if (size <= 1) return [0];
   if (size <= 4) return Array.from({ length: size }, (_, i) => i);
   const out = new Set<number>([0, Math.floor((size - 1) / 2), size - 1]);
   return Array.from(out).sort((a, b) => a - b);
+}
+
+type GrowthWindowOption = {
+  value: string;
+  label: string;
+  lookbackPeriods: number;
+  subtitle: string;
+};
+
+function growthWindowOptionsForGrain(grain: Grain): GrowthWindowOption[] {
+  if (grain === "daily") {
+    return [
+      {
+        value: "daily",
+        label: "Day over day (1 day)",
+        lookbackPeriods: 1,
+        subtitle: "Percent change in MRR versus 1 day earlier.",
+      },
+      {
+        value: "monthly",
+        label: "Trailing 30-day",
+        lookbackPeriods: 30,
+        subtitle: "Percent change in MRR versus 30 days earlier (trailing 30-day growth).",
+      },
+      {
+        value: "quarterly",
+        label: "Trailing 90-day",
+        lookbackPeriods: 90,
+        subtitle: "Percent change in MRR versus 90 days earlier (trailing quarter growth).",
+      },
+    ];
+  }
+
+  if (grain === "weekly") {
+    return [
+      {
+        value: "weekly",
+        label: "Week over week (1 week)",
+        lookbackPeriods: 1,
+        subtitle: "Percent change in MRR versus 1 week earlier.",
+      },
+      {
+        value: "monthly",
+        label: "Approx. month over month (4 weeks)",
+        lookbackPeriods: 4,
+        subtitle: "Percent change in MRR versus 4 weeks earlier.",
+      },
+      {
+        value: "quarterly",
+        label: "Approx. quarter over quarter (13 weeks)",
+        lookbackPeriods: 13,
+        subtitle: "Percent change in MRR versus 13 weeks earlier.",
+      },
+    ];
+  }
+
+  if (grain === "monthly") {
+    return [
+      {
+        value: "monthly",
+        label: "Month over month (1 month)",
+        lookbackPeriods: 1,
+        subtitle: "Percent change in MRR versus 1 month earlier.",
+      },
+      {
+        value: "quarterly",
+        label: "Quarter over quarter (3 months)",
+        lookbackPeriods: 3,
+        subtitle: "Percent change in MRR versus 3 months earlier.",
+      },
+    ];
+  }
+
+  return [
+    {
+      value: "quarterly",
+      label: "Quarter over quarter (1 quarter)",
+      lookbackPeriods: 1,
+      subtitle: "Percent change in MRR versus 1 quarter earlier.",
+    },
+  ];
+}
+
+function defaultGrowthWindowValue(grain: Grain) {
+  return growthWindowOptionsForGrain(grain)[0]?.value || "monthly";
+}
+
+function computeMrrGrowthRates(points: OverviewPoint[], lookbackPeriods: number) {
+  if (lookbackPeriods <= 0) return points.map(() => 0);
+  return points.map((point, idx) => {
+    const previous = points[idx - lookbackPeriods];
+    if (!previous) return 0;
+    if (Math.abs(previous.mrrEnd) < 1e-9) return 0;
+    const pct = ((point.mrrEnd - previous.mrrEnd) / Math.abs(previous.mrrEnd)) * 100;
+    return Math.round(pct * 100) / 100;
+  });
 }
 
 type LineChartProps = {
@@ -77,6 +173,7 @@ type LineChartProps = {
   valueFormatter: (value: number) => string;
   stroke: string;
   includeZero?: boolean;
+  headerControl?: React.ReactNode;
 };
 
 function LineChartCard({
@@ -87,6 +184,7 @@ function LineChartCard({
   valueFormatter,
   stroke,
   includeZero = false,
+  headerControl,
 }: LineChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
@@ -119,13 +217,12 @@ function LineChartCard({
     .map((p, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(valueAccessor(p))}`)
     .join(" ");
 
-  const tickIndices = useTickIndices(points.length);
-
   const hoveredPoint =
     hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length ? points[hoverIndex] : null;
   const hoveredValue = hoveredPoint ? valueAccessor(hoveredPoint) : 0;
   const hoveredX = hoveredPoint && hoverIndex != null ? xAt(hoverIndex) : 0;
   const hoveredY = hoveredPoint ? yAt(hoveredValue) : 0;
+
   const tooltipWidth = 210;
   const tooltipHeight = 42;
   const tooltipX = Math.max(
@@ -143,10 +240,13 @@ function LineChartCard({
             {subtitle}
           </p>
         </div>
-        <div className="stripe-ui__hint" aria-live="polite">
-          {hoveredPoint
-            ? `${hoveredPoint.label}: ${valueFormatter(valueAccessor(hoveredPoint))}`
-            : "Hover on chart for values"}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          {headerControl}
+          <div className="stripe-ui__hint" aria-live="polite">
+            {hoveredPoint
+              ? `${hoveredPoint.label}: ${valueFormatter(hoveredValue)}`
+              : "Hover on chart for values"}
+          </div>
         </div>
       </div>
 
@@ -235,7 +335,7 @@ function LineChartCard({
               />
             ))}
 
-            {tickIndices.map((idx) => (
+            {tickIndices(points.length).map((idx) => (
               <text
                 key={`tick-${idx}`}
                 x={xAt(idx)}
@@ -314,7 +414,6 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
   const zeroY = yAt(0);
 
   const barWidth = points.length > 0 ? Math.max(8, Math.min(28, (plotWidth / Math.max(points.length, 1)) * 0.62)) : 14;
-  const tickIndices = useTickIndices(points.length);
   const hovered = hoverIndex != null && hoverIndex >= 0 && hoverIndex < bars.length ? bars[hoverIndex] : null;
 
   return (
@@ -431,7 +530,7 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
               );
             })}
 
-            {tickIndices.map((idx) => (
+            {tickIndices(points.length).map((idx) => (
               <text
                 key={`tick-${idx}`}
                 x={xAt(idx)}
@@ -470,12 +569,154 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
   );
 }
 
+type DeltaBarChartProps = {
+  title: string;
+  subtitle: string;
+  points: OverviewPoint[];
+  valueAccessor: (point: OverviewPoint) => number;
+  valueFormatter: (value: number) => string;
+};
+
+function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormatter }: DeltaBarChartProps) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  const width = 640;
+  const height = 280;
+  const paddingLeft = 54;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 44;
+  const plotWidth = width - paddingLeft - paddingRight;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  const values = points.map(valueAccessor);
+  const maxPositive = values.length ? Math.max(0, ...values) : 0;
+  const minNegative = values.length ? Math.min(0, ...values) : 0;
+  let minValue = minNegative;
+  let maxValue = maxPositive;
+  if (Math.abs(maxValue - minValue) < 1e-9) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+
+  const xAt = (idx: number) => {
+    if (points.length <= 1) return paddingLeft + plotWidth / 2;
+    return paddingLeft + (idx / (points.length - 1)) * plotWidth;
+  };
+  const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+  const zeroY = yAt(0);
+
+  const barWidth = points.length > 0 ? Math.max(8, Math.min(28, (plotWidth / Math.max(points.length, 1)) * 0.62)) : 14;
+  const hovered =
+    hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length
+      ? points[hoverIndex]
+      : null;
+
+  return (
+    <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+      <div className="stripe-ui__section-head">
+        <div>
+          <h2 className="stripe-ui__panel-title">{title}</h2>
+          <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+            {subtitle}
+          </p>
+        </div>
+        <div className="stripe-ui__hint" aria-live="polite">
+          {hovered
+            ? `${hovered.label}: ${valueFormatter(valueAccessor(hovered))}`
+            : "Hover on bars for values"}
+        </div>
+      </div>
+
+      {points.length === 0 ? (
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.9rem", marginBottom: 0 }}>
+          No data for selected range.
+        </p>
+      ) : (
+        <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
+          <svg
+            viewBox={`0 0 ${width} ${height}`}
+            role="img"
+            aria-label={title}
+            style={{ width: "100%", display: "block" }}
+            onMouseLeave={() => setHoverIndex(null)}
+            onMouseMove={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const relX = ((e.clientX - rect.left) / rect.width) * width;
+              const clamped = Math.max(paddingLeft, Math.min(paddingLeft + plotWidth, relX));
+              const ratio = points.length > 1 ? (clamped - paddingLeft) / plotWidth : 0;
+              const idx = Math.max(0, Math.min(points.length - 1, Math.round(ratio * Math.max(points.length - 1, 0))));
+              setHoverIndex(idx);
+            }}
+          >
+            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#36557f" strokeWidth={1} />
+            <line x1={paddingLeft} y1={zeroY} x2={paddingLeft + plotWidth} y2={zeroY} stroke="#5073a3" strokeWidth={1.2} />
+
+            {points.map((point, idx) => {
+              const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
+              const right = idx === points.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+              const value = valueAccessor(point);
+              const yVal = yAt(value);
+              const y0 = yAt(0);
+              const y = Math.min(yVal, y0);
+              const h = Math.max(1.2, Math.abs(yVal - y0));
+              const fill = value >= 0 ? "#1fc16b" : "#ef4444";
+              return (
+                <g key={point.key}>
+                  <rect
+                    x={left}
+                    y={paddingTop}
+                    width={Math.max(1, right - left)}
+                    height={plotHeight}
+                    fill="transparent"
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                  <rect
+                    x={xAt(idx) - barWidth / 2}
+                    y={y}
+                    width={barWidth}
+                    height={h}
+                    fill={fill}
+                    rx={1.2}
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                </g>
+              );
+            })}
+
+            {tickIndices(points.length).map((idx) => (
+              <text
+                key={`tick-${idx}`}
+                x={xAt(idx)}
+                y={height - 12}
+                textAnchor={idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle"}
+                fill="#b7c9e6"
+                fontSize="12"
+              >
+                {points[idx]?.label || ""}
+              </text>
+            ))}
+
+            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#8ea7cb" fontSize="12">
+              {valueFormatter(maxValue)}
+            </text>
+            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#8ea7cb" fontSize="12">
+              {valueFormatter(minValue)}
+            </text>
+          </svg>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function StripeBillingOverviewPage() {
   const defaults = useMemo(() => defaultDateRange(), []);
 
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
   const [grain, setGrain] = useState<Grain>("monthly");
+  const [mrrGrowthWindow, setMrrGrowthWindow] = useState<string>(defaultGrowthWindowValue("monthly"));
 
   const [loading, setLoading] = useState(false);
   const [hasRunOnce, setHasRunOnce] = useState(false);
@@ -486,6 +727,7 @@ export default function StripeBillingOverviewPage() {
     setHasRunOnce(true);
     setLoading(true);
     setError(null);
+
     try {
       const res = await fetch("/api/stripe-billing-overview-report", {
         method: "POST",
@@ -517,8 +759,23 @@ export default function StripeBillingOverviewPage() {
     }
   }
 
-  const points = data?.points || [];
-  const currency = data?.targetCurrency || "USD";
+  const points = useMemo(() => data?.points ?? [], [data]);
+  const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
+  const growthWindowOptions = useMemo(() => growthWindowOptionsForGrain(grain), [grain]);
+  const selectedGrowthWindow = useMemo(
+    () => growthWindowOptions.find((option) => option.value === mrrGrowthWindow) || growthWindowOptions[0],
+    [growthWindowOptions, mrrGrowthWindow],
+  );
+  const selectedGrowthLookback = selectedGrowthWindow?.lookbackPeriods || 1;
+  const mrrGrowthSeries = useMemo(
+    () => computeMrrGrowthRates(points, selectedGrowthLookback),
+    [points, selectedGrowthLookback],
+  );
+  const mrrGrowthByKey = useMemo(() => {
+    const out = new Map<string, number>();
+    points.forEach((point, idx) => out.set(point.key, mrrGrowthSeries[idx] || 0));
+    return out;
+  }, [points, mrrGrowthSeries]);
 
   return (
     <div className="stripe-ui">
@@ -533,14 +790,11 @@ export default function StripeBillingOverviewPage() {
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <Link href="/stripe-through-mrr" className="stripe-ui__hero-link">
-              Open Stripe through MRR
-            </Link>
             <Link href="/stripe-arr-correct" className="stripe-ui__hero-link">
               Open Stripe ARR (Correct)
             </Link>
-            <Link href="/stripe" className="stripe-ui__hero-link">
-              Open Stripe report
+            <Link href="/stripe-through-mrr" className="stripe-ui__hero-link">
+              Open Stripe through MRR
             </Link>
             <Link href="/" className="stripe-ui__hero-link">
               Open HubSpot report
@@ -588,7 +842,11 @@ export default function StripeBillingOverviewPage() {
               id="stripe-billing-grain"
               className="stripe-ui__control"
               value={grain}
-              onChange={(e) => setGrain(e.target.value as Grain)}
+              onChange={(e) => {
+                const next = e.target.value as Grain;
+                setGrain(next);
+                setMrrGrowthWindow(defaultGrowthWindowValue(next));
+              }}
             >
               <option value="daily">Daily</option>
               <option value="weekly">Weekly</option>
@@ -653,7 +911,7 @@ export default function StripeBillingOverviewPage() {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(460px, 1fr))",
+              gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
               gap: "0.95rem",
               alignItems: "start",
             }}
@@ -671,12 +929,32 @@ export default function StripeBillingOverviewPage() {
 
             <LineChartCard
               title="MRR Growth Rate Over Time"
-              subtitle="Period-over-period MRR growth rate."
+              subtitle={selectedGrowthWindow?.subtitle || "Period-over-period MRR growth rate."}
               points={points}
-              valueAccessor={(p) => p.mrrGrowthRatePct}
+              valueAccessor={(p) => mrrGrowthByKey.get(p.key) || 0}
               valueFormatter={(v) => formatPercent(v)}
               stroke="#f59e0b"
               includeZero
+              headerControl={
+                <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
+                  <label htmlFor="mrr-growth-window" className="stripe-ui__hint">
+                    Growth window
+                  </label>
+                  <select
+                    id="mrr-growth-window"
+                    className="stripe-ui__control"
+                    value={selectedGrowthWindow?.value || ""}
+                    onChange={(e) => setMrrGrowthWindow(e.target.value)}
+                    style={{ minWidth: "220px" }}
+                  >
+                    {growthWindowOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              }
             />
 
             <LineChartCard
@@ -688,14 +966,12 @@ export default function StripeBillingOverviewPage() {
               stroke="#1fc16b"
             />
 
-            <LineChartCard
+            <DeltaBarChartCard
               title="ARR Growth Over Time"
               subtitle="Absolute ARR change per period."
               points={points}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => formatMoney(v, currency)}
-              stroke="#ef4444"
-              includeZero
             />
           </div>
         </>
