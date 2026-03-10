@@ -175,7 +175,7 @@ function accountGroupingKey(row: UiRow) {
     if (numericToken) return numericToken;
     return raw.toLowerCase();
   }
-  return "(blank)";
+  return "";
 }
 
 function fmtPercent(n: number) {
@@ -229,7 +229,7 @@ function LineChartCard({
 
   const width = 640;
   const height = 250;
-  const paddingLeft = 88;
+  const paddingLeft = 116;
   const paddingRight = 20;
   const paddingTop = 20;
   const paddingBottom = 42;
@@ -403,7 +403,7 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
 
   const width = 640;
   const height = 280;
-  const paddingLeft = 88;
+  const paddingLeft = 116;
   const paddingRight = 20;
   const paddingTop = 20;
   const paddingBottom = 44;
@@ -607,7 +607,7 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
 
   const width = 640;
   const height = 280;
-  const paddingLeft = 88;
+  const paddingLeft = 116;
   const paddingRight = 20;
   const paddingTop = 20;
   const paddingBottom = 44;
@@ -802,28 +802,20 @@ export default function Home() {
         return json as ReportResponse;
       };
 
-      const [mainReport, chartMainReport] = await Promise.all([
+      const historyStart = historyStartForGrain(startDate, grain);
+      const chartHistoryPayload: ReportRequest = {
+        ...chartPayload,
+        startDate: historyStart,
+      };
+
+      const [mainReport, chartMainReport, historyReport] = await Promise.all([
         fetchReport(payload),
         fetchReport(chartPayload),
+        fetchReport(chartHistoryPayload),
       ]);
       setData(mainReport);
       setChartData(chartMainReport);
-
-      const historyStart = historyStartForGrain(startDate, grain);
-      if (historyStart !== startDate) {
-        try {
-          const historyPayload: ReportRequest = {
-            ...chartPayload,
-            startDate: historyStart,
-          };
-          const historyReport = await fetchReport(historyPayload);
-          setChartHistoryData(historyReport);
-        } catch {
-          setChartHistoryData(chartMainReport);
-        }
-      } else {
-        setChartHistoryData(chartMainReport);
-      }
+      setChartHistoryData(historyReport);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
       setError(message);
@@ -1025,6 +1017,7 @@ export default function Home() {
 
     for (const row of filteredChartLineItemRows) {
       const key = accountGroupingKey(row);
+      if (!key) continue;
       if (!grouped.has(key)) grouped.set(key, {});
       const bucket = grouped.get(key)!;
       for (const period of periodOrder) {
