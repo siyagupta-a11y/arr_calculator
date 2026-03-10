@@ -307,6 +307,9 @@ export default function DiffSheetPage() {
             <Link href="/stripe" className="stripe-ui__hero-link">
               Open Stripe report
             </Link>
+            <Link href="/stripe-through-mrr" className="stripe-ui__hero-link">
+              Open Stripe through MRR
+            </Link>
             <Link href="/" className="stripe-ui__hero-link">
               Open HubSpot report
             </Link>
