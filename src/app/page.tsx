@@ -119,6 +119,25 @@ function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
   return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > 1e-9);
 }
 
+function accountGroupingKey(row: UiRow) {
+  const raw = String(row.accountId || "").trim();
+  if (raw) {
+    const numericToken =
+      raw
+        .split(/[,\s;|]+/)
+        .map((part) => part.trim())
+        .find((part) => /^\d+$/.test(part)) || "";
+    if (numericToken) return `account:${numericToken}`;
+    return `account:${raw.toLowerCase()}`;
+  }
+
+  const name = String(row.accountName || "").trim().toLowerCase();
+  if (name) return `account_name:${name}`;
+  const dealId = String(row.dealId || "").trim();
+  if (dealId) return `deal:${dealId}`;
+  return `line:${String(row.dealName || "").trim().toLowerCase() || "(blank)"}`;
+}
+
 function fmtPercent(n: number) {
   return `${new Intl.NumberFormat(undefined, {
     minimumFractionDigits: 2,
@@ -212,21 +231,25 @@ function LineChartCard({
   const tooltipY = Math.max(paddingTop + 4, hoveredY - tooltipHeight - 10);
 
   return (
-    <section style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+    <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+      <div className="stripe-ui__section-head">
         <div>
-          <h2 style={{ fontSize: 16, margin: 0 }}>{title}</h2>
-          <p style={{ color: "#666", margin: "4px 0 0 0", fontSize: 13 }}>{subtitle}</p>
+          <h2 className="stripe-ui__panel-title">{title}</h2>
+          <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+            {subtitle}
+          </p>
         </div>
-        <div style={{ color: "#666", fontSize: 12 }}>
+        <div className="stripe-ui__hint" aria-live="polite">
           {hoveredPoint ? `${hoveredPoint.label}: ${valueFormatter(hoveredValue)}` : "Hover on chart for values"}
         </div>
       </div>
 
       {points.length === 0 ? (
-        <p style={{ color: "#666", marginTop: 10, marginBottom: 0 }}>No data for selected range.</p>
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>
+          No data for selected range.
+        </p>
       ) : (
-        <div style={{ marginTop: 10 }}>
+        <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
           <svg
             viewBox={`0 0 ${width} ${height}`}
             role="img"
@@ -247,10 +270,10 @@ function LineChartCard({
               y1={paddingTop + plotHeight}
               x2={paddingLeft + plotWidth}
               y2={paddingTop + plotHeight}
-              stroke="#ddd"
+              stroke="#36557f"
               strokeWidth={1}
             />
-            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#ddd" strokeWidth={1} />
+            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#36557f" strokeWidth={1} />
 
             {points.map((point, idx) => {
               const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
@@ -276,16 +299,16 @@ function LineChartCard({
                 y1={paddingTop}
                 x2={xAt(hoverIndex)}
                 y2={paddingTop + plotHeight}
-                stroke="#bbb"
-                strokeOpacity={0.6}
+                stroke="#89a9d4"
+                strokeOpacity={0.5}
                 strokeDasharray="4 4"
               />
             )}
 
             {hoveredPoint && (
               <g>
-                <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx={6} fill="#111" opacity={0.92} />
-                <text x={tooltipX + 10} y={tooltipY + 16} fill="#e6e6e6" fontSize="11.5">
+                <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx={6} fill="#0e203b" opacity={0.97} />
+                <text x={tooltipX + 10} y={tooltipY + 16} fill="#d9e6fa" fontSize="11.5">
                   {hoveredPoint.label}
                 </text>
                 <text x={tooltipX + 10} y={tooltipY + 32} fill={stroke} fontSize="12.5" fontWeight="600">
@@ -311,17 +334,17 @@ function LineChartCard({
                 x={xAt(idx)}
                 y={height - 12}
                 textAnchor={idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle"}
-                fill="#666"
+                fill="#b7c9e6"
                 fontSize="12"
               >
                 {points[idx]?.label || ""}
               </text>
             ))}
 
-            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#777" fontSize="12">
+            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#8ea7cb" fontSize="12">
               {valueFormatter(maxValue)}
             </text>
-            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#777" fontSize="12">
+            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#8ea7cb" fontSize="12">
               {valueFormatter(minValue)}
             </text>
           </svg>
@@ -381,30 +404,32 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
   const hovered = hoverIndex != null && hoverIndex >= 0 && hoverIndex < bars.length ? bars[hoverIndex] : null;
 
   return (
-    <section style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+    <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+      <div className="stripe-ui__section-head">
         <div>
-          <h2 style={{ fontSize: 16, margin: 0 }}>Growth Breakdown</h2>
-          <p style={{ color: "#666", margin: "4px 0 0 0", fontSize: 13 }}>
+          <h2 className="stripe-ui__panel-title">Growth Breakdown</h2>
+          <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
             Account-level movement split into New, Expansion, Contraction, and Churn (MRR).
           </p>
         </div>
-        <div style={{ color: "#666", fontSize: 12 }}>
+        <div className="stripe-ui__hint" aria-live="polite">
           {hovered ? `${hovered.point.label}: Net ${fmtMoney(hovered.point.netMrrChange, "normal")}` : "Hover on bars for values"}
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: "0.8rem", flexWrap: "wrap", marginTop: "0.7rem", fontSize: 12 }}>
-        <span style={{ color: "#1fc16b" }}>New</span>
-        <span style={{ color: "#2698f0" }}>Expansion</span>
-        <span style={{ color: "#f59e0b" }}>Contraction</span>
-        <span style={{ color: "#ef4444" }}>Churn</span>
+      <div style={{ display: "flex", gap: "0.8rem", flexWrap: "wrap", marginTop: "0.7rem" }}>
+        <span className="stripe-ui__hint" style={{ color: "#1fc16b" }}>New</span>
+        <span className="stripe-ui__hint" style={{ color: "#2698f0" }}>Expansion</span>
+        <span className="stripe-ui__hint" style={{ color: "#f59e0b" }}>Contraction</span>
+        <span className="stripe-ui__hint" style={{ color: "#ef4444" }}>Churn</span>
       </div>
 
       {points.length === 0 ? (
-        <p style={{ color: "#666", marginTop: 10, marginBottom: 0 }}>No data for selected range.</p>
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.9rem", marginBottom: 0 }}>
+          No data for selected range.
+        </p>
       ) : (
-        <div style={{ marginTop: 10 }}>
+        <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
           <svg
             viewBox={`0 0 ${width} ${height}`}
             role="img"
@@ -420,8 +445,8 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
               setHoverIndex(idx);
             }}
           >
-            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#ddd" strokeWidth={1} />
-            <line x1={paddingLeft} y1={zeroY} x2={paddingLeft + plotWidth} y2={zeroY} stroke="#bbb" strokeWidth={1.2} />
+            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#36557f" strokeWidth={1} />
+            <line x1={paddingLeft} y1={zeroY} x2={paddingLeft + plotWidth} y2={zeroY} stroke="#5073a3" strokeWidth={1.2} />
 
             {bars.map((bar, idx) => {
               const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
@@ -496,20 +521,33 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
                 x={xAt(idx)}
                 y={height - 12}
                 textAnchor={idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle"}
-                fill="#666"
+                fill="#b7c9e6"
                 fontSize="12"
               >
                 {points[idx]?.label || ""}
               </text>
             ))}
 
-            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#777" fontSize="12">
+            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#8ea7cb" fontSize="12">
               {fmtMoney(maxValue, "normal")}
             </text>
-            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#777" fontSize="12">
+            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#8ea7cb" fontSize="12">
               {fmtMoney(minValue, "normal")}
             </text>
           </svg>
+
+          {hovered && (
+            <div className="stripe-ui__panel" style={{ marginTop: "0.8rem", padding: "0.75rem" }}>
+              <div className="stripe-ui__hint" style={{ marginBottom: "0.35rem" }}>
+                {hovered.point.label}
+              </div>
+              <div className="stripe-ui__hint">New: {fmtMoney(hovered.point.newMrr, "normal")}</div>
+              <div className="stripe-ui__hint">Expansion: {fmtMoney(hovered.point.expansionMrr, "normal")}</div>
+              <div className="stripe-ui__hint">Contraction: {fmtMoney(hovered.point.contractionMrr, "normal")}</div>
+              <div className="stripe-ui__hint">Churn: {fmtMoney(hovered.point.churnMrr, "normal")}</div>
+              <div className="stripe-ui__hint">Net: {fmtMoney(hovered.point.netMrrChange, "normal")}</div>
+            </div>
+          )}
         </div>
       )}
     </section>
@@ -557,21 +595,25 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
   const hovered = hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length ? points[hoverIndex] : null;
 
   return (
-    <section style={{ border: "1px solid #eee", borderRadius: 10, padding: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+    <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+      <div className="stripe-ui__section-head">
         <div>
-          <h2 style={{ fontSize: 16, margin: 0 }}>{title}</h2>
-          <p style={{ color: "#666", margin: "4px 0 0 0", fontSize: 13 }}>{subtitle}</p>
+          <h2 className="stripe-ui__panel-title">{title}</h2>
+          <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+            {subtitle}
+          </p>
         </div>
-        <div style={{ color: "#666", fontSize: 12 }}>
+        <div className="stripe-ui__hint" aria-live="polite">
           {hovered ? `${hovered.label}: ${valueFormatter(valueAccessor(hovered))}` : "Hover on bars for values"}
         </div>
       </div>
 
       {points.length === 0 ? (
-        <p style={{ color: "#666", marginTop: 10, marginBottom: 0 }}>No data for selected range.</p>
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.9rem", marginBottom: 0 }}>
+          No data for selected range.
+        </p>
       ) : (
-        <div style={{ marginTop: 10 }}>
+        <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
           <svg
             viewBox={`0 0 ${width} ${height}`}
             role="img"
@@ -587,8 +629,8 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
               setHoverIndex(idx);
             }}
           >
-            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#ddd" strokeWidth={1} />
-            <line x1={paddingLeft} y1={zeroY} x2={paddingLeft + plotWidth} y2={zeroY} stroke="#bbb" strokeWidth={1.2} />
+            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#36557f" strokeWidth={1} />
+            <line x1={paddingLeft} y1={zeroY} x2={paddingLeft + plotWidth} y2={zeroY} stroke="#5073a3" strokeWidth={1.2} />
 
             {points.map((point, idx) => {
               const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
@@ -628,17 +670,17 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
                 x={xAt(idx)}
                 y={height - 12}
                 textAnchor={idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle"}
-                fill="#666"
+                fill="#b7c9e6"
                 fontSize="12"
               >
                 {points[idx]?.label || ""}
               </text>
             ))}
 
-            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#777" fontSize="12">
+            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#8ea7cb" fontSize="12">
               {valueFormatter(maxValue)}
             </text>
-            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#777" fontSize="12">
+            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#8ea7cb" fontSize="12">
               {valueFormatter(minValue)}
             </text>
           </svg>
@@ -882,6 +924,23 @@ export default function Home() {
     });
   }, [data, displayedRows]);
 
+  const accountArrByPeriod = useMemo(() => {
+    if (!data) return new Map<string, Record<string, number>>();
+    const periodOrder = data.periods || [];
+    const grouped = new Map<string, Record<string, number>>();
+
+    for (const row of filteredLineItemRows) {
+      const key = accountGroupingKey(row);
+      if (!grouped.has(key)) grouped.set(key, {});
+      const bucket = grouped.get(key)!;
+      for (const period of periodOrder) {
+        bucket[period.key] = round2((bucket[period.key] || 0) + (row.valuesByPeriod[period.key] || 0));
+      }
+    }
+
+    return grouped;
+  }, [data, filteredLineItemRows]);
+
   const chartPoints: TrendPoint[] = useMemo(() => {
     if (!data) return [];
 
@@ -889,16 +948,6 @@ export default function Home() {
     const totalByPeriod = new Map<string, number>(
       totalsByPeriodForDisplayed.map((periodTotal) => [periodTotal.key, periodTotal.total]),
     );
-
-    const accountByPeriod = new Map<string, Record<string, number>>();
-    for (const row of filteredLineItemRows) {
-      const accountKey = String(row.accountId || "").trim() || "(blank)";
-      if (!accountByPeriod.has(accountKey)) accountByPeriod.set(accountKey, {});
-      const bucket = accountByPeriod.get(accountKey)!;
-      for (const period of periodOrder) {
-        bucket[period.key] = round2((bucket[period.key] || 0) + (row.valuesByPeriod[period.key] || 0));
-      }
-    }
 
     return periodOrder.map((period, idx) => {
       const arr = round2(totalByPeriod.get(period.key) || 0);
@@ -915,7 +964,7 @@ export default function Home() {
       let contractionMrr = 0;
       let churnMrr = 0;
 
-      for (const accountTotals of accountByPeriod.values()) {
+      for (const accountTotals of accountArrByPeriod.values()) {
         const currArr = round2(accountTotals[period.key] || 0);
         const prevAccountArr = round2(idx > 0 ? accountTotals[prevPeriodKey] || 0 : 0);
         const diffArr = round2(currArr - prevAccountArr);
@@ -957,7 +1006,7 @@ export default function Home() {
         arrGrowth,
       };
     });
-  }, [data, totalsByPeriodForDisplayed, filteredLineItemRows]);
+  }, [data, totalsByPeriodForDisplayed, accountArrByPeriod]);
 
   const showDealIdColumn = groupByFields.length === 0;
   const groupByLabel = groupByFields
@@ -1039,73 +1088,134 @@ export default function Home() {
   }
 
   return (
-    <div style={{ padding: 24 }}>
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-        <h1 style={{ fontSize: 24, marginBottom: 8 }}>ARR Report</h1>
-        <Link href="/stripe-arr-correct">Open Stripe ARR (Correct)</Link>
-        <Link href="/stripe-through-mrr">Open Stripe through MRR</Link>
-        <Link href="/stripe-billing-overview">Open Stripe Billing Overview</Link>
-      </div>
-      <p style={{ marginTop: 0, color: "#666" }}>
-        Select a date range and mode. Top shows totals by period; below is the breakdown.
-      </p>
-
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end", marginTop: 16 }}>
-        <div>
-          <label>Start date</label>
-          <br />
-          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+    <div className="stripe-ui">
+      <section className="stripe-ui__hero ui-reveal">
+        <div className="stripe-ui__eyebrow">Revenue intelligence</div>
+        <div className="stripe-ui__hero-row">
+          <div>
+            <h1 className="stripe-ui__title">HubSpot ARR Report</h1>
+            <p className="stripe-ui__subtitle">
+              Select a date range and mode to analyze ARR, MRR, growth breakdown, and period trends from HubSpot data.
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Link href="/stripe-arr-correct" className="stripe-ui__hero-link">
+              Open Stripe ARR (Correct)
+            </Link>
+            <Link href="/stripe-through-mrr" className="stripe-ui__hero-link">
+              Open Stripe through MRR
+            </Link>
+            <Link href="/stripe-billing-overview" className="stripe-ui__hero-link">
+              Open Stripe Billing Overview
+            </Link>
+          </div>
         </div>
+      </section>
 
-        <div>
-          <label>End date</label>
-          <br />
-          <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
-        </div>
+      <section className="stripe-ui__panel ui-reveal ui-reveal-1">
+        <h2 className="stripe-ui__panel-title">Controls</h2>
+        <p className="stripe-ui__panel-subtitle">Set date range, mode, grain, and grouping, then run the report.</p>
 
-        <div>
-          <label>Mode</label>
-          <br />
-          <select value={mode} onChange={(e) => setMode(e.target.value as ReportMode)}>
-            <option value="arr">ARR</option>
-            <option value="contracted">Contracted ARR</option>
-          </select>
-        </div>
+        <div className="stripe-ui__control-grid">
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-start-date">
+              Start date
+            </label>
+            <input
+              id="hubspot-start-date"
+              className="stripe-ui__control"
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+            />
+          </div>
 
-        <div>
-          <label>Time grain</label>
-          <br />
-          <select value={grain} onChange={(e) => setGrain(e.target.value as Grain)}>
-            <option value="monthly">Monthly</option>
-            <option value="quarterly">Quarterly</option>
-            <option value="annually">Annually</option>
-            <option value="daily">Daily (not recommended)</option>
-          </select>
-        </div>
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-end-date">
+              End date
+            </label>
+            <input
+              id="hubspot-end-date"
+              className="stripe-ui__control"
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+            />
+          </div>
 
-        <div>
-          <label>Currency display</label>
-          <br />
-          <select value={currencyDisplay} onChange={(e) => setCurrencyDisplay(e.target.value as CurrencyDisplay)}>
-            <option value="normal">Normal</option>
-            <option value="thousands">Thousands (K)</option>
-            <option value="millions">Millions (M)</option>
-          </select>
-        </div>
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-mode">
+              Mode
+            </label>
+            <select
+              id="hubspot-mode"
+              className="stripe-ui__control"
+              value={mode}
+              onChange={(e) => setMode(e.target.value as ReportMode)}
+            >
+              <option value="arr">ARR</option>
+              <option value="contracted">Contracted ARR</option>
+            </select>
+          </div>
 
-        <div>
-          <label>ARR display</label>
-          <br />
-          <select value={arrDisplayScope} onChange={(e) => setArrDisplayScope(e.target.value as ArrDisplayScope)}>
-            <option value="all">All</option>
-            <option value="cloud">Cloud</option>
-          </select>
-        </div>
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-grain">
+              Time grain
+            </label>
+            <select
+              id="hubspot-grain"
+              className="stripe-ui__control"
+              value={grain}
+              onChange={(e) => setGrain(e.target.value as Grain)}
+            >
+              <option value="monthly">Monthly</option>
+              <option value="quarterly">Quarterly</option>
+              <option value="annually">Annually</option>
+              <option value="daily">Daily (not recommended)</option>
+            </select>
+          </div>
 
-        <div>
-          <label>Group by</label>
-          <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-            <select value={groupByToAdd} onChange={(e) => setGroupByToAdd(e.target.value as GroupField | "none")}>
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-currency-display">
+              Currency display
+            </label>
+            <select
+              id="hubspot-currency-display"
+              className="stripe-ui__control"
+              value={currencyDisplay}
+              onChange={(e) => setCurrencyDisplay(e.target.value as CurrencyDisplay)}
+            >
+              <option value="normal">Normal</option>
+              <option value="thousands">Thousands (K)</option>
+              <option value="millions">Millions (M)</option>
+            </select>
+          </div>
+
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-arr-display">
+              ARR display
+            </label>
+            <select
+              id="hubspot-arr-display"
+              className="stripe-ui__control"
+              value={arrDisplayScope}
+              onChange={(e) => setArrDisplayScope(e.target.value as ArrDisplayScope)}
+            >
+              <option value="all">All</option>
+              <option value="cloud">Cloud</option>
+            </select>
+          </div>
+
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-group-by">
+              Group by field
+            </label>
+            <select
+              id="hubspot-group-by"
+              className="stripe-ui__control"
+              value={groupByToAdd}
+              onChange={(e) => setGroupByToAdd(e.target.value as GroupField | "none")}
+            >
               <option value="none">Select field</option>
               {GROUP_BY_OPTIONS.map((opt) => (
                 <option key={opt.key} value={opt.key}>
@@ -1113,57 +1223,97 @@ export default function Home() {
                 </option>
               ))}
             </select>
-            <button onClick={addGroupBy} disabled={groupByToAdd === "none"}>
+          </div>
+
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-add-group">
+              Add group
+            </label>
+            <button
+              id="hubspot-add-group"
+              className="stripe-ui__btn stripe-ui__btn--secondary"
+              onClick={addGroupBy}
+              disabled={groupByToAdd === "none"}
+            >
               Add
             </button>
-            <button onClick={() => setGroupByFields([])} disabled={groupByFields.length === 0}>
+          </div>
+
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-clear-groups">
+              Clear groups
+            </label>
+            <button
+              id="hubspot-clear-groups"
+              className="stripe-ui__btn stripe-ui__btn--ghost"
+              onClick={() => setGroupByFields([])}
+              disabled={groupByFields.length === 0}
+            >
               Clear
             </button>
           </div>
-          {groupByFields.length > 0 && (
-            <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {groupByFields.map((field) => (
-                <button
-                  key={field}
-                  onClick={() => removeGroupBy(field)}
-                  style={{ border: "1px solid #ddd", borderRadius: 6, padding: "2px 8px", background: "#fafafa" }}
-                >
-                  {(GROUP_BY_OPTIONS.find((opt) => opt.key === field)?.label || field) + " x"}
-                </button>
-              ))}
-            </div>
-          )}
+
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-run-report">
+              Run report
+            </label>
+            <button
+              id="hubspot-run-report"
+              className="stripe-ui__btn stripe-ui__btn--primary"
+              onClick={run}
+              disabled={loading}
+            >
+              {loading ? "Running..." : "Run"}
+            </button>
+          </div>
         </div>
 
-        <button
-          onClick={run}
-          disabled={loading}
-          style={{
-            padding: "8px 14px",
-            borderRadius: 8,
-            border: "1px solid #ccc",
-            background: loading ? "#f2f2f2" : "white",
-            cursor: loading ? "not-allowed" : "pointer",
-          }}
-        >
-          {loading ? "Running…" : "Run report"}
-        </button>
-      </div>
+        {groupByFields.length > 0 && (
+          <div className="stripe-ui__chips">
+            {groupByFields.map((field) => (
+              <button
+                key={field}
+                className="stripe-ui__chip"
+                onClick={() => removeGroupBy(field)}
+                type="button"
+              >
+                {(GROUP_BY_OPTIONS.find((opt) => opt.key === field)?.label || field) + " x"}
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
 
       {error && (
-        <div style={{ marginTop: 16, padding: 12, borderRadius: 8, background: "#ffecec", color: "#8a1f1f" }}>
-          {error}
+        <div className="stripe-ui__error ui-reveal ui-reveal-1" role="alert" aria-live="assertive">
+          <div>{error}</div>
+          <div className="stripe-ui__error-actions">
+            <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={() => void run()} disabled={loading}>
+              Retry
+            </button>
+          </div>
         </div>
       )}
 
-      {data && (
+      {loading && (
+        <section className="stripe-ui__panel stripe-ui__loading-panel ui-reveal ui-reveal-2" aria-live="polite" aria-busy="true">
+          <h2 className="stripe-ui__panel-title">Running report...</h2>
+          <p className="stripe-ui__panel-subtitle">Loading HubSpot data and calculating chart metrics.</p>
+          <div className="stripe-ui__skeleton-grid">
+            <div className="stripe-ui__skeleton-row" />
+            <div className="stripe-ui__skeleton-row" />
+            <div className="stripe-ui__skeleton-row stripe-ui__skeleton-row--short" />
+          </div>
+        </section>
+      )}
+
+      {!loading && data && (
         <>
           <div
             style={{
-              marginTop: 20,
               display: "grid",
               gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
-              gap: 12,
+              gap: "0.95rem",
               alignItems: "start",
             }}
           >
@@ -1206,21 +1356,27 @@ export default function Home() {
             />
           </div>
 
-          <div style={{ marginTop: 20, padding: 12, border: "1px solid #eee", borderRadius: 10 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+            <div className="stripe-ui__section-head">
               <div>
-                <div style={{ color: "#666", fontSize: 12 }}>
-                  Rows ({groupByFields.length === 0 ? "line items" : `groups: ${groupByLabel}`})
-                </div>
-                <div style={{ fontSize: 18 }}>{displayedRows.length}</div>
+                <h2 className="stripe-ui__panel-title">Filters & Totals</h2>
+                <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                  Apply filters to rows. Charts and totals follow the filtered dataset.
+                </p>
+              </div>
+              <div className="stripe-ui__hint">
+                Rows ({groupByFields.length === 0 ? "line items" : `groups: ${groupByLabel}`}): {displayedRows.length}
               </div>
             </div>
 
-            <div style={{ marginTop: 12, display: "flex", gap: 12, flexWrap: "wrap" }}>
-              <div>
-                <label>Filter Deal Name</label>
-                <br />
+            <div className="stripe-ui__filter-grid">
+              <div className="stripe-ui__field">
+                <label className="stripe-ui__field-label" htmlFor="filter-deal-name">
+                  Filter Deal Name
+                </label>
                 <input
+                  id="filter-deal-name"
+                  className="stripe-ui__control"
                   type="text"
                   value={filterDealName}
                   onChange={(e) => setFilterDealName(e.target.value)}
@@ -1228,10 +1384,16 @@ export default function Home() {
                 />
               </div>
 
-              <div>
-                <label>Filter Deployment Type</label>
-                <br />
-                <select value={filterDeploymentType} onChange={(e) => setFilterDeploymentType(e.target.value)}>
+              <div className="stripe-ui__field">
+                <label className="stripe-ui__field-label" htmlFor="filter-deployment-type">
+                  Filter Deployment Type
+                </label>
+                <select
+                  id="filter-deployment-type"
+                  className="stripe-ui__control"
+                  value={filterDeploymentType}
+                  onChange={(e) => setFilterDeploymentType(e.target.value)}
+                >
                   <option value="all">All</option>
                   {deploymentTypeOptions.map((v) => (
                     <option key={v} value={v}>
@@ -1241,10 +1403,13 @@ export default function Home() {
                 </select>
               </div>
 
-              <div>
-                <label>Filter Account ID</label>
-                <br />
+              <div className="stripe-ui__field">
+                <label className="stripe-ui__field-label" htmlFor="filter-account-id">
+                  Filter Account ID
+                </label>
                 <input
+                  id="filter-account-id"
+                  className="stripe-ui__control"
                   type="text"
                   value={filterAccountId}
                   onChange={(e) => setFilterAccountId(e.target.value)}
@@ -1252,10 +1417,16 @@ export default function Home() {
                 />
               </div>
 
-              <div>
-                <label>Filter Territory</label>
-                <br />
-                <select value={filterTerritory} onChange={(e) => setFilterTerritory(e.target.value)}>
+              <div className="stripe-ui__field">
+                <label className="stripe-ui__field-label" htmlFor="filter-territory">
+                  Filter Territory
+                </label>
+                <select
+                  id="filter-territory"
+                  className="stripe-ui__control"
+                  value={filterTerritory}
+                  onChange={(e) => setFilterTerritory(e.target.value)}
+                >
                   <option value="all">All</option>
                   {territoryOptions.map((v) => (
                     <option key={v} value={v}>
@@ -1265,10 +1436,16 @@ export default function Home() {
                 </select>
               </div>
 
-              <div>
-                <label>Filter Country</label>
-                <br />
-                <select value={filterCountry} onChange={(e) => setFilterCountry(e.target.value)}>
+              <div className="stripe-ui__field">
+                <label className="stripe-ui__field-label" htmlFor="filter-country">
+                  Filter Country
+                </label>
+                <select
+                  id="filter-country"
+                  className="stripe-ui__control"
+                  value={filterCountry}
+                  onChange={(e) => setFilterCountry(e.target.value)}
+                >
                   <option value="all">All</option>
                   {countryOptions.map((v) => (
                     <option key={v} value={v}>
@@ -1278,10 +1455,16 @@ export default function Home() {
                 </select>
               </div>
 
-              <div>
-                <label>Filter Industry</label>
-                <br />
-                <select value={filterIndustry} onChange={(e) => setFilterIndustry(e.target.value)}>
+              <div className="stripe-ui__field">
+                <label className="stripe-ui__field-label" htmlFor="filter-industry">
+                  Filter Industry
+                </label>
+                <select
+                  id="filter-industry"
+                  className="stripe-ui__control"
+                  value={filterIndustry}
+                  onChange={(e) => setFilterIndustry(e.target.value)}
+                >
                   <option value="all">All</option>
                   {industryOptions.map((v) => (
                     <option key={v} value={v}>
@@ -1291,10 +1474,16 @@ export default function Home() {
                 </select>
               </div>
 
-              <div>
-                <label>Filter Deal Type</label>
-                <br />
-                <select value={filterDealType} onChange={(e) => setFilterDealType(e.target.value)}>
+              <div className="stripe-ui__field">
+                <label className="stripe-ui__field-label" htmlFor="filter-deal-type">
+                  Filter Deal Type
+                </label>
+                <select
+                  id="filter-deal-type"
+                  className="stripe-ui__control"
+                  value={filterDealType}
+                  onChange={(e) => setFilterDealType(e.target.value)}
+                >
                   <option value="all">All</option>
                   {dealTypeOptions.map((v) => (
                     <option key={v} value={v}>
@@ -1305,12 +1494,12 @@ export default function Home() {
               </div>
             </div>
 
-            <div style={{ marginTop: 12, overflowX: "auto" }}>
-              <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <div className="stripe-ui__table-wrap" style={{ marginTop: "0.85rem" }}>
+              <table className="stripe-ui__table">
                 <thead>
                   <tr>
                     {data.periods.map((p) => (
-                      <th key={p.key} style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: 8 }}>
+                      <th key={p.key} className="stripe-ui__num">
                         {p.label}
                       </th>
                     ))}
@@ -1319,7 +1508,7 @@ export default function Home() {
                 <tbody>
                   <tr>
                     {totalsByPeriodForDisplayed.map((t) => (
-                      <td key={t.key} style={{ textAlign: "right", padding: 8 }}>
+                      <td key={t.key} className="stripe-ui__num">
                         {fmtMoney(scaleCurrency(t.total), currencyDisplay)}
                       </td>
                     ))}
@@ -1327,69 +1516,60 @@ export default function Home() {
                 </tbody>
               </table>
             </div>
-          </div>
+          </section>
 
-          <h2 style={{ marginTop: 24, fontSize: 18 }}>
-            Breakdown {groupByFields.length === 0 ? "(per line item)" : `(grouped by ${groupByLabel})`}
-          </h2>
+          <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+            <div className="stripe-ui__toolbar">
+              <div>
+                <h2 className="stripe-ui__panel-title">
+                  Breakdown {groupByFields.length === 0 ? "(per line item)" : `(grouped by ${groupByLabel})`}
+                </h2>
+              </div>
+              <div className="stripe-ui__toolbar-group">
+                <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={exportBreakdownCsv}>
+                  Export breakdown CSV
+                </button>
+              </div>
+            </div>
 
-          <div style={{ marginBottom: 8 }}>
-            <button onClick={exportBreakdownCsv}>Export breakdown CSV</button>
-          </div>
-
-          <div style={{ overflowX: "auto", border: "1px solid #eee", borderRadius: 10 }}>
-            <table style={{ borderCollapse: "collapse", width: "100%" }}>
-              <thead>
-                <tr>
-                  {breakdownHeaders.map((h) => (
-                    <th
-                      key={h}
-                      style={{
-                        borderBottom: "1px solid #ddd",
-                        padding: 8,
-                        textAlign: "left",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-
-              <tbody>
-                {displayedRows.map((r, idx) => (
-                  <tr key={`${r.dealId || r.dealName}-${idx}`} style={{ borderBottom: "1px solid #f2f2f2" }}>
-                    {groupByFields.length === 0 ? (
-                      <td style={{ padding: 8, whiteSpace: "nowrap" }}>{r.dealName}</td>
-                    ) : (
-                      groupByFields.map((field) => (
-                        <td key={field} style={{ padding: 8, whiteSpace: "nowrap" }}>
-                          {r.groupValues[field] || "(blank)"}
-                        </td>
-                      ))
-                    )}
-                    {showDealIdColumn && <td style={{ padding: 8, whiteSpace: "nowrap" }}>{r.dealId}</td>}
-                    {showDealIdColumn && (
-                      <td style={{ padding: 8, whiteSpace: "nowrap" }}>{groupValueForRow(r, "accountId")}</td>
-                    )}
-                    {showDealIdColumn && (
-                      <td style={{ padding: 8, whiteSpace: "nowrap" }}>{r.territory || "(blank)"}</td>
-                    )}
-                    {showDealIdColumn && (
-                      <td style={{ padding: 8, whiteSpace: "nowrap" }}>{r.companyCountry || "(blank)"}</td>
-                    )}
-
-                    {data.periods.map((p) => (
-                      <td key={p.key} style={{ padding: 8, textAlign: "right", whiteSpace: "nowrap" }}>
-                        {fmtMoney(scaleCurrency(r.valuesByPeriod[p.key] || 0), currencyDisplay)}
-                      </td>
+            <div className="stripe-ui__table-wrap">
+              <table className="stripe-ui__table">
+                <thead>
+                  <tr>
+                    {breakdownHeaders.map((h) => (
+                      <th key={h} className={data.periods.some((p) => p.label === h) ? "stripe-ui__num" : ""}>
+                        {h}
+                      </th>
                     ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+
+                <tbody>
+                  {displayedRows.map((r, idx) => (
+                    <tr key={`${r.dealId || r.dealName}-${idx}`}>
+                      {groupByFields.length === 0 ? (
+                        <td>{r.dealName}</td>
+                      ) : (
+                        groupByFields.map((field) => (
+                          <td key={field}>{r.groupValues[field] || "(blank)"}</td>
+                        ))
+                      )}
+                      {showDealIdColumn && <td>{r.dealId}</td>}
+                      {showDealIdColumn && <td>{groupValueForRow(r, "accountId")}</td>}
+                      {showDealIdColumn && <td>{r.territory || "(blank)"}</td>}
+                      {showDealIdColumn && <td>{r.companyCountry || "(blank)"}</td>}
+
+                      {data.periods.map((p) => (
+                        <td key={p.key} className="stripe-ui__num">
+                          {fmtMoney(scaleCurrency(r.valuesByPeriod[p.key] || 0), currencyDisplay)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
         </>
       )}
     </div>
