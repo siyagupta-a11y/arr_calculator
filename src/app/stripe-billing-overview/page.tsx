@@ -90,12 +90,12 @@ function LineChartCard({
 }: LineChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
-  const width = 960;
-  const height = 280;
-  const paddingLeft = 56;
+  const width = 640;
+  const height = 250;
+  const paddingLeft = 54;
   const paddingRight = 20;
   const paddingTop = 20;
-  const paddingBottom = 44;
+  const paddingBottom = 42;
   const plotWidth = width - paddingLeft - paddingRight;
   const plotHeight = height - paddingTop - paddingBottom;
 
@@ -123,6 +123,16 @@ function LineChartCard({
 
   const hoveredPoint =
     hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length ? points[hoverIndex] : null;
+  const hoveredValue = hoveredPoint ? valueAccessor(hoveredPoint) : 0;
+  const hoveredX = hoveredPoint && hoverIndex != null ? xAt(hoverIndex) : 0;
+  const hoveredY = hoveredPoint ? yAt(hoveredValue) : 0;
+  const tooltipWidth = 210;
+  const tooltipHeight = 42;
+  const tooltipX = Math.max(
+    paddingLeft,
+    Math.min(paddingLeft + plotWidth - tooltipWidth, hoveredX - tooltipWidth / 2),
+  );
+  const tooltipY = Math.max(paddingTop + 4, hoveredY - tooltipHeight - 10);
 
   return (
     <section className="stripe-ui__panel ui-reveal ui-reveal-2">
@@ -145,12 +155,12 @@ function LineChartCard({
           No data for selected range.
         </p>
       ) : (
-        <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem", overflowX: "auto" }}>
+        <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
           <svg
             viewBox={`0 0 ${width} ${height}`}
             role="img"
             aria-label={title}
-            style={{ width: "100%", minWidth: 720, display: "block" }}
+            style={{ width: "100%", display: "block" }}
             onMouseLeave={() => setHoverIndex(null)}
             onMouseMove={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
@@ -171,6 +181,23 @@ function LineChartCard({
             />
             <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#36557f" strokeWidth={1} />
 
+            {points.map((point, idx) => {
+              const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
+              const right =
+                idx === points.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+              return (
+                <rect
+                  key={`hover-${point.key}`}
+                  x={left}
+                  y={paddingTop}
+                  width={Math.max(1, right - left)}
+                  height={plotHeight}
+                  fill="transparent"
+                  onMouseEnter={() => setHoverIndex(idx)}
+                />
+              );
+            })}
+
             <path d={pathD} fill="none" stroke={stroke} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
 
             {hoverIndex != null && points[hoverIndex] && (
@@ -183,6 +210,18 @@ function LineChartCard({
                 strokeOpacity={0.5}
                 strokeDasharray="4 4"
               />
+            )}
+
+            {hoveredPoint && (
+              <g>
+                <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx={6} fill="#0e203b" opacity={0.97} />
+                <text x={tooltipX + 10} y={tooltipY + 16} fill="#d9e6fa" fontSize="11.5">
+                  {hoveredPoint.label}
+                </text>
+                <text x={tooltipX + 10} y={tooltipY + 32} fill={stroke} fontSize="12.5" fontWeight="600">
+                  {valueFormatter(hoveredValue)}
+                </text>
+              </g>
             )}
 
             {points.map((point, idx) => (
@@ -230,12 +269,12 @@ type GrowthBreakdownChartProps = {
 function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
-  const width = 960;
-  const height = 320;
-  const paddingLeft = 56;
+  const width = 640;
+  const height = 280;
+  const paddingLeft = 54;
   const paddingRight = 20;
   const paddingTop = 20;
-  const paddingBottom = 46;
+  const paddingBottom = 44;
   const plotWidth = width - paddingLeft - paddingRight;
   const plotHeight = height - paddingTop - paddingBottom;
 
@@ -306,12 +345,12 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
           No data for selected range.
         </p>
       ) : (
-        <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem", overflowX: "auto" }}>
+        <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
           <svg
             viewBox={`0 0 ${width} ${height}`}
             role="img"
             aria-label="Growth breakdown chart"
-            style={{ width: "100%", minWidth: 720, display: "block" }}
+            style={{ width: "100%", display: "block" }}
             onMouseLeave={() => setHoverIndex(null)}
             onMouseMove={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
@@ -324,6 +363,22 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
           >
             <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#36557f" strokeWidth={1} />
             <line x1={paddingLeft} y1={zeroY} x2={paddingLeft + plotWidth} y2={zeroY} stroke="#5073a3" strokeWidth={1.2} />
+
+            {bars.map((bar, idx) => {
+              const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
+              const right = idx === bars.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+              return (
+                <rect
+                  key={`hover-zone-${bar.point.key}`}
+                  x={left}
+                  y={paddingTop}
+                  width={Math.max(1, right - left)}
+                  height={plotHeight}
+                  fill="transparent"
+                  onMouseEnter={() => setHoverIndex(idx)}
+                />
+              );
+            })}
 
             {bars.map((bar, idx) => {
               const centerX = xAt(idx);
@@ -595,45 +650,54 @@ export default function StripeBillingOverviewPage() {
             </div>
           </section>
 
-          <LineChartCard
-            title="MRR Over Time"
-            subtitle="MRR at the end of each selected period."
-            points={points}
-            valueAccessor={(p) => p.mrrEnd}
-            valueFormatter={(v) => formatMoney(v, currency)}
-            stroke="#4f8df9"
-          />
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(460px, 1fr))",
+              gap: "0.95rem",
+              alignItems: "start",
+            }}
+          >
+            <LineChartCard
+              title="MRR Over Time"
+              subtitle="MRR at the end of each selected period."
+              points={points}
+              valueAccessor={(p) => p.mrrEnd}
+              valueFormatter={(v) => formatMoney(v, currency)}
+              stroke="#4f8df9"
+            />
 
-          <GrowthBreakdownChart points={points} currency={currency} />
+            <GrowthBreakdownChart points={points} currency={currency} />
 
-          <LineChartCard
-            title="MRR Growth Rate Over Time"
-            subtitle="Period-over-period MRR growth rate."
-            points={points}
-            valueAccessor={(p) => p.mrrGrowthRatePct}
-            valueFormatter={(v) => formatPercent(v)}
-            stroke="#f59e0b"
-            includeZero
-          />
+            <LineChartCard
+              title="MRR Growth Rate Over Time"
+              subtitle="Period-over-period MRR growth rate."
+              points={points}
+              valueAccessor={(p) => p.mrrGrowthRatePct}
+              valueFormatter={(v) => formatPercent(v)}
+              stroke="#f59e0b"
+              includeZero
+            />
 
-          <LineChartCard
-            title="ARR Over Time"
-            subtitle="ARR = MRR x 12 at period end."
-            points={points}
-            valueAccessor={(p) => p.arr}
-            valueFormatter={(v) => formatMoney(v, currency)}
-            stroke="#1fc16b"
-          />
+            <LineChartCard
+              title="ARR Over Time"
+              subtitle="ARR = MRR x 12 at period end."
+              points={points}
+              valueAccessor={(p) => p.arr}
+              valueFormatter={(v) => formatMoney(v, currency)}
+              stroke="#1fc16b"
+            />
 
-          <LineChartCard
-            title="ARR Growth Over Time"
-            subtitle="Absolute ARR change per period."
-            points={points}
-            valueAccessor={(p) => p.arrGrowth}
-            valueFormatter={(v) => formatMoney(v, currency)}
-            stroke="#ef4444"
-            includeZero
-          />
+            <LineChartCard
+              title="ARR Growth Over Time"
+              subtitle="Absolute ARR change per period."
+              points={points}
+              valueAccessor={(p) => p.arrGrowth}
+              valueFormatter={(v) => formatMoney(v, currency)}
+              stroke="#ef4444"
+              includeZero
+            />
+          </div>
         </>
       )}
 
