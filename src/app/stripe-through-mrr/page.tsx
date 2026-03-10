@@ -210,17 +210,11 @@ export default function StripeThroughMrrPage() {
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <Link href="/stripe" className="stripe-ui__hero-link">
-              Open Stripe report
-            </Link>
             <Link href="/stripe-arr-correct" className="stripe-ui__hero-link">
               Open Stripe ARR (Correct)
             </Link>
             <Link href="/stripe-billing-overview" className="stripe-ui__hero-link">
               Open Stripe Billing Overview
-            </Link>
-            <Link href="/diff-sheet" className="stripe-ui__hero-link">
-              Open Diff Sheet
             </Link>
             <Link href="/" className="stripe-ui__hero-link">
               Open HubSpot report
