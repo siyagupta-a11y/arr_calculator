@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import type { ReportRequest, ReportResponse, ReportRow, Grain, ReportMode } from "@/lib/types";
 
 function fmtMoney(n: number, currencyDisplay: CurrencyDisplay) {
@@ -119,6 +119,51 @@ function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
   return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > 1e-9);
 }
 
+function parseIsoDateOnly(value: string) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]) - 1;
+  const day = Number(m[3]);
+  const d = new Date(Date.UTC(year, month, day));
+  if (
+    d.getUTCFullYear() !== year ||
+    d.getUTCMonth() !== month ||
+    d.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return d;
+}
+
+function toIsoDateOnly(d: Date) {
+  return d.toISOString().slice(0, 10);
+}
+
+function historyStartForGrain(startDate: string, grain: Grain) {
+  const parsed = parseIsoDateOnly(startDate);
+  if (!parsed) return startDate;
+
+  if (grain === "daily") {
+    const prevDay = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate() - 1));
+    return toIsoDateOnly(prevDay);
+  }
+
+  if (grain === "monthly") {
+    const prevMonthStart = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth() - 1, 1));
+    return toIsoDateOnly(prevMonthStart);
+  }
+
+  if (grain === "quarterly") {
+    const qStartMonth = Math.floor(parsed.getUTCMonth() / 3) * 3;
+    const prevQuarterStart = new Date(Date.UTC(parsed.getUTCFullYear(), qStartMonth - 3, 1));
+    return toIsoDateOnly(prevQuarterStart);
+  }
+
+  const prevYearStart = new Date(Date.UTC(parsed.getUTCFullYear() - 1, 0, 1));
+  return toIsoDateOnly(prevYearStart);
+}
+
 function accountGroupingKey(row: UiRow) {
   const raw = String(row.accountId || "").trim();
   if (raw) {
@@ -127,15 +172,10 @@ function accountGroupingKey(row: UiRow) {
         .split(/[,\s;|]+/)
         .map((part) => part.trim())
         .find((part) => /^\d+$/.test(part)) || "";
-    if (numericToken) return `account:${numericToken}`;
-    return `account:${raw.toLowerCase()}`;
+    if (numericToken) return numericToken;
+    return raw.toLowerCase();
   }
-
-  const name = String(row.accountName || "").trim().toLowerCase();
-  if (name) return `account_name:${name}`;
-  const dealId = String(row.dealId || "").trim();
-  if (dealId) return `deal:${dealId}`;
-  return `line:${String(row.dealName || "").trim().toLowerCase() || "(blank)"}`;
+  return "(blank)";
 }
 
 function fmtPercent(n: number) {
@@ -189,7 +229,7 @@ function LineChartCard({
 
   const width = 640;
   const height = 250;
-  const paddingLeft = 54;
+  const paddingLeft = 88;
   const paddingRight = 20;
   const paddingTop = 20;
   const paddingBottom = 42;
@@ -363,7 +403,7 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
 
   const width = 640;
   const height = 280;
-  const paddingLeft = 54;
+  const paddingLeft = 88;
   const paddingRight = 20;
   const paddingTop = 20;
   const paddingBottom = 44;
@@ -567,7 +607,7 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
 
   const width = 640;
   const height = 280;
-  const paddingLeft = 54;
+  const paddingLeft = 88;
   const paddingRight = 20;
   const paddingTop = 20;
   const paddingBottom = 44;
@@ -711,12 +751,14 @@ export default function Home() {
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ReportResponse | null>(null);
+  const [chartHistoryData, setChartHistoryData] = useState<ReportResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function run() {
     setLoading(true);
     setError(null);
     setData(null);
+    setChartHistoryData(null);
 
     const payload: ReportRequest = {
       startDate,
@@ -726,28 +768,49 @@ export default function Home() {
     };
 
     try {
-      const res = await fetch("/api/report", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const text = await res.text();
-      let json: unknown = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
-      }
-
-      if (!res.ok) {
-        if (json && typeof json === "object" && "error" in json) {
-          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+      const fetchReport = async (requestPayload: ReportRequest) => {
+        const res = await fetch("/api/report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestPayload),
+        });
+        const text = await res.text();
+        let json: unknown = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch {
+          json = null;
         }
-        throw new Error(text || "Request failed");
-      }
 
-      if (!json || typeof json !== "object") throw new Error("Invalid API response");
-      setData(json as ReportResponse);
+        if (!res.ok) {
+          if (json && typeof json === "object" && "error" in json) {
+            throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+          }
+          throw new Error(text || "Request failed");
+        }
+
+        if (!json || typeof json !== "object") throw new Error("Invalid API response");
+        return json as ReportResponse;
+      };
+
+      const mainReport = await fetchReport(payload);
+      setData(mainReport);
+
+      const historyStart = historyStartForGrain(startDate, grain);
+      if (historyStart !== startDate) {
+        try {
+          const historyPayload: ReportRequest = {
+            ...payload,
+            startDate: historyStart,
+          };
+          const historyReport = await fetchReport(historyPayload);
+          setChartHistoryData(historyReport);
+        } catch {
+          setChartHistoryData(mainReport);
+        }
+      } else {
+        setChartHistoryData(mainReport);
+      }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
       setError(message);
@@ -808,10 +871,10 @@ export default function Home() {
     return Array.from(values).sort((a, b) => a.localeCompare(b));
   }, [data]);
 
-  const filteredLineItemRows: UiRow[] = useMemo(() => {
-    if (!data) return [];
+  const buildFilteredLineItemRows = useCallback((sourceData: ReportResponse | null) => {
+    if (!sourceData) return [] as UiRow[];
 
-    const baseRows: UiRow[] = (data.rows || []).map((r: ReportRow) => ({
+    const baseRows: UiRow[] = (sourceData.rows || []).map((r: ReportRow) => ({
       dealName: r.dealName || "",
       dealId: r.dealId || "",
       companyCountry: r.companyCountry || "",
@@ -855,7 +918,6 @@ export default function Home() {
 
     return filteredBaseRows.filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
   }, [
-    data,
     filterDealName,
     filterDeploymentType,
     filterAccountId,
@@ -864,6 +926,17 @@ export default function Home() {
     filterIndustry,
     filterDealType,
     arrDisplayScope,
+  ]);
+
+  const filteredLineItemRows: UiRow[] = useMemo(() => buildFilteredLineItemRows(data), [
+    buildFilteredLineItemRows,
+    data,
+  ]);
+
+  const chartSourceData = chartHistoryData || data;
+  const filteredChartLineItemRows: UiRow[] = useMemo(() => buildFilteredLineItemRows(chartSourceData), [
+    buildFilteredLineItemRows,
+    chartSourceData,
   ]);
 
   const displayedRows: UiRow[] = useMemo(() => {
@@ -925,11 +998,11 @@ export default function Home() {
   }, [data, displayedRows]);
 
   const accountArrByPeriod = useMemo(() => {
-    if (!data) return new Map<string, Record<string, number>>();
-    const periodOrder = data.periods || [];
+    if (!chartSourceData) return new Map<string, Record<string, number>>();
+    const periodOrder = chartSourceData.periods || [];
     const grouped = new Map<string, Record<string, number>>();
 
-    for (const row of filteredLineItemRows) {
+    for (const row of filteredChartLineItemRows) {
       const key = accountGroupingKey(row);
       if (!grouped.has(key)) grouped.set(key, {});
       const bucket = grouped.get(key)!;
@@ -939,25 +1012,39 @@ export default function Home() {
     }
 
     return grouped;
-  }, [data, filteredLineItemRows]);
+  }, [chartSourceData, filteredChartLineItemRows]);
 
   const chartPoints: TrendPoint[] = useMemo(() => {
     if (!data) return [];
 
     const periodOrder = data.periods || [];
-    const totalByPeriod = new Map<string, number>(
-      totalsByPeriodForDisplayed.map((periodTotal) => [periodTotal.key, periodTotal.total]),
-    );
+    const sourcePeriods = chartSourceData?.periods || periodOrder;
+    const sourcePeriodKeys = sourcePeriods.map((period) => period.key);
+    const sourcePeriodIndex = new Map<string, number>(sourcePeriodKeys.map((key, idx) => [key, idx]));
+
+    const totalByPeriodAll = new Map<string, number>();
+    for (const accountTotals of accountArrByPeriod.values()) {
+      for (const [periodKey, value] of Object.entries(accountTotals)) {
+        totalByPeriodAll.set(periodKey, round2((totalByPeriodAll.get(periodKey) || 0) + (value || 0)));
+      }
+    }
 
     return periodOrder.map((period, idx) => {
-      const arr = round2(totalByPeriod.get(period.key) || 0);
+      const sourceIdx = sourcePeriodIndex.get(period.key) ?? -1;
+      const prevPeriodKey =
+        idx > 0
+          ? periodOrder[idx - 1].key
+          : sourceIdx > 0
+            ? sourcePeriodKeys[sourceIdx - 1]
+            : "";
+
+      const arr = round2(totalByPeriodAll.get(period.key) || 0);
       const mrr = round2(arr / 12);
-      const prevPeriodKey = idx > 0 ? periodOrder[idx - 1].key : "";
-      const prevArr = round2(idx > 0 ? totalByPeriod.get(prevPeriodKey) || 0 : 0);
+      const prevArr = round2(prevPeriodKey ? totalByPeriodAll.get(prevPeriodKey) || 0 : 0);
       const prevMrr = round2(prevArr / 12);
       const arrGrowth = round2(arr - prevArr);
       const mrrGrowthRatePct =
-        idx > 0 && Math.abs(prevMrr) > 1e-9 ? round2(((mrr - prevMrr) / Math.abs(prevMrr)) * 100) : 0;
+        prevPeriodKey && Math.abs(prevMrr) > 1e-9 ? round2(((mrr - prevMrr) / Math.abs(prevMrr)) * 100) : 0;
 
       let newMrr = 0;
       let expansionMrr = 0;
@@ -1006,7 +1093,7 @@ export default function Home() {
         arrGrowth,
       };
     });
-  }, [data, totalsByPeriodForDisplayed, accountArrByPeriod]);
+  }, [data, chartSourceData, accountArrByPeriod]);
 
   const showDealIdColumn = groupByFields.length === 0;
   const groupByLabel = groupByFields
