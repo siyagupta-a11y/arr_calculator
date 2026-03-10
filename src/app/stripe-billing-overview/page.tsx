@@ -21,6 +21,15 @@ type OverviewPoint = {
   arrGrowth: number;
 };
 
+type OverviewCustomerArrRow = {
+  customerId: string;
+  periodKey: string;
+  periodLabel: string;
+  periodStart: string;
+  periodEnd: string;
+  arr: number;
+};
+
 type OverviewResponse = {
   startDate: string;
   endDate: string;
@@ -30,6 +39,7 @@ type OverviewResponse = {
   currentArr: number;
   historyPoints?: OverviewPoint[];
   points: OverviewPoint[];
+  customerArrRows?: OverviewCustomerArrRow[];
 };
 
 function defaultDateRange() {
@@ -762,8 +772,13 @@ export default function StripeBillingOverviewPage() {
 
   const points = useMemo(() => data?.points ?? [], [data]);
   const historyPoints = useMemo(() => data?.historyPoints ?? [], [data]);
+  const customerArrRows = useMemo(() => data?.customerArrRows ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
   const growthInputPoints = useMemo(() => [...historyPoints, ...points], [historyPoints, points]);
+  const customerPeriodColumns = useMemo(
+    () => points.map((point) => ({ key: point.key, label: point.label })),
+    [points],
+  );
   const growthWindowOptions = useMemo(() => growthWindowOptionsForGrain(grain), [grain]);
   const selectedGrowthWindow = useMemo(
     () => growthWindowOptions.find((option) => option.value === mrrGrowthWindow) || growthWindowOptions[0],
@@ -779,6 +794,36 @@ export default function StripeBillingOverviewPage() {
     growthInputPoints.forEach((point, idx) => out.set(point.key, mrrGrowthSeries[idx] || 0));
     return out;
   }, [growthInputPoints, mrrGrowthSeries]);
+  const customerArrMatrixRows = useMemo(() => {
+    const byCustomer = new Map<string, Map<string, number>>();
+    const periodKeys = new Set(customerPeriodColumns.map((column) => column.key));
+
+    for (const row of customerArrRows) {
+      if (!periodKeys.has(row.periodKey)) continue;
+      const customerId = row.customerId || "(blank)";
+      const existing = byCustomer.get(customerId) || new Map<string, number>();
+      existing.set(row.periodKey, row.arr);
+      byCustomer.set(customerId, existing);
+    }
+
+    const latestPeriodKey = customerPeriodColumns[customerPeriodColumns.length - 1]?.key || "";
+    return Array.from(byCustomer.entries())
+      .map(([customerId, valuesByPeriod]) => {
+        const latestArr = latestPeriodKey ? valuesByPeriod.get(latestPeriodKey) || 0 : 0;
+        const totalArr = customerPeriodColumns.reduce((sum, column) => sum + (valuesByPeriod.get(column.key) || 0), 0);
+        return {
+          customerId,
+          valuesByPeriod,
+          latestArr,
+          totalArr,
+        };
+      })
+      .sort((a, b) => {
+        if (Math.abs(b.latestArr - a.latestArr) > 1e-9) return b.latestArr - a.latestArr;
+        if (Math.abs(b.totalArr - a.totalArr) > 1e-9) return b.totalArr - a.totalArr;
+        return a.customerId.localeCompare(b.customerId);
+      });
+  }, [customerArrRows, customerPeriodColumns]);
 
   return (
     <div className="stripe-ui">
@@ -788,8 +833,8 @@ export default function StripeBillingOverviewPage() {
           <div>
             <h1 className="stripe-ui__title">Stripe Billing Overview</h1>
             <p className="stripe-ui__subtitle">
-              Trend dashboard for MRR, growth components, MRR growth rate, ARR, and ARR growth using the same Stripe
-              MRR change source and event logic as the Stripe-through-MRR page.
+              Trend dashboard for MRR, growth components, MRR growth rate, ARR, and ARR growth using customer-level
+              MRR transitions from Stripe MRR change events.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -977,6 +1022,57 @@ export default function StripeBillingOverviewPage() {
               valueFormatter={(v) => formatMoney(v, currency)}
             />
           </div>
+
+          <section className="stripe-ui__panel ui-reveal ui-reveal-3">
+            <div className="stripe-ui__section-head">
+              <div>
+                <h2 className="stripe-ui__panel-title">Customer ARR by Period</h2>
+                <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                  ARR per customer at each period end (ARR = customer MRR x 12).
+                </p>
+              </div>
+              <div className="stripe-ui__hint">{`${customerArrMatrixRows.length} customers`}</div>
+            </div>
+
+            {customerPeriodColumns.length === 0 || customerArrMatrixRows.length === 0 ? (
+              <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.9rem", marginBottom: 0 }}>
+                No customer ARR rows for selected range.
+              </p>
+            ) : (
+              <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
+                <table className="stripe-ui__table" aria-label="Customer ARR by period table">
+                  <thead>
+                    <tr>
+                      <th>Customer</th>
+                      {customerPeriodColumns.map((column) => (
+                        <th key={column.key} className="stripe-ui__num">
+                          {column.label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customerArrMatrixRows.map((row) => (
+                      <tr key={row.customerId}>
+                        <td>{row.customerId || "(blank)"}</td>
+                        {customerPeriodColumns.map((column) => {
+                          const value = row.valuesByPeriod.get(column.key) || 0;
+                          return (
+                            <td
+                              key={`${row.customerId}:${column.key}`}
+                              className={`stripe-ui__num ${value < 0 ? "stripe-ui__money--negative" : ""}`}
+                            >
+                              {formatMoney(value, currency)}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
         </>
       )}
 

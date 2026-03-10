@@ -169,6 +169,15 @@ export type StripeBillingOverviewPoint = {
   arrGrowth: number;
 };
 
+export type StripeBillingOverviewCustomerArrRow = {
+  customerId: string;
+  periodKey: string;
+  periodLabel: string;
+  periodStart: string;
+  periodEnd: string;
+  arr: number;
+};
+
 export type StripeBillingOverviewResult = {
   startDate: string;
   endDate: string;
@@ -178,6 +187,7 @@ export type StripeBillingOverviewResult = {
   currentArr: number;
   historyPoints: StripeBillingOverviewPoint[];
   points: StripeBillingOverviewPoint[];
+  customerArrRows: StripeBillingOverviewCustomerArrRow[];
 };
 
 type BigQueryNamedParameter = {
@@ -1890,7 +1900,7 @@ export async function queryStripeBillingOverviewFromBigQuery(
   const accessToken = await getAccessToken(sa);
   const table = getStripeArrCorrectMrrChangeTable();
 
-  const query = `
+  const pointsQuery = `
 WITH bounds AS (
   SELECT
     DATE(@start_date) AS requested_start_date,
@@ -1965,42 +1975,153 @@ buckets AS (
   CROSS JOIN bounds b
   WHERE GREATEST(bc.bucket_start, b.series_start_date) < LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date)
 ),
+events_base AS (
+  SELECT
+    event_timestamp,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id,
+    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` AS t
+  WHERE LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+),
 events_in_series AS (
   SELECT
     event_timestamp,
-    UPPER(CAST(event_type AS STRING)) AS event_type,
-    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
-  FROM \`${table}\` t
+    customer_id,
+    mrr_change_major
+  FROM events_base e
   CROSS JOIN bounds b
   WHERE
-    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
-    AND event_timestamp >= TIMESTAMP(b.series_start_date)
-    AND event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+    e.event_timestamp >= TIMESTAMP(b.series_start_date)
+    AND e.event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
 ),
-base_before_series AS (
+base_before_series_total AS (
   SELECT
-    COALESCE(SUM(CAST(COALESCE(mrr_change, 0) AS FLOAT64)) / 100.0, 0.0) AS base_mrr
-  FROM \`${table}\` t
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS base_mrr
+  FROM events_base e
   CROSS JOIN bounds b
   WHERE
-    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
-    AND event_timestamp < TIMESTAMP(b.series_start_date)
+    e.event_timestamp < TIMESTAMP(b.series_start_date)
+),
+base_before_series_by_customer AS (
+  SELECT
+    e.customer_id,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS base_mrr
+  FROM events_base e
+  CROSS JOIN bounds b
+  WHERE e.event_timestamp < TIMESTAMP(b.series_start_date)
+  GROUP BY e.customer_id
+),
+customer_bucket_changes AS (
+  SELECT
+    bu.bucket_start,
+    bu.effective_start,
+    bu.effective_end_exclusive,
+    e.customer_id,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS delta_mrr
+  FROM buckets bu
+  JOIN events_in_series e
+    ON e.event_timestamp >= TIMESTAMP(bu.effective_start)
+    AND e.event_timestamp < TIMESTAMP(bu.effective_end_exclusive)
+  GROUP BY
+    bu.bucket_start,
+    bu.effective_start,
+    bu.effective_end_exclusive,
+    e.customer_id
+),
+customer_bucket_transitions AS (
+  SELECT
+    cbc.bucket_start,
+    cbc.effective_start,
+    cbc.effective_end_exclusive,
+    cbc.customer_id,
+    COALESCE(base.base_mrr, 0.0)
+      + COALESCE(
+        SUM(cbc.delta_mrr) OVER (
+          PARTITION BY cbc.customer_id
+          ORDER BY cbc.bucket_start
+          ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ),
+        0.0
+      ) AS mrr_start,
+    COALESCE(base.base_mrr, 0.0)
+      + SUM(cbc.delta_mrr) OVER (
+        PARTITION BY cbc.customer_id
+        ORDER BY cbc.bucket_start
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      ) AS mrr_end,
+    cbc.delta_mrr AS net_mrr_change
+  FROM customer_bucket_changes cbc
+  LEFT JOIN base_before_series_by_customer base
+    ON base.customer_id = cbc.customer_id
+),
+bucket_transition_sums AS (
+  SELECT
+    cbt.bucket_start,
+    COALESCE(
+      SUM(
+        CASE
+          WHEN ABS(cbt.mrr_start) <= 1e-9 AND ABS(cbt.mrr_end) > 1e-9
+          THEN cbt.net_mrr_change
+          ELSE 0.0
+        END
+      ),
+      0.0
+    ) AS new_mrr,
+    COALESCE(
+      SUM(
+        CASE
+          WHEN ABS(cbt.mrr_start) > 1e-9 AND ABS(cbt.mrr_end) > 1e-9 AND cbt.mrr_end > cbt.mrr_start
+          THEN cbt.net_mrr_change
+          ELSE 0.0
+        END
+      ),
+      0.0
+    ) AS expansion_mrr,
+    COALESCE(
+      SUM(
+        CASE
+          WHEN ABS(cbt.mrr_start) > 1e-9 AND ABS(cbt.mrr_end) > 1e-9 AND cbt.mrr_end < cbt.mrr_start
+          THEN cbt.net_mrr_change
+          ELSE 0.0
+        END
+      ),
+      0.0
+    ) AS contraction_mrr,
+    COALESCE(
+      SUM(
+        CASE
+          WHEN ABS(cbt.mrr_start) > 1e-9 AND ABS(cbt.mrr_end) <= 1e-9
+          THEN cbt.net_mrr_change
+          ELSE 0.0
+        END
+      ),
+      0.0
+    ) AS churn_mrr
+  FROM customer_bucket_transitions cbt
+  GROUP BY cbt.bucket_start
+),
+bucket_net AS (
+  SELECT
+    cbc.bucket_start,
+    COALESCE(SUM(cbc.delta_mrr), 0.0) AS net_mrr_change
+  FROM customer_bucket_changes cbc
+  GROUP BY cbc.bucket_start
 ),
 bucket_flows AS (
   SELECT
     bu.bucket_start,
     bu.effective_start,
     bu.effective_end_exclusive,
-    COALESCE(SUM(IF(e.event_type = 'ACTIVE_START', e.mrr_change_major, 0.0)), 0.0) AS new_mrr,
-    COALESCE(SUM(IF(e.event_type = 'ACTIVE_UPGRADE', e.mrr_change_major, 0.0)), 0.0) AS expansion_mrr,
-    COALESCE(SUM(IF(e.event_type = 'ACTIVE_DOWNGRADE', e.mrr_change_major, 0.0)), 0.0) AS contraction_mrr,
-    COALESCE(SUM(IF(e.event_type = 'ACTIVE_END', e.mrr_change_major, 0.0)), 0.0) AS churn_mrr,
-    COALESCE(SUM(e.mrr_change_major), 0.0) AS net_mrr_change
+    COALESCE(bts.new_mrr, 0.0) AS new_mrr,
+    COALESCE(bts.expansion_mrr, 0.0) AS expansion_mrr,
+    COALESCE(bts.contraction_mrr, 0.0) AS contraction_mrr,
+    COALESCE(bts.churn_mrr, 0.0) AS churn_mrr,
+    COALESCE(bn.net_mrr_change, 0.0) AS net_mrr_change
   FROM buckets bu
-  LEFT JOIN events_in_series e
-    ON e.event_timestamp >= TIMESTAMP(bu.effective_start)
-    AND e.event_timestamp < TIMESTAMP(bu.effective_end_exclusive)
-  GROUP BY bu.bucket_start, bu.effective_start, bu.effective_end_exclusive
+  LEFT JOIN bucket_transition_sums bts
+    ON bts.bucket_start = bu.bucket_start
+  LEFT JOIN bucket_net bn
+    ON bn.bucket_start = bu.bucket_start
 ),
 series AS (
   SELECT
@@ -2017,7 +2138,7 @@ series AS (
       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     ) AS mrr_end
   FROM bucket_flows bf
-  CROSS JOIN base_before_series base
+  CROSS JOIN base_before_series_total base
 )
 SELECT
   CASE
@@ -2061,6 +2182,176 @@ FROM series
 ORDER BY bucket_start
 `;
 
+  const customerArrQuery = `
+WITH bounds AS (
+  SELECT
+    DATE(@start_date) AS requested_start_date,
+    DATE(@end_date) AS requested_end_date,
+    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS requested_end_exclusive_date
+),
+requested_bucket_candidates AS (
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 DAY) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.requested_start_date, b.requested_end_date, INTERVAL 1 DAY)) AS d
+  WHERE @grain = 'daily'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 WEEK) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.requested_start_date, WEEK(MONDAY)),
+      DATE_TRUNC(b.requested_end_date, WEEK(MONDAY)),
+      INTERVAL 1 WEEK
+    )
+  ) AS d
+  WHERE @grain = 'weekly'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 MONTH) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.requested_start_date, MONTH),
+      DATE_TRUNC(b.requested_end_date, MONTH),
+      INTERVAL 1 MONTH
+    )
+  ) AS d
+  WHERE @grain = 'monthly'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 3 MONTH) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.requested_start_date, QUARTER),
+      DATE_TRUNC(b.requested_end_date, QUARTER),
+      INTERVAL 3 MONTH
+    )
+  ) AS d
+  WHERE @grain = 'quarterly'
+),
+requested_buckets AS (
+  SELECT
+    bc.bucket_start,
+    GREATEST(bc.bucket_start, b.requested_start_date) AS effective_start,
+    LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date) AS effective_end_exclusive
+  FROM requested_bucket_candidates bc
+  CROSS JOIN bounds b
+  WHERE GREATEST(bc.bucket_start, b.requested_start_date) < LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date)
+),
+events_base AS (
+  SELECT
+    event_timestamp,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id,
+    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` AS t
+  WHERE LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+),
+events_before_requested AS (
+  SELECT
+    e.customer_id,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS start_mrr
+  FROM events_base e
+  CROSS JOIN bounds b
+  WHERE e.event_timestamp < TIMESTAMP(b.requested_start_date)
+  GROUP BY e.customer_id
+),
+events_in_requested AS (
+  SELECT
+    e.event_timestamp,
+    e.customer_id,
+    e.mrr_change_major
+  FROM events_base e
+  CROSS JOIN bounds b
+  WHERE
+    e.event_timestamp >= TIMESTAMP(b.requested_start_date)
+    AND e.event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+),
+relevant_customers AS (
+  SELECT eb.customer_id
+  FROM events_before_requested eb
+  WHERE ABS(eb.start_mrr) > 1e-9
+
+  UNION DISTINCT
+
+  SELECT er.customer_id
+  FROM events_in_requested er
+),
+requested_bucket_changes AS (
+  SELECT
+    rb.bucket_start,
+    er.customer_id,
+    COALESCE(SUM(er.mrr_change_major), 0.0) AS delta_mrr
+  FROM requested_buckets rb
+  JOIN events_in_requested er
+    ON er.event_timestamp >= TIMESTAMP(rb.effective_start)
+    AND er.event_timestamp < TIMESTAMP(rb.effective_end_exclusive)
+  GROUP BY
+    rb.bucket_start,
+    er.customer_id
+),
+customer_bucket_grid AS (
+  SELECT
+    rc.customer_id,
+    rb.bucket_start,
+    rb.effective_start,
+    rb.effective_end_exclusive,
+    COALESCE(eb.start_mrr, 0.0) AS start_mrr,
+    COALESCE(rbc.delta_mrr, 0.0) AS delta_mrr
+  FROM relevant_customers rc
+  CROSS JOIN requested_buckets rb
+  LEFT JOIN events_before_requested eb
+    ON eb.customer_id = rc.customer_id
+  LEFT JOIN requested_bucket_changes rbc
+    ON rbc.customer_id = rc.customer_id
+    AND rbc.bucket_start = rb.bucket_start
+),
+customer_bucket_series AS (
+  SELECT
+    cbg.customer_id,
+    cbg.bucket_start,
+    cbg.effective_start,
+    DATE_SUB(cbg.effective_end_exclusive, INTERVAL 1 DAY) AS effective_end,
+    cbg.start_mrr
+      + SUM(cbg.delta_mrr) OVER (
+        PARTITION BY cbg.customer_id
+        ORDER BY cbg.bucket_start
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      ) AS mrr_end
+  FROM customer_bucket_grid cbg
+)
+SELECT
+  cbs.customer_id,
+  CASE
+    WHEN @grain = 'quarterly'
+    THEN CONCAT(CAST(EXTRACT(YEAR FROM cbs.bucket_start) AS STRING), '-Q', CAST(EXTRACT(QUARTER FROM cbs.bucket_start) AS STRING))
+    ELSE FORMAT_DATE('%Y-%m-%d', cbs.effective_start)
+  END AS period_key,
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', cbs.effective_start)
+    WHEN @grain = 'weekly' THEN CONCAT('Week of ', FORMAT_DATE('%Y-%m-%d', cbs.effective_start))
+    WHEN @grain = 'monthly' THEN FORMAT_DATE('%b %Y', cbs.bucket_start)
+    ELSE CONCAT('Q', CAST(EXTRACT(QUARTER FROM cbs.bucket_start) AS STRING), ' ', CAST(EXTRACT(YEAR FROM cbs.bucket_start) AS STRING))
+  END AS period_label,
+  FORMAT_DATE('%Y-%m-%d', cbs.effective_start) AS period_start,
+  FORMAT_DATE('%Y-%m-%d', cbs.effective_end) AS period_end,
+  ROUND(cbs.mrr_end * 12.0, 2) AS arr
+FROM customer_bucket_series cbs
+ORDER BY cbs.customer_id ASC, cbs.bucket_start ASC
+`;
+
   const params: BigQueryNamedParameter[] = [
     { name: "start_date", type: "STRING", value: startDateIso },
     { name: "end_date", type: "STRING", value: endDateIso },
@@ -2068,8 +2359,12 @@ ORDER BY bucket_start
     { name: "target_currency", type: "STRING", value: targetCurrency },
   ];
 
-  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
-  const allPoints: StripeBillingOverviewPoint[] = rows.map((row) => ({
+  const [pointRows, customerArrRawRows] = await Promise.all([
+    runBigQueryQueryRows(accessToken, projectId, location, pointsQuery, params),
+    runBigQueryQueryRows(accessToken, projectId, location, customerArrQuery, params),
+  ]);
+
+  const allPoints: StripeBillingOverviewPoint[] = pointRows.map((row) => ({
     key: asString(row.period_key),
     label: asString(row.period_label),
     periodStart: asString(row.period_start),
@@ -2084,6 +2379,14 @@ ORDER BY bucket_start
     arr: asNumber(row.arr),
     arrGrowth: asNumber(row.arr_growth),
   }));
+  const customerArrRows: StripeBillingOverviewCustomerArrRow[] = customerArrRawRows.map((row) => ({
+    customerId: asString(row.customer_id),
+    periodKey: asString(row.period_key),
+    periodLabel: asString(row.period_label),
+    periodStart: asString(row.period_start),
+    periodEnd: asString(row.period_end),
+    arr: asNumber(row.arr),
+  }));
 
   const historyPoints = allPoints.filter((point) => point.periodStart < startDateIso);
   const points = allPoints.filter((point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso);
@@ -2097,6 +2400,7 @@ ORDER BY bucket_start
     currentArr: Math.round(currentMrr * 12 * 100) / 100,
     historyPoints,
     points,
+    customerArrRows,
   };
 }
 
