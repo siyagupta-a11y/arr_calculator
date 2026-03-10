@@ -8,9 +8,11 @@ import {
 import type { Grain, ReportResponse, ReportRow } from "@/lib/types";
 import { getPriceDisplayNamesById } from "@/lib/stripe";
 import {
+  queryStripeCumulativeMrrChangeByPeriodsFromBigQuery,
   queryStripeReportAllRowsFromBigQuery,
   queryStripeReportPageFromBigQuery,
   type StripeBigQueryProfile,
+  type StripeBigQueryPeriodTotal,
   type StripeBigQueryPeriodSpec,
 } from "@/lib/stripeBigquery";
 import { ensureStripeSyncForRange, getSyncedStripeLineItemsForRange } from "@/lib/stripeSyncStore";
@@ -38,6 +40,7 @@ export type StripeReportOptions = {
 type StripeReportBaseResponse = {
   periods: { key: string; label: string }[];
   totalsByPeriod: { key: string; label: string; total: number }[];
+  mrrChangeTotalsByPeriod?: StripeBigQueryPeriodTotal[];
   rows: ReportRow[];
   sourceRowsFetched: number;
 };
@@ -648,13 +651,28 @@ async function generateStripeReportFromBigQuery(body: StripeReportRequest, optio
   const context = buildStripeReportContext(body, resolveTargetCurrency(options));
   const page = Math.max(1, Math.floor(Number(body.page || 1)));
   const bigQueryOptions = options?.bigQueryProfile ? { profile: options.bigQueryProfile } : undefined;
+  const periodSpecs = buildBigQueryPeriodSpecs(body, context);
   const bigQueryResult = await queryStripeReportPageFromBigQuery(
-    buildBigQueryRequest(body, context, page, STRIPE_REPORT_PAGE_SIZE),
+    {
+      ...buildBigQueryRequest(body, context, page, STRIPE_REPORT_PAGE_SIZE),
+      periods: periodSpecs,
+    },
     bigQueryOptions,
   );
+  const mrrChangeTotalsByPeriod =
+    options?.bigQueryProfile === "stripe_arr_correct"
+      ? await queryStripeCumulativeMrrChangeByPeriodsFromBigQuery(
+          {
+            periods: periodSpecs,
+            targetCurrency: context.targetCurrency,
+          },
+          bigQueryOptions,
+        )
+      : undefined;
   return {
     periods: context.outputPeriods,
     totalsByPeriod: bigQueryResult.totalsByPeriod,
+    mrrChangeTotalsByPeriod,
     rows: bigQueryResult.rows,
     pagination: {
       page: bigQueryResult.page,
@@ -675,13 +693,28 @@ async function buildStripeReportBaseFromBigQuery(
 ): Promise<StripeReportBaseResponse> {
   const context = buildStripeReportContext(body, resolveTargetCurrency(options));
   const bigQueryOptions = options?.bigQueryProfile ? { profile: options.bigQueryProfile } : undefined;
+  const periodSpecs = buildBigQueryPeriodSpecs(body, context);
   const bigQueryResult = await queryStripeReportAllRowsFromBigQuery(
-    buildBigQueryRequest(body, context, 1, STRIPE_REPORT_PAGE_SIZE),
+    {
+      ...buildBigQueryRequest(body, context, 1, STRIPE_REPORT_PAGE_SIZE),
+      periods: periodSpecs,
+    },
     bigQueryOptions,
   );
+  const mrrChangeTotalsByPeriod =
+    options?.bigQueryProfile === "stripe_arr_correct"
+      ? await queryStripeCumulativeMrrChangeByPeriodsFromBigQuery(
+          {
+            periods: periodSpecs,
+            targetCurrency: context.targetCurrency,
+          },
+          bigQueryOptions,
+        )
+      : undefined;
   return {
     periods: context.outputPeriods,
     totalsByPeriod: bigQueryResult.totalsByPeriod,
+    mrrChangeTotalsByPeriod,
     rows: bigQueryResult.rows,
     sourceRowsFetched: bigQueryResult.sourceRowsFetched,
   };
@@ -705,6 +738,7 @@ export async function generateStripeReport(body: StripeReportRequest, options?: 
   return {
     periods: base.periods,
     totalsByPeriod: base.totalsByPeriod,
+    mrrChangeTotalsByPeriod: base.mrrChangeTotalsByPeriod,
     rows: pagedRows,
     pagination: {
       page: clampedPage,

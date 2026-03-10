@@ -55,6 +55,12 @@ type StripeBigQueryReportBase = {
   sourceRowsFetched: number;
 };
 
+export type StripeBigQueryPeriodTotal = {
+  key: string;
+  label: string;
+  total: number;
+};
+
 export type StripeBigQueryReportPageResult = StripeBigQueryReportBase & {
   page: number;
   totalPages: number;
@@ -74,6 +80,8 @@ const TOKEN_AUDIENCE = "https://oauth2.googleapis.com/token";
 const BQ_SCOPE = "https://www.googleapis.com/auth/bigquery";
 const BQ_MAX_RESULTS = Number(process.env.BIGQUERY_MAX_RESULTS || "50000");
 const STRIPE_ARR_CORRECT_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.invoice_lines_helper";
+const STRIPE_ARR_CORRECT_MRR_CHANGE_DEFAULT_TABLE =
+  "botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta";
 const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   GOOGLE_SERVICE_ACCOUNT_JSON: "GOOGLE_SERVICE_ACCOUNT_JSON_STRIPE_ARR_CORRECT",
   GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64_STRIPE_ARR_CORRECT",
@@ -414,6 +422,11 @@ function getBigQuerySourceConfig(profile: StripeBigQueryProfile = "default"): Bi
     : (readEnv("BIGQUERY_TS_UNIT", profile) || "milliseconds").toLowerCase();
   const tsMultiplier = schemaMode === "timestamp" ? 1 : tsUnit === "seconds" ? 1000 : 1;
   return { table, servingTable, servingSchemaMode, schemaMode, tsUnit, tsMultiplier };
+}
+
+function getStripeArrCorrectMrrChangeTable() {
+  const configured = String(process.env.BIGQUERY_STRIPE_ARR_CORRECT_MRR_CHANGE_TABLE || "").trim();
+  return configured || STRIPE_ARR_CORRECT_MRR_CHANGE_DEFAULT_TABLE;
 }
 
 function toQueryTimestamp(tsMs: number, sourceConfig: BigQuerySourceConfig) {
@@ -1150,6 +1163,54 @@ export async function queryStripeReportAllRowsFromBigQuery(
     totalRows: result.totalRows,
     sourceRowsFetched: result.sourceRowsFetched,
   };
+}
+
+export async function queryStripeCumulativeMrrChangeByPeriodsFromBigQuery(
+  request: Pick<StripeBigQueryReportRequest, "periods" | "targetCurrency">,
+  options?: StripeBigQueryOptions,
+): Promise<StripeBigQueryPeriodTotal[]> {
+  if (!request.periods.length) return [];
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const table = getStripeArrCorrectMrrChangeTable();
+  const maxCutoffTs = Math.max(...request.periods.map((period) => Math.floor(period.endTsMs) + 1));
+
+  const periodSelectSql = request.periods
+    .map((period, idx) => {
+      const cutoffTs = Math.floor(period.endTsMs) + 1;
+      return `ROUND(
+    COALESCE(SUM(IF(event_timestamp < TIMESTAMP_MILLIS(${cutoffTs}), CAST(COALESCE(mrr_change, 0) AS FLOAT64), 0.0)), 0.0) / 100.0,
+    2
+  ) AS total_period_${idx}`;
+    })
+    .join(",\n  ");
+
+  const query = `
+SELECT
+  ${periodSelectSql}
+FROM \`${table}\`
+WHERE
+  LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+  AND event_timestamp < TIMESTAMP_MILLIS(@max_cutoff_ts)
+`;
+  const params: BigQueryNamedParameter[] = [
+    { name: "target_currency", type: "STRING", value: request.targetCurrency.toLowerCase() },
+    { name: "max_cutoff_ts", type: "INT64", value: String(maxCutoffTs) },
+  ];
+
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+  const totals = rows[0] || {};
+  return request.periods.map((period, idx) => ({
+    key: period.key,
+    label: period.label,
+    total: asNumber(totals[`total_period_${idx}`]),
+  }));
 }
 
 export async function loadStripeLineItemsFromBigQuery(

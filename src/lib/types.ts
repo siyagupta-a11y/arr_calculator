@@ -84,6 +84,7 @@ export type ReportRow = {
 export type ReportResponse = {
   periods: { key: string; label: string }[];
   totalsByPeriod: { key: string; label: string; total: number }[];
+  mrrChangeTotalsByPeriod?: { key: string; label: string; total: number }[];
   rows: ReportRow[];
   pagination?: {
     page: number;

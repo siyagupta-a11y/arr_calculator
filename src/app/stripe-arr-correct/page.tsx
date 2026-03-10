@@ -331,6 +331,16 @@ export default function StripeArrCorrectPage() {
     return data.totalsByPeriod || [];
   }, [data]);
 
+  const mrrChangeTotalsByPeriodForDisplayed = useMemo(() => {
+    if (!data?.periods?.length) return [];
+    const byKey = new Map((data.mrrChangeTotalsByPeriod || []).map((item) => [item.key, item.total]));
+    return data.periods.map((period) => ({
+      key: period.key,
+      label: period.label,
+      total: byKey.get(period.key) || 0,
+    }));
+  }, [data]);
+
   const showDefaultColumns = groupByFields.length === 0;
   const groupByLabel = groupByFields.map((f) => GROUP_BY_OPTIONS.find((o) => o.key === f)?.label || f).join(" + ");
 
@@ -671,6 +681,7 @@ export default function StripeArrCorrectPage() {
               <table className="stripe-ui__table" aria-label="Totals by period table">
                 <thead>
                   <tr>
+                    <th>Metric</th>
                     {data.periods.map((p) => (
                       <th key={p.key} className="stripe-ui__num">
                         {p.label}
@@ -680,6 +691,7 @@ export default function StripeArrCorrectPage() {
                 </thead>
                 <tbody>
                   <tr>
+                    <td>Total ARR</td>
                     {totalsByPeriodForDisplayed.map((t) => (
                       <td
                         key={t.key}
@@ -689,6 +701,19 @@ export default function StripeArrCorrectPage() {
                       </td>
                     ))}
                   </tr>
+                  {mrrChangeTotalsByPeriodForDisplayed.length > 0 && (
+                    <tr>
+                      <td>MRR change cumulative (&lt;= period end)</td>
+                      {mrrChangeTotalsByPeriodForDisplayed.map((t) => (
+                        <td
+                          key={t.key}
+                          className={`stripe-ui__num ${(t.total || 0) < 0 ? "stripe-ui__money--negative" : "stripe-ui__money--positive"}`}
+                        >
+                          {fmtMoney(scaleCurrency(t.total))}
+                        </td>
+                      ))}
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
