@@ -1463,23 +1463,36 @@ function normalizeStripeBillingOverviewGroupBy(groupBy: string | undefined): Str
   return "none";
 }
 
-function stripeBillingOverviewGroupKeyExpr(groupBy: StripeBillingOverviewGroupBy) {
-  if (groupBy === "product_id") {
-    return "COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_id')), ''), NULLIF(TRIM(JSON_VALUE(raw_json, '$.product')), ''), '(blank)')";
-  }
-  if (groupBy === "price_id") {
-    return "COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_id')), ''), NULLIF(TRIM(JSON_VALUE(raw_json, '$.price')), ''), '(blank)')";
-  }
-  if (groupBy === "subscription_item_id") {
-    return "COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item_id')), ''), NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item')), ''), '(blank)')";
-  }
-  if (groupBy === "subscription_id") {
-    return "COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_id')), ''), '(blank)')";
-  }
-  if (groupBy === "customer_id") {
-    return "customer_id";
-  }
-  return "'(all)'";
+const STRIPE_BILLING_OVERVIEW_GROUP_BY_SQL: Record<
+  Exclude<StripeBillingOverviewGroupBy, "none">,
+  { keyExpr: string; labelExpr: string }
+> = {
+  customer_id: {
+    keyExpr: "customer_id",
+    labelExpr: "customer_id",
+  },
+  product_id: {
+    keyExpr: "product_id",
+    labelExpr:
+      "CASE WHEN product_description = '' OR product_description = '(blank)' THEN product_id ELSE product_description END",
+  },
+  price_id: {
+    keyExpr: "price_id",
+    labelExpr: "CASE WHEN price_description = '' OR price_description = '(blank)' THEN price_id ELSE price_description END",
+  },
+  subscription_id: {
+    keyExpr: "subscription_id",
+    labelExpr: "subscription_id",
+  },
+  subscription_item_id: {
+    keyExpr: "subscription_item_id",
+    labelExpr: "subscription_item_id",
+  },
+};
+
+function stripeBillingOverviewGroupSql(groupBy: StripeBillingOverviewGroupBy): { keyExpr: string; labelExpr: string } {
+  if (groupBy === "none") return { keyExpr: "'(all)'", labelExpr: "'(all)'" };
+  return STRIPE_BILLING_OVERVIEW_GROUP_BY_SQL[groupBy];
 }
 
 function buildStripeThroughMrrDetailBaseCte(table: string, productsTable: string) {
@@ -1949,7 +1962,8 @@ export async function queryStripeBillingOverviewFromBigQuery(
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
   const table = getStripeArrCorrectMrrChangeTable();
-  const groupKeyExpr = stripeBillingOverviewGroupKeyExpr(groupBy);
+  const productsTable = getStripeProductsTable(profile);
+  const { keyExpr: groupKeyExpr, labelExpr: groupLabelExpr } = stripeBillingOverviewGroupSql(groupBy);
 
   const pointsQuery = `
 WITH bounds AS (
@@ -2593,18 +2607,96 @@ raw_events AS (
     LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
     AND local_event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
 ),
-events_with_group AS (
+parsed_events AS (
   SELECT
     re.local_event_timestamp,
     re.customer_id,
     re.mrr_change_major,
-    ${groupKeyExpr} AS group_key
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.subscription_id')), ''),
+      '(blank)'
+    ) AS subscription_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.subscription_item_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.subscription_item')), ''),
+      '(blank)'
+    ) AS subscription_item_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price')), ''),
+      '(blank)'
+    ) AS price_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.product_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.product.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.product')), ''),
+      '(blank)'
+    ) AS product_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price_nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price_display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price.lookup_key')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.price.product_name')), ''),
+      '(blank)'
+    ) AS price_description_event,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.product_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.product_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.product.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.product.display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(re.raw_json, '$.product.nickname')), ''),
+      ''
+    ) AS product_description_event
   FROM raw_events re
+),
+products_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id,
+    COALESCE(
+      NULLIF(TRIM(CAST(description AS STRING)), ''),
+      NULLIF(TRIM(CAST(name AS STRING)), ''),
+      '(blank)'
+    ) AS product_description_table
+  FROM \`${productsTable}\`
+),
+events_with_group AS (
+  SELECT
+    pe.local_event_timestamp,
+    pe.customer_id,
+    pe.mrr_change_major,
+    COALESCE(
+      NULLIF(TRIM(pl.product_description_table), ''),
+      NULLIF(TRIM(pe.product_description_event), ''),
+      '(blank)'
+    ) AS product_description,
+    COALESCE(NULLIF(TRIM(pe.price_description_event), ''), '(blank)') AS price_description,
+    pe.price_id,
+    pe.product_id,
+    pe.subscription_id,
+    pe.subscription_item_id,
+    ${groupKeyExpr} AS group_key,
+    ${groupLabelExpr} AS group_label
+  FROM parsed_events pe
+  LEFT JOIN products_lookup pl
+    ON pl.product_id = pe.product_id
 ),
 selected_groups AS (
   SELECT
     e.group_key,
-    e.group_key AS group_label,
+    COALESCE(
+      ARRAY_AGG(
+        IF(e.group_label = '(blank)' OR e.group_label = '', NULL, e.group_label)
+        IGNORE NULLS
+        ORDER BY e.local_event_timestamp DESC
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      e.group_key
+    ) AS group_label,
     COALESCE(SUM(e.mrr_change_major), 0.0) AS current_mrr
   FROM events_with_group e
   GROUP BY e.group_key
