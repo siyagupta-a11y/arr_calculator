@@ -12,6 +12,7 @@ type OverviewPoint = {
   periodEnd: string;
   mrrEnd: number;
   newMrr: number;
+  reactivationMrr?: number;
   expansionMrr: number;
   contractionMrr: number;
   churnMrr: number;
@@ -39,6 +40,8 @@ type OverviewResponse = {
   currentArr: number;
   historyPoints?: OverviewPoint[];
   points: OverviewPoint[];
+  stripeExactHistoryPoints?: OverviewPoint[];
+  stripeExactPoints?: OverviewPoint[];
   customerArrRows?: OverviewCustomerArrRow[];
 };
 
@@ -375,9 +378,18 @@ function LineChartCard({
 type GrowthBreakdownChartProps = {
   points: OverviewPoint[];
   currency: string;
+  title?: string;
+  subtitle?: string;
+  includeReactivation?: boolean;
 };
 
-function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
+function GrowthBreakdownChart({
+  points,
+  currency,
+  title = "Growth Breakdown",
+  subtitle = "Stacked contributions for New, Expansion, Contraction, and Churn by period.",
+  includeReactivation = false,
+}: GrowthBreakdownChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
   const width = 640;
@@ -389,13 +401,30 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
   const plotWidth = width - paddingLeft - paddingRight;
   const plotHeight = height - paddingTop - paddingBottom;
 
+  const componentDefs = [
+    { key: "new", label: "New", color: "#1fc16b", valueAccessor: (point: OverviewPoint) => point.newMrr },
+    ...(includeReactivation
+      ? [
+          {
+            key: "reactivation",
+            label: "Reactivation",
+            color: "#22d3ee",
+            valueAccessor: (point: OverviewPoint) => point.reactivationMrr || 0,
+          },
+        ]
+      : []),
+    { key: "expansion", label: "Expansion", color: "#2698f0", valueAccessor: (point: OverviewPoint) => point.expansionMrr },
+    { key: "contraction", label: "Contraction", color: "#f59e0b", valueAccessor: (point: OverviewPoint) => point.contractionMrr },
+    { key: "churn", label: "Churn", color: "#ef4444", valueAccessor: (point: OverviewPoint) => point.churnMrr },
+  ];
+
   const bars = points.map((point) => {
-    const components = [
-      { key: "new", label: "New", value: point.newMrr, color: "#1fc16b" },
-      { key: "expansion", label: "Expansion", value: point.expansionMrr, color: "#2698f0" },
-      { key: "contraction", label: "Contraction", value: point.contractionMrr, color: "#f59e0b" },
-      { key: "churn", label: "Churn", value: point.churnMrr, color: "#ef4444" },
-    ] as const;
+    const components = componentDefs.map((component) => ({
+      key: component.key,
+      label: component.label,
+      value: component.valueAccessor(point),
+      color: component.color,
+    }));
 
     const positiveTotal = components.reduce((sum, component) => sum + Math.max(component.value, 0), 0);
     const negativeTotal = components.reduce((sum, component) => sum + Math.min(component.value, 0), 0);
@@ -431,9 +460,9 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
     <section className="stripe-ui__panel ui-reveal ui-reveal-2">
       <div className="stripe-ui__section-head">
         <div>
-          <h2 className="stripe-ui__panel-title">Growth Breakdown</h2>
+          <h2 className="stripe-ui__panel-title">{title}</h2>
           <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-            Stacked contributions for New, Expansion, Contraction, and Churn by period.
+            {subtitle}
           </p>
         </div>
         <div className="stripe-ui__hint" aria-live="polite">
@@ -444,10 +473,11 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
       </div>
 
       <div style={{ display: "flex", gap: "0.8rem", flexWrap: "wrap", marginTop: "0.7rem" }}>
-        <span className="stripe-ui__hint" style={{ color: "#1fc16b" }}>New</span>
-        <span className="stripe-ui__hint" style={{ color: "#2698f0" }}>Expansion</span>
-        <span className="stripe-ui__hint" style={{ color: "#f59e0b" }}>Contraction</span>
-        <span className="stripe-ui__hint" style={{ color: "#ef4444" }}>Churn</span>
+        {componentDefs.map((component) => (
+          <span key={component.key} className="stripe-ui__hint" style={{ color: component.color }}>
+            {component.label}
+          </span>
+        ))}
       </div>
 
       {points.length === 0 ? (
@@ -568,6 +598,9 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
                 {hovered.point.label}
               </div>
               <div className="stripe-ui__hint">New: {formatMoney(hovered.point.newMrr, currency)}</div>
+              {includeReactivation && (
+                <div className="stripe-ui__hint">Reactivation: {formatMoney(hovered.point.reactivationMrr || 0, currency)}</div>
+              )}
               <div className="stripe-ui__hint">Expansion: {formatMoney(hovered.point.expansionMrr, currency)}</div>
               <div className="stripe-ui__hint">Contraction: {formatMoney(hovered.point.contractionMrr, currency)}</div>
               <div className="stripe-ui__hint">Churn: {formatMoney(hovered.point.churnMrr, currency)}</div>
@@ -775,9 +808,15 @@ export default function StripeBillingOverviewPage() {
 
   const points = useMemo(() => data?.points ?? [], [data]);
   const historyPoints = useMemo(() => data?.historyPoints ?? [], [data]);
+  const stripeExactPoints = useMemo(() => data?.stripeExactPoints ?? [], [data]);
+  const stripeExactHistoryPoints = useMemo(() => data?.stripeExactHistoryPoints ?? [], [data]);
   const customerArrRows = useMemo(() => data?.customerArrRows ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
   const growthInputPoints = useMemo(() => [...historyPoints, ...points], [historyPoints, points]);
+  const stripeExactGrowthInputPoints = useMemo(
+    () => [...stripeExactHistoryPoints, ...stripeExactPoints],
+    [stripeExactHistoryPoints, stripeExactPoints],
+  );
   const customerPeriodColumns = useMemo(
     () => points.map((point) => ({ key: point.key, label: point.label })),
     [points],
@@ -792,11 +831,20 @@ export default function StripeBillingOverviewPage() {
     () => computeMrrGrowthRates(growthInputPoints, selectedGrowthLookback),
     [growthInputPoints, selectedGrowthLookback],
   );
+  const stripeExactMrrGrowthSeries = useMemo(
+    () => computeMrrGrowthRates(stripeExactGrowthInputPoints, selectedGrowthLookback),
+    [stripeExactGrowthInputPoints, selectedGrowthLookback],
+  );
   const mrrGrowthByKey = useMemo(() => {
     const out = new Map<string, number>();
     growthInputPoints.forEach((point, idx) => out.set(point.key, mrrGrowthSeries[idx] || 0));
     return out;
   }, [growthInputPoints, mrrGrowthSeries]);
+  const stripeExactMrrGrowthByKey = useMemo(() => {
+    const out = new Map<string, number>();
+    stripeExactGrowthInputPoints.forEach((point, idx) => out.set(point.key, stripeExactMrrGrowthSeries[idx] || 0));
+    return out;
+  }, [stripeExactGrowthInputPoints, stripeExactMrrGrowthSeries]);
   const customerArrMatrixRows = useMemo(() => {
     const snapshotsByCustomer = new Map<string, Map<string, number>>();
     const periodKeys = new Set(customerPeriodColumns.map((column) => column.key));
@@ -1035,6 +1083,88 @@ export default function StripeBillingOverviewPage() {
               title="ARR Growth Over Time"
               subtitle="Absolute ARR change per period."
               points={points}
+              valueAccessor={(p) => p.arrGrowth}
+              valueFormatter={(v) => formatMoney(v, currency)}
+            />
+          </div>
+
+          <section className="stripe-ui__panel ui-reveal ui-reveal-3">
+            <h2 className="stripe-ui__panel-title">Stripe-Exact Logic (Official Event Classification)</h2>
+            <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+              Same chart set, but computed using Stripe&apos;s customer event classification on{" "}
+              <code>local_event_timestamp</code>: <code>ACTIVE_START</code>, <code>REACTIVATE</code>,{" "}
+              <code>ACTIVE_UPGRADE</code>, <code>ACTIVE_DOWNGRADE</code>, and <code>ACTIVE_END</code>.
+            </p>
+          </section>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
+              gap: "0.95rem",
+              alignItems: "start",
+            }}
+          >
+            <LineChartCard
+              title="MRR Over Time (Stripe Exact)"
+              subtitle="MRR at the end of each selected period."
+              points={stripeExactPoints}
+              valueAccessor={(p) => p.mrrEnd}
+              valueFormatter={(v) => formatMoney(v, currency)}
+              stroke="#4f8df9"
+            />
+
+            <GrowthBreakdownChart
+              points={stripeExactPoints}
+              currency={currency}
+              title="Growth Breakdown (Stripe Exact)"
+              subtitle="Stacked contributions by Stripe event type (includes Reactivation)."
+              includeReactivation
+            />
+
+            <LineChartCard
+              title="MRR Growth Rate Over Time (Stripe Exact)"
+              subtitle={selectedGrowthWindow?.subtitle || "Period-over-period MRR growth rate."}
+              points={stripeExactPoints}
+              valueAccessor={(p) => stripeExactMrrGrowthByKey.get(p.key) || 0}
+              valueFormatter={(v) => formatPercent(v)}
+              stroke="#f59e0b"
+              includeZero
+              headerControl={
+                <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
+                  <label htmlFor="mrr-growth-window-exact" className="stripe-ui__hint">
+                    Growth window
+                  </label>
+                  <select
+                    id="mrr-growth-window-exact"
+                    className="stripe-ui__control"
+                    value={selectedGrowthWindow?.value || ""}
+                    onChange={(e) => setMrrGrowthWindow(e.target.value)}
+                    style={{ minWidth: "220px" }}
+                  >
+                    {growthWindowOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              }
+            />
+
+            <LineChartCard
+              title="ARR Over Time (Stripe Exact)"
+              subtitle="ARR = MRR x 12 at period end."
+              points={stripeExactPoints}
+              valueAccessor={(p) => p.arr}
+              valueFormatter={(v) => formatMoney(v, currency)}
+              stroke="#1fc16b"
+            />
+
+            <DeltaBarChartCard
+              title="ARR Growth Over Time (Stripe Exact)"
+              subtitle="Absolute ARR change per period."
+              points={stripeExactPoints}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => formatMoney(v, currency)}
             />

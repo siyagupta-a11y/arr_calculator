@@ -160,6 +160,7 @@ export type StripeBillingOverviewPoint = {
   periodEnd: string;
   mrrEnd: number;
   newMrr: number;
+  reactivationMrr: number;
   expansionMrr: number;
   contractionMrr: number;
   churnMrr: number;
@@ -187,6 +188,8 @@ export type StripeBillingOverviewResult = {
   currentArr: number;
   historyPoints: StripeBillingOverviewPoint[];
   points: StripeBillingOverviewPoint[];
+  stripeExactHistoryPoints: StripeBillingOverviewPoint[];
+  stripeExactPoints: StripeBillingOverviewPoint[];
   customerArrRows: StripeBillingOverviewCustomerArrRow[];
 };
 
@@ -2185,6 +2188,273 @@ FROM series
 ORDER BY bucket_start
 `;
 
+  const stripeExactPointsQuery = `
+WITH bounds AS (
+  SELECT
+    DATE(@start_date) AS requested_start_date,
+    DATE(@end_date) AS requested_end_date,
+    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS requested_end_exclusive_date,
+    CASE
+      WHEN @grain = 'daily' THEN DATE_SUB(DATE(@start_date), INTERVAL 90 DAY)
+      WHEN @grain = 'weekly' THEN DATE_SUB(DATE(@start_date), INTERVAL 13 WEEK)
+      WHEN @grain = 'monthly' THEN DATE_SUB(DATE(@start_date), INTERVAL 3 MONTH)
+      ELSE DATE_SUB(DATE(@start_date), INTERVAL 3 MONTH)
+    END AS series_start_date
+),
+bucket_candidates AS (
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 DAY) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.series_start_date, b.requested_end_date, INTERVAL 1 DAY)) AS d
+  WHERE @grain = 'daily'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 WEEK) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.series_start_date, WEEK(MONDAY)),
+      DATE_TRUNC(b.requested_end_date, WEEK(MONDAY)),
+      INTERVAL 1 WEEK
+    )
+  ) AS d
+  WHERE @grain = 'weekly'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 MONTH) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.series_start_date, MONTH),
+      DATE_TRUNC(b.requested_end_date, MONTH),
+      INTERVAL 1 MONTH
+    )
+  ) AS d
+  WHERE @grain = 'monthly'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 3 MONTH) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.series_start_date, QUARTER),
+      DATE_TRUNC(b.requested_end_date, QUARTER),
+      INTERVAL 3 MONTH
+    )
+  ) AS d
+  WHERE @grain = 'quarterly'
+),
+buckets AS (
+  SELECT
+    bc.bucket_start,
+    GREATEST(bc.bucket_start, b.series_start_date) AS effective_start,
+    LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date) AS effective_end_exclusive
+  FROM bucket_candidates bc
+  CROSS JOIN bounds b
+  WHERE GREATEST(bc.bucket_start, b.series_start_date) < LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date)
+),
+events_base AS (
+  SELECT
+    local_event_timestamp,
+    COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` AS t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND local_event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+),
+grouped_sub_item_events AS (
+  SELECT
+    local_event_timestamp,
+    customer_id,
+    COALESCE(SUM(mrr_change_major), 0.0) AS mrr_change_major
+  FROM events_base
+  GROUP BY
+    local_event_timestamp,
+    customer_id
+),
+grouped_sub_item_events_with_mrr AS (
+  SELECT
+    local_event_timestamp,
+    DATE(local_event_timestamp) AS local_event_date,
+    customer_id,
+    mrr_change_major,
+    SUM(mrr_change_major) OVER (
+      PARTITION BY customer_id
+      ORDER BY local_event_timestamp ASC
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS mrr,
+    COUNTIF(ABS(mrr_change_major) > 1e-9) OVER (
+      PARTITION BY customer_id
+      ORDER BY local_event_timestamp ASC
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS mrr_change_count
+  FROM grouped_sub_item_events
+),
+grouped_sub_item_events_with_previous_mrr AS (
+  SELECT
+    local_event_timestamp,
+    local_event_date,
+    customer_id,
+    mrr_change_major,
+    mrr,
+    COALESCE(
+      LAG(mrr) OVER (
+        PARTITION BY customer_id
+        ORDER BY local_event_timestamp ASC
+      ),
+      0.0
+    ) AS previous_mrr,
+    mrr_change_count
+  FROM grouped_sub_item_events_with_mrr
+),
+customer_events AS (
+  SELECT
+    local_event_timestamp,
+    local_event_date,
+    customer_id,
+    mrr_change_major,
+    mrr,
+    previous_mrr,
+    mrr_change_count,
+    CASE
+      WHEN ABS(mrr) > 1e-9 AND ABS(previous_mrr) <= 1e-9 AND mrr_change_count = 1 THEN 'ACTIVE_START'
+      WHEN ABS(mrr) > 1e-9 AND ABS(previous_mrr) <= 1e-9 AND mrr_change_count > 1 THEN 'REACTIVATE'
+      WHEN ABS(mrr) > 1e-9 AND ABS(previous_mrr) > 1e-9 AND mrr > previous_mrr THEN 'ACTIVE_UPGRADE'
+      WHEN ABS(mrr) > 1e-9 AND ABS(previous_mrr) > 1e-9 AND mrr < previous_mrr THEN 'ACTIVE_DOWNGRADE'
+      WHEN ABS(mrr) <= 1e-9 AND ABS(previous_mrr) > 1e-9 THEN 'ACTIVE_END'
+      ELSE 'ACTIVE_NO_CHANGE'
+    END AS event_type
+  FROM grouped_sub_item_events_with_previous_mrr
+),
+daily_customer_events AS (
+  SELECT
+    local_event_date,
+    COALESCE(SUM(mrr_change_major), 0.0) AS net_mrr_change,
+    COALESCE(SUM(IF(event_type = 'ACTIVE_START', mrr_change_major, 0.0)), 0.0) AS new_mrr,
+    COALESCE(SUM(IF(event_type = 'REACTIVATE', mrr_change_major, 0.0)), 0.0) AS reactivation_mrr,
+    COALESCE(SUM(IF(event_type = 'ACTIVE_UPGRADE', mrr_change_major, 0.0)), 0.0) AS expansion_mrr,
+    COALESCE(SUM(IF(event_type = 'ACTIVE_DOWNGRADE', mrr_change_major, 0.0)), 0.0) AS contraction_mrr,
+    COALESCE(SUM(IF(event_type = 'ACTIVE_END', mrr_change_major, 0.0)), 0.0) AS churn_mrr
+  FROM customer_events
+  GROUP BY local_event_date
+),
+series_dates AS (
+  SELECT
+    d AS local_date
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.series_start_date, b.requested_end_date, INTERVAL 1 DAY)) AS d
+),
+base_before_series_total AS (
+  SELECT
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS base_mrr
+  FROM grouped_sub_item_events e
+  CROSS JOIN bounds b
+  WHERE e.local_event_timestamp < TIMESTAMP(b.series_start_date)
+),
+daily_series AS (
+  SELECT
+    sd.local_date,
+    COALESCE(dce.new_mrr, 0.0) AS new_mrr,
+    COALESCE(dce.reactivation_mrr, 0.0) AS reactivation_mrr,
+    COALESCE(dce.expansion_mrr, 0.0) AS expansion_mrr,
+    COALESCE(dce.contraction_mrr, 0.0) AS contraction_mrr,
+    COALESCE(dce.churn_mrr, 0.0) AS churn_mrr,
+    COALESCE(dce.net_mrr_change, 0.0) AS net_mrr_change,
+    base.base_mrr
+      + SUM(COALESCE(dce.net_mrr_change, 0.0)) OVER (
+        ORDER BY sd.local_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      ) AS mrr_end
+  FROM series_dates sd
+  LEFT JOIN daily_customer_events dce
+    ON dce.local_event_date = sd.local_date
+  CROSS JOIN base_before_series_total base
+),
+bucket_series AS (
+  SELECT
+    bu.bucket_start,
+    bu.effective_start,
+    DATE_SUB(bu.effective_end_exclusive, INTERVAL 1 DAY) AS effective_end,
+    COALESCE(SUM(ds.new_mrr), 0.0) AS new_mrr,
+    COALESCE(SUM(ds.reactivation_mrr), 0.0) AS reactivation_mrr,
+    COALESCE(SUM(ds.expansion_mrr), 0.0) AS expansion_mrr,
+    COALESCE(SUM(ds.contraction_mrr), 0.0) AS contraction_mrr,
+    COALESCE(SUM(ds.churn_mrr), 0.0) AS churn_mrr,
+    COALESCE(SUM(ds.net_mrr_change), 0.0) AS net_mrr_change,
+    COALESCE(
+      MAX(
+        IF(
+          ds.local_date = DATE_SUB(bu.effective_end_exclusive, INTERVAL 1 DAY),
+          ds.mrr_end,
+          NULL
+        )
+      ),
+      0.0
+    ) AS mrr_end
+  FROM buckets bu
+  LEFT JOIN daily_series ds
+    ON ds.local_date >= bu.effective_start
+    AND ds.local_date < bu.effective_end_exclusive
+  GROUP BY
+    bu.bucket_start,
+    bu.effective_start,
+    bu.effective_end_exclusive
+)
+SELECT
+  CASE
+    WHEN @grain = 'quarterly'
+    THEN CONCAT(CAST(EXTRACT(YEAR FROM bucket_start) AS STRING), '-Q', CAST(EXTRACT(QUARTER FROM bucket_start) AS STRING))
+    ELSE FORMAT_DATE('%Y-%m-%d', effective_start)
+  END AS period_key,
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', effective_start)
+    WHEN @grain = 'weekly' THEN CONCAT('Week of ', FORMAT_DATE('%Y-%m-%d', effective_start))
+    WHEN @grain = 'monthly' THEN FORMAT_DATE('%b %Y', bucket_start)
+    ELSE CONCAT('Q', CAST(EXTRACT(QUARTER FROM bucket_start) AS STRING), ' ', CAST(EXTRACT(YEAR FROM bucket_start) AS STRING))
+  END AS period_label,
+  FORMAT_DATE('%Y-%m-%d', effective_start) AS period_start,
+  FORMAT_DATE('%Y-%m-%d', effective_end) AS period_end,
+  ROUND(mrr_end, 2) AS mrr_end,
+  ROUND(new_mrr, 2) AS new_mrr,
+  ROUND(reactivation_mrr, 2) AS reactivation_mrr,
+  ROUND(expansion_mrr, 2) AS expansion_mrr,
+  ROUND(contraction_mrr, 2) AS contraction_mrr,
+  ROUND(churn_mrr, 2) AS churn_mrr,
+  ROUND(net_mrr_change, 2) AS net_mrr_change,
+  ROUND(
+    COALESCE(
+      SAFE_DIVIDE(
+        mrr_end - LAG(mrr_end) OVER (ORDER BY bucket_start),
+        NULLIF(ABS(LAG(mrr_end) OVER (ORDER BY bucket_start)), 0.0)
+      ) * 100.0,
+      0.0
+    ),
+    2
+  ) AS mrr_growth_rate_pct,
+  ROUND(mrr_end * 12.0, 2) AS arr,
+  ROUND(
+    COALESCE(
+      (mrr_end * 12.0) - LAG(mrr_end * 12.0) OVER (ORDER BY bucket_start),
+      0.0
+    ),
+    2
+  ) AS arr_growth
+FROM bucket_series
+ORDER BY bucket_start
+`;
+
   const customerArrQuery = `
 WITH bounds AS (
   SELECT
@@ -2373,8 +2643,9 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
     { name: "target_currency", type: "STRING", value: targetCurrency },
   ];
 
-  const [pointRows, customerArrRawRows] = await Promise.all([
+  const [pointRows, stripeExactPointRows, customerArrRawRows] = await Promise.all([
     runBigQueryQueryRows(accessToken, projectId, location, pointsQuery, params),
+    runBigQueryQueryRows(accessToken, projectId, location, stripeExactPointsQuery, params),
     runBigQueryQueryRows(accessToken, projectId, location, customerArrQuery, params),
   ]);
 
@@ -2385,6 +2656,23 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
     periodEnd: asString(row.period_end),
     mrrEnd: asNumber(row.mrr_end),
     newMrr: asNumber(row.new_mrr),
+    reactivationMrr: asNumber(row.reactivation_mrr),
+    expansionMrr: asNumber(row.expansion_mrr),
+    contractionMrr: asNumber(row.contraction_mrr),
+    churnMrr: asNumber(row.churn_mrr),
+    netMrrChange: asNumber(row.net_mrr_change),
+    mrrGrowthRatePct: asNumber(row.mrr_growth_rate_pct),
+    arr: asNumber(row.arr),
+    arrGrowth: asNumber(row.arr_growth),
+  }));
+  const allStripeExactPoints: StripeBillingOverviewPoint[] = stripeExactPointRows.map((row) => ({
+    key: asString(row.period_key),
+    label: asString(row.period_label),
+    periodStart: asString(row.period_start),
+    periodEnd: asString(row.period_end),
+    mrrEnd: asNumber(row.mrr_end),
+    newMrr: asNumber(row.new_mrr),
+    reactivationMrr: asNumber(row.reactivation_mrr),
     expansionMrr: asNumber(row.expansion_mrr),
     contractionMrr: asNumber(row.contraction_mrr),
     churnMrr: asNumber(row.churn_mrr),
@@ -2404,6 +2692,10 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
 
   const historyPoints = allPoints.filter((point) => point.periodStart < startDateIso);
   const points = allPoints.filter((point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso);
+  const stripeExactHistoryPoints = allStripeExactPoints.filter((point) => point.periodStart < startDateIso);
+  const stripeExactPoints = allStripeExactPoints.filter(
+    (point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso,
+  );
   const currentMrr = points.length ? points[points.length - 1].mrrEnd : 0;
   return {
     startDate: startDateIso,
@@ -2414,6 +2706,8 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
     currentArr: Math.round(currentMrr * 12 * 100) / 100,
     historyPoints,
     points,
+    stripeExactHistoryPoints,
+    stripeExactPoints,
     customerArrRows,
   };
 }
