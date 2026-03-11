@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReportRequest, ReportResponse, ReportRow, Grain, ReportMode } from "@/lib/types";
 
 function fmtMoney(n: number, currencyDisplay: CurrencyDisplay) {
@@ -26,6 +26,8 @@ type GroupField =
   | "industry"
   | "dealType";
 
+type ChartGroupField = "none" | "deploymentType" | "territory" | "country";
+
 const GROUP_BY_OPTIONS: Array<{ key: GroupField; label: string }> = [
   { key: "dealName", label: "Deal Name" },
   { key: "deploymentType", label: "Deployment Type" },
@@ -34,6 +36,24 @@ const GROUP_BY_OPTIONS: Array<{ key: GroupField; label: string }> = [
   { key: "country", label: "Country" },
   { key: "industry", label: "Industry" },
   { key: "dealType", label: "Deal Type" },
+];
+
+const CHART_GROUP_OPTIONS: Array<{ key: ChartGroupField; label: string }> = [
+  { key: "none", label: "Overall" },
+  { key: "country", label: "Country" },
+  { key: "territory", label: "Territory" },
+  { key: "deploymentType", label: "Deployment Type" },
+];
+
+const GROUP_LINE_COLORS = [
+  "#4f8df9",
+  "#1fc16b",
+  "#f59e0b",
+  "#ef4444",
+  "#14b8a6",
+  "#a78bfa",
+  "#f97316",
+  "#22c55e",
 ];
 
 type UiRow = {
@@ -211,6 +231,140 @@ type TrendPoint = {
   mrrGrowthRatePct: number;
   arrGrowth: number;
 };
+
+type GroupTrendSeries = {
+  key: string;
+  label: string;
+  points: TrendPoint[];
+  color: string;
+};
+
+type PeriodRef = {
+  key: string;
+  label: string;
+};
+
+type ChartGroupDescriptor = {
+  key: string;
+  label: string;
+};
+
+function chartGroupDescriptorForRow(row: UiRow, field: ChartGroupField): ChartGroupDescriptor {
+  if (field === "none") return { key: "__all__", label: "Overall" };
+  if (field === "country") {
+    const raw = String(row.country || "").trim();
+    if (!raw) return { key: "(blank)", label: "(blank)" };
+    return { key: canonicalCountryKey(raw) || "(blank)", label: canonicalCountryLabel(raw) || "(blank)" };
+  }
+  if (field === "territory") {
+    const raw = String(row.territory || "").trim();
+    return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
+  }
+  const raw = String(row.deploymentType || "").trim();
+  return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
+}
+
+function addAccountPeriodValues(
+  accountMap: Map<string, Record<string, number>>,
+  accountKey: string,
+  valuesByPeriod: Record<string, number>,
+  periodOrder: PeriodRef[],
+) {
+  if (!accountMap.has(accountKey)) accountMap.set(accountKey, {});
+  const bucket = accountMap.get(accountKey)!;
+  for (const period of periodOrder) {
+    bucket[period.key] = round2((bucket[period.key] || 0) + (valuesByPeriod[period.key] || 0));
+  }
+}
+
+function buildTrendPointsFromAccounts(
+  periodOrder: PeriodRef[],
+  accountArrByPeriod: Map<string, Record<string, number>>,
+  baselineAccountArrByAccount: Map<string, number>,
+): TrendPoint[] {
+  const totalByPeriodSelected = new Map<string, number>();
+  for (const accountTotals of accountArrByPeriod.values()) {
+    for (const [periodKey, value] of Object.entries(accountTotals)) {
+      totalByPeriodSelected.set(periodKey, round2((totalByPeriodSelected.get(periodKey) || 0) + (value || 0)));
+    }
+  }
+
+  const baselineArrTotal = round2(
+    Array.from(baselineAccountArrByAccount.values()).reduce((acc, value) => acc + value, 0),
+  );
+
+  return periodOrder.map((period, idx) => {
+    const prevPeriodKey = idx > 0 ? periodOrder[idx - 1].key : "";
+    const arr = round2(totalByPeriodSelected.get(period.key) || 0);
+    const mrr = round2(arr / 12);
+    const prevArr = round2(
+      idx === 0
+        ? baselineArrTotal
+        : prevPeriodKey
+          ? totalByPeriodSelected.get(prevPeriodKey) || 0
+          : 0,
+    );
+    const prevMrr = round2(prevArr / 12);
+    const arrGrowth = round2(arr - prevArr);
+    const mrrGrowthRatePct =
+      Math.abs(prevMrr) > 1e-9
+        ? round2(((mrr - prevMrr) / Math.abs(prevMrr)) * 100)
+        : 0;
+
+    let newMrr = 0;
+    let expansionMrr = 0;
+    let contractionMrr = 0;
+    let churnMrr = 0;
+
+    for (const [accountKey, accountTotals] of accountArrByPeriod.entries()) {
+      const currArr = round2(accountTotals[period.key] || 0);
+      const prevAccountArr = round2(
+        idx === 0
+          ? baselineAccountArrByAccount.get(accountKey) || 0
+          : prevPeriodKey
+            ? accountTotals[prevPeriodKey] || 0
+            : 0,
+      );
+      const diffArr = round2(currArr - prevAccountArr);
+
+      const currHas = Math.abs(currArr) > 1e-9;
+      const prevHas = Math.abs(prevAccountArr) > 1e-9;
+      if (!currHas && !prevHas) continue;
+
+      if (!prevHas && currHas) {
+        newMrr = round2(newMrr + currArr / 12);
+        continue;
+      }
+
+      if (prevHas && !currHas) {
+        churnMrr = round2(churnMrr - prevAccountArr / 12);
+        continue;
+      }
+
+      if (diffArr > 1e-9) {
+        expansionMrr = round2(expansionMrr + diffArr / 12);
+      } else if (diffArr < -1e-9) {
+        contractionMrr = round2(contractionMrr + diffArr / 12);
+      }
+    }
+
+    const netMrrChange = round2(newMrr + expansionMrr + contractionMrr + churnMrr);
+
+    return {
+      key: period.key,
+      label: period.label,
+      mrr,
+      arr,
+      newMrr,
+      expansionMrr,
+      contractionMrr,
+      churnMrr,
+      netMrrChange,
+      mrrGrowthRatePct,
+      arrGrowth,
+    };
+  });
+}
 
 type LineChartProps = {
   title: string;
@@ -400,6 +554,210 @@ function LineChartCard({
   );
 }
 
+type MultiLineChartProps = {
+  title: string;
+  subtitle: string;
+  periods: PeriodRef[];
+  series: GroupTrendSeries[];
+  valueAccessor: (point: TrendPoint) => number;
+  valueFormatter: (value: number) => string;
+  includeZero?: boolean;
+};
+
+function MultiLineChartCard({
+  title,
+  subtitle,
+  periods,
+  series,
+  valueAccessor,
+  valueFormatter,
+  includeZero = false,
+}: MultiLineChartProps) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  const width = 640;
+  const height = 250;
+  const paddingLeft = 116;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 42;
+  const plotWidth = width - paddingLeft - paddingRight;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  const values = series.flatMap((group) => group.points.map((point) => valueAccessor(point)));
+  const minRaw = values.length ? Math.min(...values) : 0;
+  const maxRaw = values.length ? Math.max(...values) : 1;
+  let minValue = includeZero ? Math.min(minRaw, 0) : minRaw;
+  let maxValue = includeZero ? Math.max(maxRaw, 0) : maxRaw;
+  if (Math.abs(maxValue - minValue) < 1e-9) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+
+  const xAt = (idx: number) => {
+    if (periods.length <= 1) return paddingLeft + plotWidth / 2;
+    return paddingLeft + (idx / (periods.length - 1)) * plotWidth;
+  };
+  const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+
+  const hoveredPeriod = hoverIndex != null && hoverIndex >= 0 && hoverIndex < periods.length ? periods[hoverIndex] : null;
+
+  return (
+    <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+      <div className="stripe-ui__section-head">
+        <div>
+          <h2 className="stripe-ui__panel-title">{title}</h2>
+          <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+            {subtitle}
+          </p>
+        </div>
+        <div className="stripe-ui__hint" aria-live="polite">
+          {hoveredPeriod ? hoveredPeriod.label : "Hover on chart for values"}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginTop: "0.7rem" }}>
+        {series.map((group) => (
+          <span key={`legend-${group.key}`} className="stripe-ui__hint" style={{ color: group.color }}>
+            {group.label}
+          </span>
+        ))}
+      </div>
+
+      {periods.length === 0 || series.length === 0 ? (
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>
+          No data for selected range.
+        </p>
+      ) : (
+        <>
+          <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
+            <svg
+              viewBox={`0 0 ${width} ${height}`}
+              role="img"
+              aria-label={title}
+              style={{ width: "100%", display: "block" }}
+              onMouseLeave={() => setHoverIndex(null)}
+              onMouseMove={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const relX = ((e.clientX - rect.left) / rect.width) * width;
+                const clamped = Math.max(paddingLeft, Math.min(paddingLeft + plotWidth, relX));
+                const ratio = periods.length > 1 ? (clamped - paddingLeft) / plotWidth : 0;
+                const idx = Math.max(0, Math.min(periods.length - 1, Math.round(ratio * Math.max(periods.length - 1, 0))));
+                setHoverIndex(idx);
+              }}
+            >
+              <line
+                x1={paddingLeft}
+                y1={paddingTop + plotHeight}
+                x2={paddingLeft + plotWidth}
+                y2={paddingTop + plotHeight}
+                stroke="#36557f"
+                strokeWidth={1}
+              />
+              <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#36557f" strokeWidth={1} />
+
+              {periods.map((period, idx) => {
+                const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
+                const right = idx === periods.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+                return (
+                  <rect
+                    key={`hover-${period.key}`}
+                    x={left}
+                    y={paddingTop}
+                    width={Math.max(1, right - left)}
+                    height={plotHeight}
+                    fill="transparent"
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                );
+              })}
+
+              {series.map((group) => {
+                const pathD = group.points
+                  .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(valueAccessor(point))}`)
+                  .join(" ");
+                return (
+                  <path
+                    key={`path-${group.key}`}
+                    d={pathD}
+                    fill="none"
+                    stroke={group.color}
+                    strokeWidth={2.3}
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                );
+              })}
+
+              {hoverIndex != null && periods[hoverIndex] && (
+                <line
+                  x1={xAt(hoverIndex)}
+                  y1={paddingTop}
+                  x2={xAt(hoverIndex)}
+                  y2={paddingTop + plotHeight}
+                  stroke="#89a9d4"
+                  strokeOpacity={0.5}
+                  strokeDasharray="4 4"
+                />
+              )}
+
+              {series.map((group) =>
+                group.points.map((point, idx) => (
+                  <circle
+                    key={`${group.key}:${point.key}`}
+                    cx={xAt(idx)}
+                    cy={yAt(valueAccessor(point))}
+                    r={hoverIndex === idx ? 3.8 : 2.6}
+                    fill={group.color}
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                )),
+              )}
+
+              {tickIndices(periods.length).map((idx) => (
+                <text
+                  key={`tick-${idx}`}
+                  x={xAt(idx)}
+                  y={height - 12}
+                  textAnchor={idx === 0 ? "start" : idx === periods.length - 1 ? "end" : "middle"}
+                  fill="#b7c9e6"
+                  fontSize="12"
+                >
+                  {periods[idx]?.label || ""}
+                </text>
+              ))}
+
+              <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#8ea7cb" fontSize="12">
+                {valueFormatter(maxValue)}
+              </text>
+              <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#8ea7cb" fontSize="12">
+                {valueFormatter(minValue)}
+              </text>
+            </svg>
+          </div>
+
+          {hoveredPeriod && hoverIndex != null && (
+            <div className="stripe-ui__panel" style={{ marginTop: "0.8rem", padding: "0.75rem" }}>
+              <div className="stripe-ui__hint" style={{ marginBottom: "0.35rem" }}>
+                {hoveredPeriod.label}
+              </div>
+              {series.map((group) => {
+                const point = group.points[hoverIndex];
+                const value = point ? valueAccessor(point) : 0;
+                return (
+                  <div key={`hover-value-${group.key}`} className="stripe-ui__hint" style={{ color: group.color }}>
+                    {group.label}: {valueFormatter(value)}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 type GrowthBreakdownChartProps = {
   points: TrendPoint[];
 };
@@ -455,7 +813,7 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
         <div>
           <h2 className="stripe-ui__panel-title">Growth Breakdown</h2>
           <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-            Account-level movement (Contracted ARR, Cloud only) split into New, Expansion, Contraction, and Churn (MRR).
+            Account-level movement split into New, Expansion, Contraction, and Churn (MRR) for the selected chart scope.
           </p>
         </div>
         <div className="stripe-ui__hint" aria-live="polite">
@@ -741,6 +1099,8 @@ export default function Home() {
   const [endDate, setEndDate] = useState("2025-12-31");
   const [mode, setMode] = useState<ReportMode>("arr");
   const [grain, setGrain] = useState<Grain>("monthly");
+  const [chartGroupBy, setChartGroupBy] = useState<ChartGroupField>("none");
+  const [selectedBarGroupKey, setSelectedBarGroupKey] = useState<string>("__all__");
 
   const [groupByFields, setGroupByFields] = useState<GroupField[]>([]);
   const [groupByToAdd, setGroupByToAdd] = useState<GroupField | "none">("none");
@@ -953,12 +1313,12 @@ export default function Home() {
   ]);
 
   const chartDisplayData = chartData || data;
-  const filteredChartLineItemRows: UiRow[] = useMemo(() => buildFilteredLineItemRows(chartDisplayData, { forceCloudOnly: true }), [
+  const filteredChartLineItemRows: UiRow[] = useMemo(() => buildFilteredLineItemRows(chartDisplayData), [
     buildFilteredLineItemRows,
     chartDisplayData,
   ]);
 
-  const filteredBaselineChartRows: UiRow[] = useMemo(() => buildFilteredLineItemRows(chartBaselineData, { forceCloudOnly: true }), [
+  const filteredBaselineChartRows: UiRow[] = useMemo(() => buildFilteredLineItemRows(chartBaselineData), [
     buildFilteredLineItemRows,
     chartBaselineData,
   ]);
@@ -1021,23 +1381,20 @@ export default function Home() {
     });
   }, [data, displayedRows]);
 
+  const chartPeriodOrder = useMemo(() => (chartDisplayData?.periods || []) as PeriodRef[], [chartDisplayData]);
+
   const accountArrByPeriod = useMemo(() => {
-    if (!chartDisplayData) return new Map<string, Record<string, number>>();
-    const periodOrder = chartDisplayData.periods || [];
     const grouped = new Map<string, Record<string, number>>();
+    if (!chartPeriodOrder.length) return grouped;
 
     for (const row of filteredChartLineItemRows) {
       const key = accountGroupingKey(row);
       if (!key) continue;
-      if (!grouped.has(key)) grouped.set(key, {});
-      const bucket = grouped.get(key)!;
-      for (const period of periodOrder) {
-        bucket[period.key] = round2((bucket[period.key] || 0) + (row.valuesByPeriod[period.key] || 0));
-      }
+      addAccountPeriodValues(grouped, key, row.valuesByPeriod || {}, chartPeriodOrder);
     }
 
     return grouped;
-  }, [chartDisplayData, filteredChartLineItemRows]);
+  }, [chartPeriodOrder, filteredChartLineItemRows]);
 
   const baselineAccountArrByAccount = useMemo(() => {
     const baseline = new Map<string, number>();
@@ -1058,94 +1415,126 @@ export default function Home() {
     return baseline;
   }, [chartBaselineData, filteredBaselineChartRows]);
 
-  const chartPoints: TrendPoint[] = useMemo(() => {
-    if (!chartDisplayData) return [];
+  const chartPoints: TrendPoint[] = useMemo(
+    () => buildTrendPointsFromAccounts(chartPeriodOrder, accountArrByPeriod, baselineAccountArrByAccount),
+    [chartPeriodOrder, accountArrByPeriod, baselineAccountArrByAccount],
+  );
 
-    const periodOrder = chartDisplayData.periods || [];
-    const totalByPeriodSelected = new Map<string, number>();
-    for (const accountTotals of accountArrByPeriod.values()) {
-      for (const [periodKey, value] of Object.entries(accountTotals)) {
-        totalByPeriodSelected.set(periodKey, round2((totalByPeriodSelected.get(periodKey) || 0) + (value || 0)));
+  const groupedAccountArrByPeriod = useMemo(() => {
+    const grouped = new Map<string, { label: string; accounts: Map<string, Record<string, number>> }>();
+    if (!chartPeriodOrder.length) return grouped;
+
+    for (const row of filteredChartLineItemRows) {
+      const descriptor = chartGroupDescriptorForRow(row, chartGroupBy);
+      if (!grouped.has(descriptor.key)) {
+        grouped.set(descriptor.key, { label: descriptor.label, accounts: new Map() });
       }
+      const accountKey = accountGroupingKey(row);
+      if (!accountKey) continue;
+      addAccountPeriodValues(grouped.get(descriptor.key)!.accounts, accountKey, row.valuesByPeriod || {}, chartPeriodOrder);
     }
 
-    const baselineArrTotal = round2(
-      Array.from(baselineAccountArrByAccount.values()).reduce((acc, value) => acc + value, 0),
-    );
+    return grouped;
+  }, [chartGroupBy, chartPeriodOrder, filteredChartLineItemRows]);
 
-    return periodOrder.map((period, idx) => {
-      const prevPeriodKey = idx > 0 ? periodOrder[idx - 1].key : "";
+  const groupedBaselineAccountArrByAccount = useMemo(() => {
+    const grouped = new Map<string, Map<string, number>>();
+    if (!chartBaselineData) return grouped;
+    const baselinePeriodKeys = (chartBaselineData.periods || []).map((period) => period.key);
+    if (!baselinePeriodKeys.length) return grouped;
 
-      const arr = round2(totalByPeriodSelected.get(period.key) || 0);
-      const mrr = round2(arr / 12);
-      const prevArr = round2(
-        idx === 0
-          ? baselineArrTotal
-          : prevPeriodKey
-            ? totalByPeriodSelected.get(prevPeriodKey) || 0
-            : 0,
+    for (const row of filteredBaselineChartRows) {
+      const descriptor = chartGroupDescriptorForRow(row, chartGroupBy);
+      const accountKey = accountGroupingKey(row);
+      if (!accountKey) continue;
+      const rowBaselineArr = round2(
+        baselinePeriodKeys.reduce((acc, periodKey) => acc + (row.valuesByPeriod[periodKey] || 0), 0),
       );
-      const prevMrr = round2(prevArr / 12);
-      const arrGrowth = round2(arr - prevArr);
-      const mrrGrowthRatePct =
-        (idx === 0 || !!prevPeriodKey) && Math.abs(prevMrr) > 1e-9
-          ? round2(((mrr - prevMrr) / Math.abs(prevMrr)) * 100)
-          : 0;
+      if (Math.abs(rowBaselineArr) < 1e-9) continue;
+      if (!grouped.has(descriptor.key)) grouped.set(descriptor.key, new Map());
+      const bucket = grouped.get(descriptor.key)!;
+      bucket.set(accountKey, round2((bucket.get(accountKey) || 0) + rowBaselineArr));
+    }
 
-      let newMrr = 0;
-      let expansionMrr = 0;
-      let contractionMrr = 0;
-      let churnMrr = 0;
+    return grouped;
+  }, [chartBaselineData, chartGroupBy, filteredBaselineChartRows]);
 
-      for (const [accountKey, accountTotals] of accountArrByPeriod.entries()) {
-        const currArr = round2(accountTotals[period.key] || 0);
-        const prevAccountArr = round2(
-          idx === 0
-            ? baselineAccountArrByAccount.get(accountKey) || 0
-            : prevPeriodKey
-              ? accountTotals[prevPeriodKey] || 0
-              : 0,
-        );
-        const diffArr = round2(currArr - prevAccountArr);
+  const groupedChartSeries = useMemo(() => {
+    if (chartGroupBy === "none" || !chartPeriodOrder.length) return [] as GroupTrendSeries[];
 
-        const currHas = Math.abs(currArr) > 1e-9;
-        const prevHas = Math.abs(prevAccountArr) > 1e-9;
-        if (!currHas && !prevHas) continue;
+    const raw = Array.from(groupedAccountArrByPeriod.entries())
+      .map(([groupKey, groupData]) => {
+        const baseline = groupedBaselineAccountArrByAccount.get(groupKey) || new Map<string, number>();
+        const points = buildTrendPointsFromAccounts(chartPeriodOrder, groupData.accounts, baseline);
+        const latestArr = points.length ? points[points.length - 1].arr : 0;
+        return {
+          key: groupKey,
+          label: groupData.label,
+          accounts: groupData.accounts,
+          baseline,
+          points,
+          latestArr,
+        };
+      })
+      .filter((group) => group.points.some((point) => Math.abs(point.arr) > 1e-9 || Math.abs(point.arrGrowth) > 1e-9))
+      .sort((a, b) => b.latestArr - a.latestArr || a.label.localeCompare(b.label));
 
-        if (!prevHas && currHas) {
-          newMrr = round2(newMrr + currArr / 12);
-          continue;
+    const maxSeries = 6;
+    const top = raw.slice(0, maxSeries);
+    const rest = raw.slice(maxSeries);
+
+    const finalized = [...top];
+    if (rest.length > 0) {
+      const otherAccounts = new Map<string, Record<string, number>>();
+      const otherBaseline = new Map<string, number>();
+
+      for (const group of rest) {
+        for (const [accountKey, valuesByPeriod] of group.accounts.entries()) {
+          addAccountPeriodValues(otherAccounts, accountKey, valuesByPeriod, chartPeriodOrder);
         }
-
-        if (prevHas && !currHas) {
-          churnMrr = round2(churnMrr - prevAccountArr / 12);
-          continue;
-        }
-
-        if (diffArr > 1e-9) {
-          expansionMrr = round2(expansionMrr + diffArr / 12);
-        } else if (diffArr < -1e-9) {
-          contractionMrr = round2(contractionMrr + diffArr / 12);
+        for (const [accountKey, value] of group.baseline.entries()) {
+          otherBaseline.set(accountKey, round2((otherBaseline.get(accountKey) || 0) + value));
         }
       }
 
-      const netMrrChange = round2(newMrr + expansionMrr + contractionMrr + churnMrr);
+      const otherPoints = buildTrendPointsFromAccounts(chartPeriodOrder, otherAccounts, otherBaseline);
+      finalized.push({
+        key: "__other__",
+        label: `Other (${rest.length})`,
+        accounts: otherAccounts,
+        baseline: otherBaseline,
+        points: otherPoints,
+        latestArr: otherPoints.length ? otherPoints[otherPoints.length - 1].arr : 0,
+      });
+    }
 
-      return {
-        key: period.key,
-        label: period.label,
-        mrr,
-        arr,
-        newMrr,
-        expansionMrr,
-        contractionMrr,
-        churnMrr,
-        netMrrChange,
-        mrrGrowthRatePct,
-        arrGrowth,
-      };
-    });
-  }, [chartDisplayData, accountArrByPeriod, baselineAccountArrByAccount]);
+    return finalized.map((group, idx) => ({
+      key: group.key,
+      label: group.label,
+      points: group.points,
+      color: GROUP_LINE_COLORS[idx % GROUP_LINE_COLORS.length],
+    }));
+  }, [chartGroupBy, chartPeriodOrder, groupedAccountArrByPeriod, groupedBaselineAccountArrByAccount]);
+
+  useEffect(() => {
+    if (chartGroupBy === "none") {
+      setSelectedBarGroupKey("__all__");
+      return;
+    }
+    if (groupedChartSeries.length === 0) return;
+    if (!groupedChartSeries.some((series) => series.key === selectedBarGroupKey)) {
+      setSelectedBarGroupKey(groupedChartSeries[0].key);
+    }
+  }, [chartGroupBy, groupedChartSeries, selectedBarGroupKey]);
+
+  const selectedBarSeries = useMemo(() => {
+    if (chartGroupBy === "none") return null;
+    return groupedChartSeries.find((series) => series.key === selectedBarGroupKey) || groupedChartSeries[0] || null;
+  }, [chartGroupBy, groupedChartSeries, selectedBarGroupKey]);
+
+  const barChartPoints = selectedBarSeries?.points || chartPoints;
+  const chartGroupingLabel = CHART_GROUP_OPTIONS.find((opt) => opt.key === chartGroupBy)?.label || "Overall";
+  const chartGroupingEnabled = chartGroupBy !== "none" && groupedChartSeries.length > 0;
 
   const showDealIdColumn = groupByFields.length === 0;
   const groupByLabel = groupByFields
@@ -1346,6 +1735,24 @@ export default function Home() {
           </div>
 
           <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="hubspot-chart-group-by">
+              Chart grouping
+            </label>
+            <select
+              id="hubspot-chart-group-by"
+              className="stripe-ui__control"
+              value={chartGroupBy}
+              onChange={(e) => setChartGroupBy(e.target.value as ChartGroupField)}
+            >
+              {CHART_GROUP_OPTIONS.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="stripe-ui__field">
             <label className="stripe-ui__field-label" htmlFor="hubspot-group-by">
               Group by field
             </label>
@@ -1448,6 +1855,40 @@ export default function Home() {
 
       {!loading && data && (
         <>
+          {chartGroupingEnabled && (
+            <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+              <div className="stripe-ui__section-head">
+                <div>
+                  <h2 className="stripe-ui__panel-title">Grouped Charts</h2>
+                  <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                    Line charts are split by {chartGroupingLabel.toLowerCase()}. Bar charts use a selected group view.
+                  </p>
+                </div>
+                <div className="stripe-ui__hint">{`${groupedChartSeries.length} groups shown`}</div>
+              </div>
+
+              <div className="stripe-ui__control-grid" style={{ marginTop: "0.8rem" }}>
+                <div className="stripe-ui__field">
+                  <label className="stripe-ui__field-label" htmlFor="hubspot-bar-group-select">
+                    Bar chart group
+                  </label>
+                  <select
+                    id="hubspot-bar-group-select"
+                    className="stripe-ui__control"
+                    value={selectedBarSeries?.key || ""}
+                    onChange={(e) => setSelectedBarGroupKey(e.target.value)}
+                  >
+                    {groupedChartSeries.map((series) => (
+                      <option key={series.key} value={series.key}>
+                        {series.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </section>
+          )}
+
           <div
             style={{
               display: "grid",
@@ -1456,40 +1897,78 @@ export default function Home() {
               alignItems: "start",
             }}
           >
-            <LineChartCard
-              title="MRR Over Time"
-              subtitle="MRR derived from Contracted ARR / 12 (Cloud deployments, grouped by account ID)."
-              points={chartPoints}
-              valueAccessor={(p) => p.mrr}
-              valueFormatter={(v) => fmtMoney(v, "normal")}
-              stroke="#4f8df9"
-            />
+            {chartGroupingEnabled ? (
+              <MultiLineChartCard
+                title="MRR Over Time"
+                subtitle={`MRR derived from Contracted ARR / 12, split by ${chartGroupingLabel.toLowerCase()}.`}
+                periods={chartPeriodOrder}
+                series={groupedChartSeries}
+                valueAccessor={(p) => p.mrr}
+                valueFormatter={(v) => fmtMoney(v, "normal")}
+              />
+            ) : (
+              <LineChartCard
+                title="MRR Over Time"
+                subtitle="MRR derived from Contracted ARR / 12."
+                points={chartPoints}
+                valueAccessor={(p) => p.mrr}
+                valueFormatter={(v) => fmtMoney(v, "normal")}
+                stroke="#4f8df9"
+              />
+            )}
 
-            <GrowthBreakdownChart points={chartPoints} />
+            <GrowthBreakdownChart points={barChartPoints} />
 
-            <LineChartCard
-              title="MRR Growth Rate Over Time"
-              subtitle="Period-over-period MRR growth rate using prior-period baseline."
-              points={chartPoints}
-              valueAccessor={(p) => p.mrrGrowthRatePct}
-              valueFormatter={(v) => fmtPercent(v)}
-              stroke="#f59e0b"
-              includeZero
-            />
+            {chartGroupingEnabled ? (
+              <MultiLineChartCard
+                title="MRR Growth Rate Over Time"
+                subtitle={`Period-over-period MRR growth rate, split by ${chartGroupingLabel.toLowerCase()}.`}
+                periods={chartPeriodOrder}
+                series={groupedChartSeries}
+                valueAccessor={(p) => p.mrrGrowthRatePct}
+                valueFormatter={(v) => fmtPercent(v)}
+                includeZero
+              />
+            ) : (
+              <LineChartCard
+                title="MRR Growth Rate Over Time"
+                subtitle="Period-over-period MRR growth rate using prior-period baseline."
+                points={chartPoints}
+                valueAccessor={(p) => p.mrrGrowthRatePct}
+                valueFormatter={(v) => fmtPercent(v)}
+                stroke="#f59e0b"
+                includeZero
+              />
+            )}
 
-            <LineChartCard
-              title="ARR Over Time"
-              subtitle="Contracted ARR at the end of each period (Cloud deployments only)."
-              points={chartPoints}
-              valueAccessor={(p) => p.arr}
-              valueFormatter={(v) => fmtMoney(v, "normal")}
-              stroke="#1fc16b"
-            />
+            {chartGroupingEnabled ? (
+              <MultiLineChartCard
+                title="ARR Over Time"
+                subtitle={`Contracted ARR at period end, split by ${chartGroupingLabel.toLowerCase()}.`}
+                periods={chartPeriodOrder}
+                series={groupedChartSeries}
+                valueAccessor={(p) => p.arr}
+                valueFormatter={(v) => fmtMoney(v, "normal")}
+              />
+            ) : (
+              <LineChartCard
+                title="ARR Over Time"
+                subtitle="Contracted ARR at the end of each period."
+                points={chartPoints}
+                valueAccessor={(p) => p.arr}
+                valueFormatter={(v) => fmtMoney(v, "normal")}
+                stroke="#1fc16b"
+              />
+            )}
 
             <DeltaBarChartCard
               title="ARR Growth Over Time"
-              subtitle="Absolute Contracted ARR change per period."
-              points={chartPoints}
+              subtitle={
+                chartGroupingEnabled
+                  ? `Absolute Contracted ARR change for ${selectedBarSeries?.label || "selected group"} per period.`
+                  : "Absolute Contracted ARR change per period."
+              }
+              points={barChartPoints}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => fmtMoney(v, "normal")}
             />
@@ -1500,7 +1979,7 @@ export default function Home() {
               <div>
                 <h2 className="stripe-ui__panel-title">Filters & Totals</h2>
                 <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-                  Apply filters to rows. Charts are always Contracted ARR + Cloud-only, grouped by account ID.
+                  Apply filters to rows. Charts are based on Contracted ARR and respect ARR display and chart grouping.
                 </p>
               </div>
               <div className="stripe-ui__hint">
