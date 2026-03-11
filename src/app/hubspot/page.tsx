@@ -1267,15 +1267,18 @@ export default function Home() {
     const dealNameNeedle = filterDealName.trim().toLowerCase();
     const accountIdNeedle = filterAccountId.trim().toLowerCase();
 
+    const applyInteractiveFilters = options?.forceCloudOnly !== true;
     const filteredBaseRows = baseRows.filter((r) => {
       const forceCloudOnly = options?.forceCloudOnly === true;
       const displayScopeOk = forceCloudOnly
         ? isCloudDeploymentType(r.deploymentType || "")
         : arrDisplayScope === "all" || isCloudDeploymentType(r.deploymentType || "");
+      if (!displayScopeOk) return false;
+
+      if (!applyInteractiveFilters) return true;
+
       const dealNameOk = !dealNameNeedle || (r.dealName || "").toLowerCase().includes(dealNameNeedle);
-      const deploymentTypeOk = forceCloudOnly
-        ? isCloudDeploymentType(r.deploymentType || "")
-        : filterDeploymentType === "all" || (r.deploymentType || "") === filterDeploymentType;
+      const deploymentTypeOk = filterDeploymentType === "all" || (r.deploymentType || "") === filterDeploymentType;
       const accountIdOk = !accountIdNeedle || (r.accountId || "").toLowerCase().includes(accountIdNeedle);
       const territoryOk = filterTerritory === "all" || (r.territory || "") === filterTerritory;
       const countryOk =
@@ -1283,16 +1286,7 @@ export default function Home() {
         canonicalCountryKey(r.country || "") === canonicalCountryKey(filterCountry);
       const industryOk = filterIndustry === "all" || (r.industry || "") === filterIndustry;
       const dealTypeOk = filterDealType === "all" || (r.dealType || "") === filterDealType;
-      return (
-        displayScopeOk &&
-        dealNameOk &&
-        deploymentTypeOk &&
-        accountIdOk &&
-        territoryOk &&
-        countryOk &&
-        industryOk &&
-        dealTypeOk
-      );
+      return dealNameOk && deploymentTypeOk && accountIdOk && territoryOk && countryOk && industryOk && dealTypeOk;
     });
 
     return filteredBaseRows.filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
