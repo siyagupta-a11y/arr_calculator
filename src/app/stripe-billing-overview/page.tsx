@@ -806,17 +806,20 @@ export default function StripeBillingOverviewPage() {
     }
   }
 
-  const points = useMemo(() => data?.points ?? [], [data]);
-  const historyPoints = useMemo(() => data?.historyPoints ?? [], [data]);
-  const stripeExactPoints = useMemo(() => data?.stripeExactPoints ?? [], [data]);
-  const stripeExactHistoryPoints = useMemo(() => data?.stripeExactHistoryPoints ?? [], [data]);
+  const hasStripeExactSeries = data?.stripeExactPoints !== undefined || data?.stripeExactHistoryPoints !== undefined;
+  const points = useMemo(
+    () => (hasStripeExactSeries ? data?.stripeExactPoints ?? [] : data?.points ?? []),
+    [data, hasStripeExactSeries],
+  );
+  const historyPoints = useMemo(
+    () => (hasStripeExactSeries ? data?.stripeExactHistoryPoints ?? [] : data?.historyPoints ?? []),
+    [data, hasStripeExactSeries],
+  );
   const customerArrRows = useMemo(() => data?.customerArrRows ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
   const growthInputPoints = useMemo(() => [...historyPoints, ...points], [historyPoints, points]);
-  const stripeExactGrowthInputPoints = useMemo(
-    () => [...stripeExactHistoryPoints, ...stripeExactPoints],
-    [stripeExactHistoryPoints, stripeExactPoints],
-  );
+  const currentMrr = useMemo(() => (points.length ? points[points.length - 1].mrrEnd : 0), [points]);
+  const currentArr = useMemo(() => Math.round(currentMrr * 12 * 100) / 100, [currentMrr]);
   const customerPeriodColumns = useMemo(
     () => points.map((point) => ({ key: point.key, label: point.label })),
     [points],
@@ -831,20 +834,11 @@ export default function StripeBillingOverviewPage() {
     () => computeMrrGrowthRates(growthInputPoints, selectedGrowthLookback),
     [growthInputPoints, selectedGrowthLookback],
   );
-  const stripeExactMrrGrowthSeries = useMemo(
-    () => computeMrrGrowthRates(stripeExactGrowthInputPoints, selectedGrowthLookback),
-    [stripeExactGrowthInputPoints, selectedGrowthLookback],
-  );
   const mrrGrowthByKey = useMemo(() => {
     const out = new Map<string, number>();
     growthInputPoints.forEach((point, idx) => out.set(point.key, mrrGrowthSeries[idx] || 0));
     return out;
   }, [growthInputPoints, mrrGrowthSeries]);
-  const stripeExactMrrGrowthByKey = useMemo(() => {
-    const out = new Map<string, number>();
-    stripeExactGrowthInputPoints.forEach((point, idx) => out.set(point.key, stripeExactMrrGrowthSeries[idx] || 0));
-    return out;
-  }, [stripeExactGrowthInputPoints, stripeExactMrrGrowthSeries]);
   const customerArrMatrixRows = useMemo(() => {
     const snapshotsByCustomer = new Map<string, Map<string, number>>();
     const periodKeys = new Set(customerPeriodColumns.map((column) => column.key));
@@ -1008,11 +1002,11 @@ export default function StripeBillingOverviewPage() {
             <div className="stripe-ui__stats">
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Current MRR</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.currentMrr, currency)}</p>
+                <p className="stripe-ui__stat-value">{formatMoney(currentMrr, currency)}</p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Current ARR</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.currentArr, currency)}</p>
+                <p className="stripe-ui__stat-value">{formatMoney(currentArr, currency)}</p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Points</p>
@@ -1038,7 +1032,16 @@ export default function StripeBillingOverviewPage() {
               stroke="#4f8df9"
             />
 
-            <GrowthBreakdownChart points={points} currency={currency} />
+            <GrowthBreakdownChart
+              points={points}
+              currency={currency}
+              subtitle={
+                hasStripeExactSeries
+                  ? "Stacked contributions for New, Reactivation, Expansion, Contraction, and Churn by period."
+                  : "Stacked contributions for New, Expansion, Contraction, and Churn by period."
+              }
+              includeReactivation={hasStripeExactSeries}
+            />
 
             <LineChartCard
               title="MRR Growth Rate Over Time"
@@ -1083,88 +1086,6 @@ export default function StripeBillingOverviewPage() {
               title="ARR Growth Over Time"
               subtitle="Absolute ARR change per period."
               points={points}
-              valueAccessor={(p) => p.arrGrowth}
-              valueFormatter={(v) => formatMoney(v, currency)}
-            />
-          </div>
-
-          <section className="stripe-ui__panel ui-reveal ui-reveal-3">
-            <h2 className="stripe-ui__panel-title">Stripe-Exact Logic (Official Event Classification)</h2>
-            <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-              Same chart set, but computed using Stripe&apos;s customer event classification on{" "}
-              <code>local_event_timestamp</code>: <code>ACTIVE_START</code>, <code>REACTIVATE</code>,{" "}
-              <code>ACTIVE_UPGRADE</code>, <code>ACTIVE_DOWNGRADE</code>, and <code>ACTIVE_END</code>.
-            </p>
-          </section>
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
-              gap: "0.95rem",
-              alignItems: "start",
-            }}
-          >
-            <LineChartCard
-              title="MRR Over Time (Stripe Exact)"
-              subtitle="MRR at the end of each selected period."
-              points={stripeExactPoints}
-              valueAccessor={(p) => p.mrrEnd}
-              valueFormatter={(v) => formatMoney(v, currency)}
-              stroke="#4f8df9"
-            />
-
-            <GrowthBreakdownChart
-              points={stripeExactPoints}
-              currency={currency}
-              title="Growth Breakdown (Stripe Exact)"
-              subtitle="Stacked contributions by Stripe event type (includes Reactivation)."
-              includeReactivation
-            />
-
-            <LineChartCard
-              title="MRR Growth Rate Over Time (Stripe Exact)"
-              subtitle={selectedGrowthWindow?.subtitle || "Period-over-period MRR growth rate."}
-              points={stripeExactPoints}
-              valueAccessor={(p) => stripeExactMrrGrowthByKey.get(p.key) || 0}
-              valueFormatter={(v) => formatPercent(v)}
-              stroke="#f59e0b"
-              includeZero
-              headerControl={
-                <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
-                  <label htmlFor="mrr-growth-window-exact" className="stripe-ui__hint">
-                    Growth window
-                  </label>
-                  <select
-                    id="mrr-growth-window-exact"
-                    className="stripe-ui__control"
-                    value={selectedGrowthWindow?.value || ""}
-                    onChange={(e) => setMrrGrowthWindow(e.target.value)}
-                    style={{ minWidth: "220px" }}
-                  >
-                    {growthWindowOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              }
-            />
-
-            <LineChartCard
-              title="ARR Over Time (Stripe Exact)"
-              subtitle="ARR = MRR x 12 at period end."
-              points={stripeExactPoints}
-              valueAccessor={(p) => p.arr}
-              valueFormatter={(v) => formatMoney(v, currency)}
-              stroke="#1fc16b"
-            />
-
-            <DeltaBarChartCard
-              title="ARR Growth Over Time (Stripe Exact)"
-              subtitle="Absolute ARR change per period."
-              points={stripeExactPoints}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => formatMoney(v, currency)}
             />

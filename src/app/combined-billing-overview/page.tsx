@@ -29,6 +29,7 @@ type StripeOverviewPoint = {
   periodEnd: string;
   mrrEnd: number;
   newMrr: number;
+  reactivationMrr?: number;
   expansionMrr: number;
   contractionMrr: number;
   churnMrr: number;
@@ -47,6 +48,8 @@ type StripeOverviewResponse = {
   currentArr: number;
   historyPoints?: StripeOverviewPoint[];
   points: StripeOverviewPoint[];
+  stripeExactHistoryPoints?: StripeOverviewPoint[];
+  stripeExactPoints?: StripeOverviewPoint[];
 };
 
 type HubspotChartRow = {
@@ -952,16 +955,21 @@ export default function CombinedBillingOverviewPage() {
         hubPointMap.set(canonicalHubPeriodKey(period.key, grain), hubPoints[idx]);
       });
 
+      const hasStripeExactSeries =
+        stripe.stripeExactPoints !== undefined || stripe.stripeExactHistoryPoints !== undefined;
+      const stripePoints = hasStripeExactSeries ? stripe.stripeExactPoints || [] : stripe.points || [];
+      const stripeHistoryPoints = hasStripeExactSeries ? stripe.stripeExactHistoryPoints || [] : stripe.historyPoints || [];
+
       const stripePointMap = new Map<string, StripeOverviewPoint>();
-      for (const point of stripe.points || []) {
+      for (const point of stripePoints) {
         stripePointMap.set(canonicalStripePeriodKey(point, grain), point);
       }
 
       const stripePrevMrr =
-        stripe.historyPoints && stripe.historyPoints.length > 0
-          ? stripe.historyPoints[stripe.historyPoints.length - 1].mrrEnd
-          : stripe.points && stripe.points.length > 0
-            ? round2(stripe.points[0].mrrEnd - stripe.points[0].netMrrChange)
+        stripeHistoryPoints.length > 0
+          ? stripeHistoryPoints[stripeHistoryPoints.length - 1].mrrEnd
+          : stripePoints.length > 0
+            ? round2(stripePoints[0].mrrEnd - stripePoints[0].netMrrChange)
             : 0;
       const hubBaselineArr = round2(
         Array.from(baselineAccountArrByAccount.values()).reduce((acc, value) => acc + value, 0),
@@ -973,6 +981,7 @@ export default function CombinedBillingOverviewPage() {
         const canonical = canonicalHubPeriodKey(period.key, grain);
         const hub = hubPointMap.get(canonical);
         const stripePoint = stripePointMap.get(canonical);
+        const stripeNewWithReactivation = round2((stripePoint?.newMrr || 0) + (stripePoint?.reactivationMrr || 0));
 
         const stripeFallbackStart =
           grain === "daily"
@@ -987,7 +996,7 @@ export default function CombinedBillingOverviewPage() {
           periodStart: stripePoint?.periodStart || hub?.periodStart || stripeFallbackStart,
           periodEnd: stripePoint?.periodEnd || hub?.periodEnd || stripeFallbackStart,
           mrrEnd: round2((hub?.mrrEnd || 0) + (stripePoint?.mrrEnd || 0)),
-          newMrr: round2((hub?.newMrr || 0) + (stripePoint?.newMrr || 0)),
+          newMrr: round2((hub?.newMrr || 0) + stripeNewWithReactivation),
           expansionMrr: round2((hub?.expansionMrr || 0) + (stripePoint?.expansionMrr || 0)),
           contractionMrr: round2((hub?.contractionMrr || 0) + (stripePoint?.contractionMrr || 0)),
           churnMrr: round2((hub?.churnMrr || 0) + (stripePoint?.churnMrr || 0)),
