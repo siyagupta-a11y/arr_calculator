@@ -451,7 +451,7 @@ export default function StripeArrCorrectPage() {
             <Link href="/stripe-billing-overview" className="stripe-ui__hero-link">
               Open Stripe Billing Overview
             </Link>
-            <Link href="/" className="stripe-ui__hero-link">
+            <Link href="/hubspot" className="stripe-ui__hero-link">
               Open HubSpot report
             </Link>
           </div>

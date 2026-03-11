@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import React, { useMemo, useState } from "react";
+import type { ReportResponse, ReportRow } from "@/lib/types";
 
-type Grain = "daily" | "weekly" | "monthly" | "quarterly";
+type CombinedGrain = "daily" | "monthly" | "quarterly";
 
-type OverviewPoint = {
+type CombinedPoint = {
   key: string;
   label: string;
   periodStart: string;
@@ -21,26 +22,250 @@ type OverviewPoint = {
   arrGrowth: number;
 };
 
-type OverviewCustomerArrRow = {
-  customerId: string;
-  periodKey: string;
-  periodLabel: string;
+type StripeOverviewPoint = {
+  key: string;
+  label: string;
   periodStart: string;
   periodEnd: string;
+  mrrEnd: number;
+  newMrr: number;
+  expansionMrr: number;
+  contractionMrr: number;
+  churnMrr: number;
+  netMrrChange: number;
+  mrrGrowthRatePct: number;
   arr: number;
+  arrGrowth: number;
 };
 
-type OverviewResponse = {
+type StripeOverviewResponse = {
   startDate: string;
   endDate: string;
-  grain: Grain;
+  grain: "daily" | "weekly" | "monthly" | "quarterly";
   targetCurrency: string;
   currentMrr: number;
   currentArr: number;
-  historyPoints?: OverviewPoint[];
-  points: OverviewPoint[];
-  customerArrRows?: OverviewCustomerArrRow[];
+  historyPoints?: StripeOverviewPoint[];
+  points: StripeOverviewPoint[];
 };
+
+type HubspotChartRow = {
+  accountId: string;
+  deploymentType: string;
+  valuesByPeriod: Record<string, number>;
+};
+
+type PeriodRef = {
+  key: string;
+  label: string;
+};
+
+type CombinedOverviewData = {
+  startDate: string;
+  endDate: string;
+  grain: CombinedGrain;
+  targetCurrency: string;
+  currentMrr: number;
+  currentArr: number;
+  points: CombinedPoint[];
+};
+
+function round2(n: number) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+function isCloudDeploymentType(value: string) {
+  return String(value || "").trim().toLowerCase() === "cloud";
+}
+
+function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
+  return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > 1e-9);
+}
+
+function parseIsoDateOnly(value: string) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]) - 1;
+  const day = Number(m[3]);
+  const d = new Date(Date.UTC(year, month, day));
+  if (
+    d.getUTCFullYear() !== year ||
+    d.getUTCMonth() !== month ||
+    d.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return d;
+}
+
+function toIsoDateOnly(d: Date) {
+  return d.toISOString().slice(0, 10);
+}
+
+function previousPeriodRangeForGrain(startDate: string, grain: CombinedGrain) {
+  const parsed = parseIsoDateOnly(startDate);
+  if (!parsed) return { startDate, endDate: startDate };
+
+  if (grain === "daily") {
+    const prevDay = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate() - 1));
+    const iso = toIsoDateOnly(prevDay);
+    return { startDate: iso, endDate: iso };
+  }
+
+  if (grain === "monthly") {
+    const prevMonthStart = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth() - 1, 1));
+    const prevMonthEnd = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), 0));
+    return { startDate: toIsoDateOnly(prevMonthStart), endDate: toIsoDateOnly(prevMonthEnd) };
+  }
+
+  const qStartMonth = Math.floor(parsed.getUTCMonth() / 3) * 3;
+  const prevQuarterStart = new Date(Date.UTC(parsed.getUTCFullYear(), qStartMonth - 3, 1));
+  const prevQuarterEnd = new Date(Date.UTC(parsed.getUTCFullYear(), qStartMonth, 0));
+  return { startDate: toIsoDateOnly(prevQuarterStart), endDate: toIsoDateOnly(prevQuarterEnd) };
+}
+
+function accountGroupingKey(row: HubspotChartRow) {
+  const raw = String(row.accountId || "").trim();
+  if (raw) {
+    const numericToken =
+      raw
+        .split(/[,\s;|]+/)
+        .map((part) => part.trim())
+        .find((part) => /^\d+$/.test(part)) || "";
+    if (numericToken) return numericToken;
+    return raw.toLowerCase();
+  }
+  return "";
+}
+
+function addAccountPeriodValues(
+  accountMap: Map<string, Record<string, number>>,
+  accountKey: string,
+  valuesByPeriod: Record<string, number>,
+  periodOrder: PeriodRef[],
+) {
+  if (!accountMap.has(accountKey)) accountMap.set(accountKey, {});
+  const bucket = accountMap.get(accountKey)!;
+  for (const period of periodOrder) {
+    bucket[period.key] = round2((bucket[period.key] || 0) + (valuesByPeriod[period.key] || 0));
+  }
+}
+
+function buildHubPointsFromAccounts(
+  periodOrder: PeriodRef[],
+  accountArrByPeriod: Map<string, Record<string, number>>,
+  baselineAccountArrByAccount: Map<string, number>,
+): CombinedPoint[] {
+  const totalByPeriodSelected = new Map<string, number>();
+  for (const accountTotals of accountArrByPeriod.values()) {
+    for (const [periodKey, value] of Object.entries(accountTotals)) {
+      totalByPeriodSelected.set(periodKey, round2((totalByPeriodSelected.get(periodKey) || 0) + (value || 0)));
+    }
+  }
+
+  const baselineArrTotal = round2(
+    Array.from(baselineAccountArrByAccount.values()).reduce((acc, value) => acc + value, 0),
+  );
+
+  return periodOrder.map((period, idx) => {
+    const prevPeriodKey = idx > 0 ? periodOrder[idx - 1].key : "";
+    const arr = round2(totalByPeriodSelected.get(period.key) || 0);
+    const mrrEnd = round2(arr / 12);
+    const prevArr = round2(
+      idx === 0
+        ? baselineArrTotal
+        : prevPeriodKey
+          ? totalByPeriodSelected.get(prevPeriodKey) || 0
+          : 0,
+    );
+    const prevMrr = round2(prevArr / 12);
+    const arrGrowth = round2(arr - prevArr);
+    const mrrGrowthRatePct =
+      Math.abs(prevMrr) > 1e-9
+        ? round2(((mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
+        : 0;
+
+    let newMrr = 0;
+    let expansionMrr = 0;
+    let contractionMrr = 0;
+    let churnMrr = 0;
+
+    for (const [accountKey, accountTotals] of accountArrByPeriod.entries()) {
+      const currArr = round2(accountTotals[period.key] || 0);
+      const prevAccountArr = round2(
+        idx === 0
+          ? baselineAccountArrByAccount.get(accountKey) || 0
+          : prevPeriodKey
+            ? accountTotals[prevPeriodKey] || 0
+            : 0,
+      );
+      const diffArr = round2(currArr - prevAccountArr);
+
+      const currHas = Math.abs(currArr) > 1e-9;
+      const prevHas = Math.abs(prevAccountArr) > 1e-9;
+      if (!currHas && !prevHas) continue;
+
+      if (!prevHas && currHas) {
+        newMrr = round2(newMrr + currArr / 12);
+        continue;
+      }
+
+      if (prevHas && !currHas) {
+        churnMrr = round2(churnMrr - prevAccountArr / 12);
+        continue;
+      }
+
+      if (diffArr > 1e-9) {
+        expansionMrr = round2(expansionMrr + diffArr / 12);
+      } else if (diffArr < -1e-9) {
+        contractionMrr = round2(contractionMrr + diffArr / 12);
+      }
+    }
+
+    const netMrrChange = round2(newMrr + expansionMrr + contractionMrr + churnMrr);
+
+    return {
+      key: period.key,
+      label: period.label,
+      periodStart: period.key,
+      periodEnd: period.key,
+      mrrEnd,
+      newMrr,
+      expansionMrr,
+      contractionMrr,
+      churnMrr,
+      netMrrChange,
+      mrrGrowthRatePct,
+      arr,
+      arrGrowth,
+    };
+  });
+}
+
+function quarterKeyFromIsoDate(isoDate: string) {
+  const parsed = parseIsoDateOnly(isoDate);
+  if (!parsed) return "";
+  const year = parsed.getUTCFullYear();
+  const quarter = Math.floor(parsed.getUTCMonth() / 3) + 1;
+  return `${year}-Q${quarter}`;
+}
+
+function canonicalHubPeriodKey(periodKey: string, grain: CombinedGrain) {
+  const key = String(periodKey || "").trim();
+  if (!key) return "";
+  if (grain === "daily") return key.slice(0, 10);
+  if (grain === "monthly") return key.slice(0, 7);
+  const m = /^(\d{4})-Q([1-4])$/i.exec(key);
+  if (m) return `${m[1]}-Q${m[2]}`;
+  return key;
+}
+
+function canonicalStripePeriodKey(point: StripeOverviewPoint, grain: CombinedGrain) {
+  if (grain === "daily") return String(point.periodStart || "").slice(0, 10);
+  if (grain === "monthly") return String(point.periodStart || "").slice(0, 7);
+  return quarterKeyFromIsoDate(String(point.periodStart || ""));
+}
 
 function defaultDateRange() {
   const end = new Date();
@@ -80,111 +305,14 @@ function tickIndices(size: number) {
   return Array.from(out).sort((a, b) => a - b);
 }
 
-type GrowthWindowOption = {
-  value: string;
-  label: string;
-  lookbackPeriods: number;
-  subtitle: string;
-};
-
-function growthWindowOptionsForGrain(grain: Grain): GrowthWindowOption[] {
-  if (grain === "daily") {
-    return [
-      {
-        value: "daily",
-        label: "Day over day (1 day)",
-        lookbackPeriods: 1,
-        subtitle: "Percent change in MRR versus 1 day earlier.",
-      },
-      {
-        value: "monthly",
-        label: "Trailing 30-day",
-        lookbackPeriods: 30,
-        subtitle: "Percent change in MRR versus 30 days earlier (trailing 30-day growth).",
-      },
-      {
-        value: "quarterly",
-        label: "Trailing 90-day",
-        lookbackPeriods: 90,
-        subtitle: "Percent change in MRR versus 90 days earlier (trailing quarter growth).",
-      },
-    ];
-  }
-
-  if (grain === "weekly") {
-    return [
-      {
-        value: "weekly",
-        label: "Week over week (1 week)",
-        lookbackPeriods: 1,
-        subtitle: "Percent change in MRR versus 1 week earlier.",
-      },
-      {
-        value: "monthly",
-        label: "Approx. month over month (4 weeks)",
-        lookbackPeriods: 4,
-        subtitle: "Percent change in MRR versus 4 weeks earlier.",
-      },
-      {
-        value: "quarterly",
-        label: "Approx. quarter over quarter (13 weeks)",
-        lookbackPeriods: 13,
-        subtitle: "Percent change in MRR versus 13 weeks earlier.",
-      },
-    ];
-  }
-
-  if (grain === "monthly") {
-    return [
-      {
-        value: "monthly",
-        label: "Month over month (1 month)",
-        lookbackPeriods: 1,
-        subtitle: "Percent change in MRR versus 1 month earlier.",
-      },
-      {
-        value: "quarterly",
-        label: "Quarter over quarter (3 months)",
-        lookbackPeriods: 3,
-        subtitle: "Percent change in MRR versus 3 months earlier.",
-      },
-    ];
-  }
-
-  return [
-    {
-      value: "quarterly",
-      label: "Quarter over quarter (1 quarter)",
-      lookbackPeriods: 1,
-      subtitle: "Percent change in MRR versus 1 quarter earlier.",
-    },
-  ];
-}
-
-function defaultGrowthWindowValue(grain: Grain) {
-  return growthWindowOptionsForGrain(grain)[0]?.value || "monthly";
-}
-
-function computeMrrGrowthRates(points: OverviewPoint[], lookbackPeriods: number) {
-  if (lookbackPeriods <= 0) return points.map(() => 0);
-  return points.map((point, idx) => {
-    const previous = points[idx - lookbackPeriods];
-    if (!previous) return 0;
-    if (Math.abs(previous.mrrEnd) < 1e-9) return 0;
-    const pct = ((point.mrrEnd - previous.mrrEnd) / Math.abs(previous.mrrEnd)) * 100;
-    return Math.round(pct * 100) / 100;
-  });
-}
-
 type LineChartProps = {
   title: string;
   subtitle: string;
-  points: OverviewPoint[];
-  valueAccessor: (point: OverviewPoint) => number;
+  points: CombinedPoint[];
+  valueAccessor: (point: CombinedPoint) => number;
   valueFormatter: (value: number) => string;
   stroke: string;
   includeZero?: boolean;
-  headerControl?: React.ReactNode;
 };
 
 function LineChartCard({
@@ -195,7 +323,6 @@ function LineChartCard({
   valueFormatter,
   stroke,
   includeZero = false,
-  headerControl,
 }: LineChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
@@ -234,7 +361,7 @@ function LineChartCard({
   const hoveredX = hoveredPoint && hoverIndex != null ? xAt(hoverIndex) : 0;
   const hoveredY = hoveredPoint ? yAt(hoveredValue) : 0;
 
-  const tooltipWidth = 210;
+  const tooltipWidth = 230;
   const tooltipHeight = 42;
   const tooltipX = Math.max(
     paddingLeft,
@@ -251,13 +378,10 @@ function LineChartCard({
             {subtitle}
           </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-          {headerControl}
-          <div className="stripe-ui__hint" aria-live="polite">
-            {hoveredPoint
-              ? `${hoveredPoint.label}: ${valueFormatter(hoveredValue)}`
-              : "Hover on chart for values"}
-          </div>
+        <div className="stripe-ui__hint" aria-live="polite">
+          {hoveredPoint
+            ? `${hoveredPoint.label}: ${valueFormatter(hoveredValue)}`
+            : "Hover on chart for values"}
         </div>
       </div>
 
@@ -294,8 +418,7 @@ function LineChartCard({
 
             {points.map((point, idx) => {
               const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
-              const right =
-                idx === points.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+              const right = idx === points.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
               return (
                 <rect
                   key={`hover-${point.key}`}
@@ -373,7 +496,7 @@ function LineChartCard({
 }
 
 type GrowthBreakdownChartProps = {
-  points: OverviewPoint[];
+  points: CombinedPoint[];
   currency: string;
 };
 
@@ -433,7 +556,7 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
         <div>
           <h2 className="stripe-ui__panel-title">Growth Breakdown</h2>
           <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-            Stacked contributions for New, Expansion, Contraction, and Churn by period.
+            Combined New, Expansion, Contraction, and Churn contributions (MRR).
           </p>
         </div>
         <div className="stripe-ui__hint" aria-live="polite">
@@ -583,8 +706,8 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
 type DeltaBarChartProps = {
   title: string;
   subtitle: string;
-  points: OverviewPoint[];
-  valueAccessor: (point: OverviewPoint) => number;
+  points: CombinedPoint[];
+  valueAccessor: (point: CombinedPoint) => number;
   valueFormatter: (value: number) => string;
 };
 
@@ -721,51 +844,179 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
   );
 }
 
-export default function StripeBillingOverviewPage() {
-  const customerPageSize = 100;
+export default function CombinedBillingOverviewPage() {
   const defaults = useMemo(() => defaultDateRange(), []);
 
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
-  const [grain, setGrain] = useState<Grain>("monthly");
-  const [mrrGrowthWindow, setMrrGrowthWindow] = useState<string>(defaultGrowthWindowValue("monthly"));
+  const [grain, setGrain] = useState<CombinedGrain>("monthly");
 
   const [loading, setLoading] = useState(false);
   const [hasRunOnce, setHasRunOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<OverviewResponse | null>(null);
-  const [customerPage, setCustomerPage] = useState(1);
+  const [data, setData] = useState<CombinedOverviewData | null>(null);
 
   async function run() {
     setHasRunOnce(true);
     setLoading(true);
     setError(null);
-    setCustomerPage(1);
 
     try {
-      const res = await fetch("/api/stripe-billing-overview-report", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startDate, endDate, grain }),
+      const fetchJson = async <T,>(url: string, payload: unknown): Promise<T> => {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        const text = await res.text();
+        let json: unknown = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch {
+          json = null;
+        }
+
+        if (!res.ok) {
+          if (json && typeof json === "object" && "error" in json) {
+            throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+          }
+          throw new Error(text || `HTTP ${res.status}`);
+        }
+
+        if (!json || typeof json !== "object") throw new Error("Invalid API response");
+        return json as T;
+      };
+
+      const previousRange = previousPeriodRangeForGrain(startDate, grain);
+      const hubspotPayload = { startDate, endDate, mode: "contracted", grain };
+      const hubspotBaselinePayload = {
+        startDate: previousRange.startDate,
+        endDate: previousRange.endDate,
+        mode: "contracted",
+        grain,
+      };
+      const stripePayload = { startDate, endDate, grain };
+
+      const [hubspotMain, hubspotBaseline, stripe] = await Promise.all([
+        fetchJson<ReportResponse>("/api/report", hubspotPayload),
+        fetchJson<ReportResponse>("/api/report", hubspotBaselinePayload),
+        fetchJson<StripeOverviewResponse>("/api/stripe-billing-overview-report", stripePayload),
+      ]);
+
+      const periodOrder: PeriodRef[] = (hubspotMain.periods || []).map((period) => ({
+        key: String(period.key || ""),
+        label: String(period.label || period.key || ""),
+      }));
+
+      const mapHubRows = (report: ReportResponse): HubspotChartRow[] =>
+        (report.rows || []).map((row: ReportRow) => ({
+          accountId: String(row.accountId || ""),
+          deploymentType: String(row.deploymentType || ""),
+          valuesByPeriod: row.valuesByPeriod || {},
+        }));
+
+      const filteredHubRows = mapHubRows(hubspotMain)
+        .filter((row) => isCloudDeploymentType(row.deploymentType))
+        .filter((row) => hasAnyNonZeroValue(row.valuesByPeriod));
+
+      const filteredBaselineRows = mapHubRows(hubspotBaseline)
+        .filter((row) => isCloudDeploymentType(row.deploymentType))
+        .filter((row) => hasAnyNonZeroValue(row.valuesByPeriod));
+
+      const accountArrByPeriod = new Map<string, Record<string, number>>();
+      for (const row of filteredHubRows) {
+        const accountKey = accountGroupingKey(row);
+        if (!accountKey) continue;
+        addAccountPeriodValues(accountArrByPeriod, accountKey, row.valuesByPeriod, periodOrder);
+      }
+
+      const baselineAccountArrByAccount = new Map<string, number>();
+      const baselinePeriodKeys = (hubspotBaseline.periods || []).map((period) => period.key);
+      for (const row of filteredBaselineRows) {
+        const accountKey = accountGroupingKey(row);
+        if (!accountKey) continue;
+        const rowBaselineArr = round2(
+          baselinePeriodKeys.reduce((acc, periodKey) => acc + (row.valuesByPeriod[periodKey] || 0), 0),
+        );
+        if (Math.abs(rowBaselineArr) < 1e-9) continue;
+        baselineAccountArrByAccount.set(
+          accountKey,
+          round2((baselineAccountArrByAccount.get(accountKey) || 0) + rowBaselineArr),
+        );
+      }
+
+      const hubPoints = buildHubPointsFromAccounts(periodOrder, accountArrByPeriod, baselineAccountArrByAccount);
+      const hubPointMap = new Map<string, CombinedPoint>();
+      periodOrder.forEach((period, idx) => {
+        hubPointMap.set(canonicalHubPeriodKey(period.key, grain), hubPoints[idx]);
       });
 
-      const text = await res.text();
-      let json: unknown = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
+      const stripePointMap = new Map<string, StripeOverviewPoint>();
+      for (const point of stripe.points || []) {
+        stripePointMap.set(canonicalStripePeriodKey(point, grain), point);
       }
 
-      if (!res.ok) {
-        if (json && typeof json === "object" && "error" in json) {
-          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
-        }
-        throw new Error(text || `HTTP ${res.status}`);
-      }
+      const stripePrevMrr =
+        stripe.historyPoints && stripe.historyPoints.length > 0
+          ? stripe.historyPoints[stripe.historyPoints.length - 1].mrrEnd
+          : stripe.points && stripe.points.length > 0
+            ? round2(stripe.points[0].mrrEnd - stripe.points[0].netMrrChange)
+            : 0;
+      const hubBaselineArr = round2(
+        Array.from(baselineAccountArrByAccount.values()).reduce((acc, value) => acc + value, 0),
+      );
+      const hubPrevMrr = round2(hubBaselineArr / 12);
+      const initialPrevCombinedMrr = round2(stripePrevMrr + hubPrevMrr);
 
-      if (!json || typeof json !== "object") throw new Error("Invalid API response");
-      setData(json as OverviewResponse);
+      const rawCombined: CombinedPoint[] = periodOrder.map((period) => {
+        const canonical = canonicalHubPeriodKey(period.key, grain);
+        const hub = hubPointMap.get(canonical);
+        const stripePoint = stripePointMap.get(canonical);
+
+        const stripeFallbackStart =
+          grain === "daily"
+            ? period.key
+            : grain === "monthly"
+              ? `${period.key}-01`
+              : stripePoint?.periodStart || period.key;
+
+        return {
+          key: canonical || period.key,
+          label: period.label,
+          periodStart: stripePoint?.periodStart || hub?.periodStart || stripeFallbackStart,
+          periodEnd: stripePoint?.periodEnd || hub?.periodEnd || stripeFallbackStart,
+          mrrEnd: round2((hub?.mrrEnd || 0) + (stripePoint?.mrrEnd || 0)),
+          newMrr: round2((hub?.newMrr || 0) + (stripePoint?.newMrr || 0)),
+          expansionMrr: round2((hub?.expansionMrr || 0) + (stripePoint?.expansionMrr || 0)),
+          contractionMrr: round2((hub?.contractionMrr || 0) + (stripePoint?.contractionMrr || 0)),
+          churnMrr: round2((hub?.churnMrr || 0) + (stripePoint?.churnMrr || 0)),
+          netMrrChange: round2((hub?.netMrrChange || 0) + (stripePoint?.netMrrChange || 0)),
+          mrrGrowthRatePct: 0,
+          arr: round2((hub?.arr || 0) + (stripePoint?.arr || 0)),
+          arrGrowth: round2((hub?.arrGrowth || 0) + (stripePoint?.arrGrowth || 0)),
+        };
+      });
+
+      const combinedPoints = rawCombined.map((point, idx) => {
+        const prevMrr = idx === 0 ? initialPrevCombinedMrr : rawCombined[idx - 1].mrrEnd;
+        const mrrGrowthRatePct = Math.abs(prevMrr) > 1e-9
+          ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
+          : 0;
+        return { ...point, mrrGrowthRatePct };
+      });
+
+      const currentMrr = combinedPoints.length ? combinedPoints[combinedPoints.length - 1].mrrEnd : 0;
+
+      setData({
+        startDate,
+        endDate,
+        grain,
+        targetCurrency: String(stripe.targetCurrency || "USD").toUpperCase(),
+        currentMrr,
+        currentArr: round2(currentMrr * 12),
+        points: combinedPoints,
+      });
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -774,73 +1025,7 @@ export default function StripeBillingOverviewPage() {
   }
 
   const points = useMemo(() => data?.points ?? [], [data]);
-  const historyPoints = useMemo(() => data?.historyPoints ?? [], [data]);
-  const customerArrRows = useMemo(() => data?.customerArrRows ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
-  const growthInputPoints = useMemo(() => [...historyPoints, ...points], [historyPoints, points]);
-  const customerPeriodColumns = useMemo(
-    () => points.map((point) => ({ key: point.key, label: point.label })),
-    [points],
-  );
-  const growthWindowOptions = useMemo(() => growthWindowOptionsForGrain(grain), [grain]);
-  const selectedGrowthWindow = useMemo(
-    () => growthWindowOptions.find((option) => option.value === mrrGrowthWindow) || growthWindowOptions[0],
-    [growthWindowOptions, mrrGrowthWindow],
-  );
-  const selectedGrowthLookback = selectedGrowthWindow?.lookbackPeriods || 1;
-  const mrrGrowthSeries = useMemo(
-    () => computeMrrGrowthRates(growthInputPoints, selectedGrowthLookback),
-    [growthInputPoints, selectedGrowthLookback],
-  );
-  const mrrGrowthByKey = useMemo(() => {
-    const out = new Map<string, number>();
-    growthInputPoints.forEach((point, idx) => out.set(point.key, mrrGrowthSeries[idx] || 0));
-    return out;
-  }, [growthInputPoints, mrrGrowthSeries]);
-  const customerArrMatrixRows = useMemo(() => {
-    const snapshotsByCustomer = new Map<string, Map<string, number>>();
-    const periodKeys = new Set(customerPeriodColumns.map((column) => column.key));
-
-    for (const row of customerArrRows) {
-      if (!periodKeys.has(row.periodKey)) continue;
-      const customerId = row.customerId || "(blank)";
-      const existing = snapshotsByCustomer.get(customerId) || new Map<string, number>();
-      existing.set(row.periodKey, row.arr);
-      snapshotsByCustomer.set(customerId, existing);
-    }
-
-    const latestPeriodKey = customerPeriodColumns[customerPeriodColumns.length - 1]?.key || "";
-    return Array.from(snapshotsByCustomer.entries())
-      .map(([customerId, snapshotsByPeriod]) => {
-        const valuesByPeriod = new Map<string, number>();
-        let currentArr = 0;
-        for (const column of customerPeriodColumns) {
-          if (snapshotsByPeriod.has(column.key)) {
-            currentArr = snapshotsByPeriod.get(column.key) || 0;
-          }
-          valuesByPeriod.set(column.key, currentArr);
-        }
-        const latestArr = latestPeriodKey ? valuesByPeriod.get(latestPeriodKey) || 0 : 0;
-        const totalArr = customerPeriodColumns.reduce((sum, column) => sum + (valuesByPeriod.get(column.key) || 0), 0);
-        return {
-          customerId,
-          valuesByPeriod,
-          latestArr,
-          totalArr,
-        };
-      })
-      .sort((a, b) => {
-        if (Math.abs(b.latestArr - a.latestArr) > 1e-9) return b.latestArr - a.latestArr;
-        if (Math.abs(b.totalArr - a.totalArr) > 1e-9) return b.totalArr - a.totalArr;
-        return a.customerId.localeCompare(b.customerId);
-      });
-  }, [customerArrRows, customerPeriodColumns]);
-  const totalCustomerPages = Math.max(1, Math.ceil(customerArrMatrixRows.length / customerPageSize));
-  const clampedCustomerPage = Math.min(customerPage, totalCustomerPages);
-  const customerRowsOnPage = useMemo(() => {
-    const start = (clampedCustomerPage - 1) * customerPageSize;
-    return customerArrMatrixRows.slice(start, start + customerPageSize);
-  }, [clampedCustomerPage, customerArrMatrixRows, customerPageSize]);
 
   return (
     <div className="stripe-ui">
@@ -848,21 +1033,24 @@ export default function StripeBillingOverviewPage() {
         <div className="stripe-ui__eyebrow">Revenue intelligence</div>
         <div className="stripe-ui__hero-row">
           <div>
-            <h1 className="stripe-ui__title">Stripe Billing Overview</h1>
+            <h1 className="stripe-ui__title">Combined Billing Overview</h1>
             <p className="stripe-ui__subtitle">
-              Trend dashboard for MRR, growth components, MRR growth rate, ARR, and ARR growth using customer-level
-              MRR transitions from Stripe MRR change events.
+              Combined billing trends where each metric is HubSpot (contracted ARR cloud-only method) + Stripe Billing
+              Overview (Stripe method) for the same period.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Link href="/hubspot" className="stripe-ui__hero-link">
+              Open HubSpot report
+            </Link>
+            <Link href="/stripe-billing-overview" className="stripe-ui__hero-link">
+              Open Stripe Billing Overview
+            </Link>
             <Link href="/stripe-arr-correct" className="stripe-ui__hero-link">
               Open Stripe ARR (Correct)
             </Link>
             <Link href="/stripe-through-mrr" className="stripe-ui__hero-link">
               Open Stripe through MRR
-            </Link>
-            <Link href="/hubspot" className="stripe-ui__hero-link">
-              Open HubSpot report
             </Link>
           </div>
         </div>
@@ -870,15 +1058,15 @@ export default function StripeBillingOverviewPage() {
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Controls</h2>
-        <p className="stripe-ui__panel-subtitle">Choose date range and time grain, then load charted metrics.</p>
+        <p className="stripe-ui__panel-subtitle">Choose date range and grain, then load combined metrics.</p>
 
         <div className="stripe-ui__control-grid">
           <div className="stripe-ui__field">
-            <label className="stripe-ui__field-label" htmlFor="stripe-billing-start-date">
+            <label className="stripe-ui__field-label" htmlFor="combined-start-date">
               Start date
             </label>
             <input
-              id="stripe-billing-start-date"
+              id="combined-start-date"
               className="stripe-ui__control"
               type="date"
               value={startDate}
@@ -887,11 +1075,11 @@ export default function StripeBillingOverviewPage() {
           </div>
 
           <div className="stripe-ui__field">
-            <label className="stripe-ui__field-label" htmlFor="stripe-billing-end-date">
+            <label className="stripe-ui__field-label" htmlFor="combined-end-date">
               End date
             </label>
             <input
-              id="stripe-billing-end-date"
+              id="combined-end-date"
               className="stripe-ui__control"
               type="date"
               value={endDate}
@@ -900,31 +1088,26 @@ export default function StripeBillingOverviewPage() {
           </div>
 
           <div className="stripe-ui__field">
-            <label className="stripe-ui__field-label" htmlFor="stripe-billing-grain">
+            <label className="stripe-ui__field-label" htmlFor="combined-grain">
               Time grain
             </label>
             <select
-              id="stripe-billing-grain"
+              id="combined-grain"
               className="stripe-ui__control"
               value={grain}
-              onChange={(e) => {
-                const next = e.target.value as Grain;
-                setGrain(next);
-                setMrrGrowthWindow(defaultGrowthWindowValue(next));
-              }}
+              onChange={(e) => setGrain(e.target.value as CombinedGrain)}
             >
               <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
               <option value="monthly">Monthly</option>
               <option value="quarterly">Quarterly</option>
             </select>
           </div>
 
           <div className="stripe-ui__field">
-            <label className="stripe-ui__field-label" htmlFor="stripe-billing-run">
+            <label className="stripe-ui__field-label" htmlFor="combined-run">
               Load charts
             </label>
-            <button id="stripe-billing-run" className="stripe-ui__btn stripe-ui__btn--primary" onClick={run} disabled={loading}>
+            <button id="combined-run" className="stripe-ui__btn stripe-ui__btn--primary" onClick={run} disabled={loading}>
               {loading ? "Loading..." : "Run"}
             </button>
           </div>
@@ -934,7 +1117,7 @@ export default function StripeBillingOverviewPage() {
       {loading && (
         <section className="stripe-ui__panel stripe-ui__loading-panel ui-reveal ui-reveal-2" aria-live="polite" aria-busy="true">
           <h2 className="stripe-ui__panel-title">Loading charts...</h2>
-          <p className="stripe-ui__panel-subtitle">Querying Stripe MRR change series and rendering visuals.</p>
+          <p className="stripe-ui__panel-subtitle">Querying Stripe and HubSpot sources and combining metrics.</p>
           <div className="stripe-ui__skeleton-grid">
             <div className="stripe-ui__skeleton-row" />
             <div className="stripe-ui__skeleton-row" />
@@ -983,7 +1166,7 @@ export default function StripeBillingOverviewPage() {
           >
             <LineChartCard
               title="MRR Over Time"
-              subtitle="MRR at the end of each selected period."
+              subtitle="Combined MRR at period end (HubSpot method + Stripe method)."
               points={points}
               valueAccessor={(p) => p.mrrEnd}
               valueFormatter={(v) => formatMoney(v, currency)}
@@ -994,37 +1177,17 @@ export default function StripeBillingOverviewPage() {
 
             <LineChartCard
               title="MRR Growth Rate Over Time"
-              subtitle={selectedGrowthWindow?.subtitle || "Period-over-period MRR growth rate."}
+              subtitle="Period-over-period combined MRR growth rate."
               points={points}
-              valueAccessor={(p) => mrrGrowthByKey.get(p.key) || 0}
+              valueAccessor={(p) => p.mrrGrowthRatePct}
               valueFormatter={(v) => formatPercent(v)}
               stroke="#f59e0b"
               includeZero
-              headerControl={
-                <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
-                  <label htmlFor="mrr-growth-window" className="stripe-ui__hint">
-                    Growth window
-                  </label>
-                  <select
-                    id="mrr-growth-window"
-                    className="stripe-ui__control"
-                    value={selectedGrowthWindow?.value || ""}
-                    onChange={(e) => setMrrGrowthWindow(e.target.value)}
-                    style={{ minWidth: "220px" }}
-                  >
-                    {growthWindowOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              }
             />
 
             <LineChartCard
               title="ARR Over Time"
-              subtitle="ARR = MRR x 12 at period end."
+              subtitle="Combined ARR at period end."
               points={points}
               valueAccessor={(p) => p.arr}
               valueFormatter={(v) => formatMoney(v, currency)}
@@ -1033,88 +1196,12 @@ export default function StripeBillingOverviewPage() {
 
             <DeltaBarChartCard
               title="ARR Growth Over Time"
-              subtitle="Absolute ARR change per period."
+              subtitle="Absolute combined ARR change per period."
               points={points}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => formatMoney(v, currency)}
             />
           </div>
-
-          <section className="stripe-ui__panel ui-reveal ui-reveal-3">
-            <div className="stripe-ui__section-head">
-              <div>
-                <h2 className="stripe-ui__panel-title">Customer ARR by Period</h2>
-                <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-                  ARR per customer at each period end (ARR = customer MRR x 12).
-                </p>
-              </div>
-              <div className="stripe-ui__hint">{`${customerArrMatrixRows.length} customers`}</div>
-            </div>
-
-            {customerPeriodColumns.length === 0 || customerArrMatrixRows.length === 0 ? (
-              <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.9rem", marginBottom: 0 }}>
-                No customer ARR rows for selected range.
-              </p>
-            ) : (
-              <>
-                <div className="stripe-ui__toolbar">
-                  <div className="stripe-ui__toolbar-group">
-                    <span className="stripe-ui__hint">{`Page ${clampedCustomerPage} of ${totalCustomerPages}`}</span>
-                    <span className="stripe-ui__hint">{`${customerArrMatrixRows.length} rows`}</span>
-                  </div>
-                  <div className="stripe-ui__toolbar-group">
-                    <button
-                      className="stripe-ui__btn stripe-ui__btn--ghost"
-                      onClick={() => setCustomerPage((prev) => Math.max(1, prev - 1))}
-                      disabled={clampedCustomerPage <= 1}
-                    >
-                      Prev
-                    </button>
-                    <button
-                      className="stripe-ui__btn stripe-ui__btn--ghost"
-                      onClick={() => setCustomerPage((prev) => Math.min(totalCustomerPages, prev + 1))}
-                      disabled={clampedCustomerPage >= totalCustomerPages}
-                    >
-                      Next
-                    </button>
-                  </div>
-                </div>
-
-                <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
-                <table className="stripe-ui__table" aria-label="Customer ARR by period table">
-                  <thead>
-                    <tr>
-                      <th>Customer</th>
-                      {customerPeriodColumns.map((column) => (
-                        <th key={column.key} className="stripe-ui__num">
-                          {column.label}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {customerRowsOnPage.map((row) => (
-                      <tr key={row.customerId}>
-                        <td>{row.customerId || "(blank)"}</td>
-                        {customerPeriodColumns.map((column) => {
-                          const value = row.valuesByPeriod.get(column.key) || 0;
-                          return (
-                            <td
-                              key={`${row.customerId}:${column.key}`}
-                              className={`stripe-ui__num ${value < 0 ? "stripe-ui__money--negative" : ""}`}
-                            >
-                              {formatMoney(value, currency)}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                </div>
-              </>
-            )}
-          </section>
         </>
       )}
 
