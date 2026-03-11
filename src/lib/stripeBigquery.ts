@@ -2664,26 +2664,39 @@ products_lookup AS (
     ) AS product_description_table
   FROM \`${productsTable}\`
 ),
-events_with_group AS (
+events_enriched AS (
   SELECT
     pe.local_event_timestamp,
     pe.customer_id,
     pe.mrr_change_major,
+    pe.price_id,
+    pe.product_id,
+    pe.subscription_id,
+    pe.subscription_item_id,
     COALESCE(
       NULLIF(TRIM(pl.product_description_table), ''),
       NULLIF(TRIM(pe.product_description_event), ''),
       '(blank)'
     ) AS product_description,
-    COALESCE(NULLIF(TRIM(pe.price_description_event), ''), '(blank)') AS price_description,
-    pe.price_id,
-    pe.product_id,
-    pe.subscription_id,
-    pe.subscription_item_id,
-    ${groupKeyExpr} AS group_key,
-    ${groupLabelExpr} AS group_label
+    COALESCE(NULLIF(TRIM(pe.price_description_event), ''), '(blank)') AS price_description
   FROM parsed_events pe
   LEFT JOIN products_lookup pl
     ON pl.product_id = pe.product_id
+),
+events_with_group AS (
+  SELECT
+    ee.local_event_timestamp,
+    ee.customer_id,
+    ee.mrr_change_major,
+    ee.product_description,
+    ee.price_description,
+    ee.price_id,
+    ee.product_id,
+    ee.subscription_id,
+    ee.subscription_item_id,
+    ${groupKeyExpr} AS group_key,
+    ${groupLabelExpr} AS group_label
+  FROM events_enriched ee
 ),
 selected_groups AS (
   SELECT
