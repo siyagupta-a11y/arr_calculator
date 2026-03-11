@@ -1,9 +1,30 @@
 "use client";
 
 import Link from "next/link";
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 type Grain = "daily" | "weekly" | "monthly" | "quarterly";
+type ChartGroupBy = "none" | "product_id" | "price_id" | "subscription_item_id" | "subscription_id" | "customer_id";
+
+const CHART_GROUP_OPTIONS: Array<{ key: ChartGroupBy; label: string }> = [
+  { key: "none", label: "Overall" },
+  { key: "product_id", label: "Product ID" },
+  { key: "price_id", label: "Price ID" },
+  { key: "subscription_item_id", label: "Subscription Item ID" },
+  { key: "subscription_id", label: "Subscription ID" },
+  { key: "customer_id", label: "Customer ID" },
+];
+
+const GROUP_LINE_COLORS = [
+  "#4f8df9",
+  "#1fc16b",
+  "#f59e0b",
+  "#ef4444",
+  "#14b8a6",
+  "#a78bfa",
+  "#f97316",
+  "#22c55e",
+];
 
 type OverviewPoint = {
   key: string;
@@ -31,10 +52,18 @@ type OverviewCustomerArrRow = {
   arr: number;
 };
 
+type OverviewGroupedSeries = {
+  groupKey: string;
+  groupLabel: string;
+  historyPoints?: OverviewPoint[];
+  points: OverviewPoint[];
+};
+
 type OverviewResponse = {
   startDate: string;
   endDate: string;
   grain: Grain;
+  groupBy?: ChartGroupBy;
   targetCurrency: string;
   currentMrr: number;
   currentArr: number;
@@ -42,6 +71,7 @@ type OverviewResponse = {
   points: OverviewPoint[];
   stripeExactHistoryPoints?: OverviewPoint[];
   stripeExactPoints?: OverviewPoint[];
+  groupedSeries?: OverviewGroupedSeries[];
   customerArrRows?: OverviewCustomerArrRow[];
 };
 
@@ -370,6 +400,222 @@ function LineChartCard({
             </text>
           </svg>
         </div>
+      )}
+    </section>
+  );
+}
+
+type OverviewGroupSeriesForChart = {
+  key: string;
+  label: string;
+  points: OverviewPoint[];
+  color: string;
+};
+
+type MultiLineChartProps = {
+  title: string;
+  subtitle: string;
+  periods: Array<{ key: string; label: string }>;
+  series: OverviewGroupSeriesForChart[];
+  valueAccessor: (point: OverviewPoint) => number;
+  valueFormatter: (value: number) => string;
+  includeZero?: boolean;
+  headerControl?: React.ReactNode;
+};
+
+function MultiLineChartCard({
+  title,
+  subtitle,
+  periods,
+  series,
+  valueAccessor,
+  valueFormatter,
+  includeZero = false,
+  headerControl,
+}: MultiLineChartProps) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  const width = 640;
+  const height = 250;
+  const paddingLeft = 116;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 42;
+  const plotWidth = width - paddingLeft - paddingRight;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  const values = series.flatMap((group) => group.points.map((point) => valueAccessor(point)));
+  const minRaw = values.length ? Math.min(...values) : 0;
+  const maxRaw = values.length ? Math.max(...values) : 1;
+  let minValue = includeZero ? Math.min(minRaw, 0) : minRaw;
+  let maxValue = includeZero ? Math.max(maxRaw, 0) : maxRaw;
+  if (Math.abs(maxValue - minValue) < 1e-9) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+
+  const xAt = (idx: number) => {
+    if (periods.length <= 1) return paddingLeft + plotWidth / 2;
+    return paddingLeft + (idx / (periods.length - 1)) * plotWidth;
+  };
+  const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+
+  const hoveredPeriod = hoverIndex != null && hoverIndex >= 0 && hoverIndex < periods.length ? periods[hoverIndex] : null;
+
+  return (
+    <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+      <div className="stripe-ui__section-head">
+        <div>
+          <h2 className="stripe-ui__panel-title">{title}</h2>
+          <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+            {subtitle}
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          {headerControl}
+          <div className="stripe-ui__hint" aria-live="polite">
+            {hoveredPeriod ? hoveredPeriod.label : "Hover on chart for values"}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginTop: "0.7rem" }}>
+        {series.map((group) => (
+          <span key={`legend-${group.key}`} className="stripe-ui__hint" style={{ color: group.color }}>
+            {group.label}
+          </span>
+        ))}
+      </div>
+
+      {periods.length === 0 || series.length === 0 ? (
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>
+          No data for selected range.
+        </p>
+      ) : (
+        <>
+          <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
+            <svg
+              viewBox={`0 0 ${width} ${height}`}
+              role="img"
+              aria-label={title}
+              style={{ width: "100%", display: "block" }}
+              onMouseLeave={() => setHoverIndex(null)}
+              onMouseMove={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const relX = ((e.clientX - rect.left) / rect.width) * width;
+                const clamped = Math.max(paddingLeft, Math.min(paddingLeft + plotWidth, relX));
+                const ratio = periods.length > 1 ? (clamped - paddingLeft) / plotWidth : 0;
+                const idx = Math.max(0, Math.min(periods.length - 1, Math.round(ratio * Math.max(periods.length - 1, 0))));
+                setHoverIndex(idx);
+              }}
+            >
+              <line
+                x1={paddingLeft}
+                y1={paddingTop + plotHeight}
+                x2={paddingLeft + plotWidth}
+                y2={paddingTop + plotHeight}
+                stroke="#36557f"
+                strokeWidth={1}
+              />
+              <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#36557f" strokeWidth={1} />
+
+              {periods.map((period, idx) => {
+                const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
+                const right = idx === periods.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+                return (
+                  <rect
+                    key={`hover-${period.key}`}
+                    x={left}
+                    y={paddingTop}
+                    width={Math.max(1, right - left)}
+                    height={plotHeight}
+                    fill="transparent"
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                );
+              })}
+
+              {series.map((group) => {
+                const pathD = group.points
+                  .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(valueAccessor(point))}`)
+                  .join(" ");
+                return (
+                  <path
+                    key={`path-${group.key}`}
+                    d={pathD}
+                    fill="none"
+                    stroke={group.color}
+                    strokeWidth={2.3}
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                );
+              })}
+
+              {hoverIndex != null && periods[hoverIndex] && (
+                <line
+                  x1={xAt(hoverIndex)}
+                  y1={paddingTop}
+                  x2={xAt(hoverIndex)}
+                  y2={paddingTop + plotHeight}
+                  stroke="#89a9d4"
+                  strokeOpacity={0.5}
+                  strokeDasharray="4 4"
+                />
+              )}
+
+              {series.map((group) =>
+                group.points.map((point, idx) => (
+                  <circle
+                    key={`${group.key}:${point.key}`}
+                    cx={xAt(idx)}
+                    cy={yAt(valueAccessor(point))}
+                    r={hoverIndex === idx ? 3.8 : 2.6}
+                    fill={group.color}
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                )),
+              )}
+
+              {tickIndices(periods.length).map((idx) => (
+                <text
+                  key={`tick-${idx}`}
+                  x={xAt(idx)}
+                  y={height - 12}
+                  textAnchor={idx === 0 ? "start" : idx === periods.length - 1 ? "end" : "middle"}
+                  fill="#b7c9e6"
+                  fontSize="12"
+                >
+                  {periods[idx]?.label || ""}
+                </text>
+              ))}
+
+              <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#8ea7cb" fontSize="12">
+                {valueFormatter(maxValue)}
+              </text>
+              <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#8ea7cb" fontSize="12">
+                {valueFormatter(minValue)}
+              </text>
+            </svg>
+          </div>
+
+          {hoveredPeriod && hoverIndex != null && (
+            <div className="stripe-ui__panel" style={{ marginTop: "0.8rem", padding: "0.75rem" }}>
+              <div className="stripe-ui__hint" style={{ marginBottom: "0.35rem" }}>
+                {hoveredPeriod.label}
+              </div>
+              {series.map((group) => {
+                const point = group.points[hoverIndex];
+                const value = point ? valueAccessor(point) : 0;
+                return (
+                  <div key={`hover-value-${group.key}`} className="stripe-ui__hint" style={{ color: group.color }}>
+                    {group.label}: {valueFormatter(value)}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
     </section>
   );
@@ -761,6 +1007,8 @@ export default function StripeBillingOverviewPage() {
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
   const [grain, setGrain] = useState<Grain>("monthly");
+  const [chartGroupBy, setChartGroupBy] = useState<ChartGroupBy>("none");
+  const [selectedBarGroupKey, setSelectedBarGroupKey] = useState<string>("");
   const [mrrGrowthWindow, setMrrGrowthWindow] = useState<string>(defaultGrowthWindowValue("monthly"));
 
   const [loading, setLoading] = useState(false);
@@ -779,7 +1027,7 @@ export default function StripeBillingOverviewPage() {
       const res = await fetch("/api/stripe-billing-overview-report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startDate, endDate, grain }),
+        body: JSON.stringify({ startDate, endDate, grain, groupBy: chartGroupBy }),
       });
 
       const text = await res.text();
@@ -839,6 +1087,55 @@ export default function StripeBillingOverviewPage() {
     growthInputPoints.forEach((point, idx) => out.set(point.key, mrrGrowthSeries[idx] || 0));
     return out;
   }, [growthInputPoints, mrrGrowthSeries]);
+  const groupedSeries = useMemo(() => data?.groupedSeries ?? [], [data]);
+  const groupedLineSeries = useMemo(
+    () =>
+      groupedSeries.map((series, idx) => ({
+        key: series.groupKey,
+        label: series.groupLabel,
+        points: series.points || [],
+        color: GROUP_LINE_COLORS[idx % GROUP_LINE_COLORS.length],
+      })),
+    [groupedSeries],
+  );
+  const groupedGrowthLineSeries = useMemo(
+    () =>
+      groupedSeries.map((series, idx) => {
+        const history = series.historyPoints || [];
+        const periodPoints = series.points || [];
+        const input = [...history, ...periodPoints];
+        const growthRates = computeMrrGrowthRates(input, selectedGrowthLookback);
+        const growthByKey = new Map<string, number>();
+        input.forEach((point, pointIdx) => growthByKey.set(point.key, growthRates[pointIdx] || 0));
+        return {
+          key: series.groupKey,
+          label: series.groupLabel,
+          points: periodPoints.map((point) => ({ ...point, mrrGrowthRatePct: growthByKey.get(point.key) || 0 })),
+          color: GROUP_LINE_COLORS[idx % GROUP_LINE_COLORS.length],
+        };
+      }),
+    [groupedSeries, selectedGrowthLookback],
+  );
+  const chartGroupingEnabled = chartGroupBy !== "none" && groupedLineSeries.length > 0;
+  const selectedBarSeries = useMemo(() => {
+    if (!chartGroupingEnabled) return null;
+    return groupedLineSeries.find((series) => series.key === selectedBarGroupKey) || groupedLineSeries[0] || null;
+  }, [chartGroupingEnabled, groupedLineSeries, selectedBarGroupKey]);
+  const barChartPoints = selectedBarSeries?.points || points;
+  const chartGroupingLabel = CHART_GROUP_OPTIONS.find((option) => option.key === chartGroupBy)?.label || "Overall";
+  const chartPeriods = useMemo(
+    () => points.map((point) => ({ key: point.key, label: point.label })),
+    [points],
+  );
+  useEffect(() => {
+    if (!chartGroupingEnabled) {
+      if (selectedBarGroupKey !== "") setSelectedBarGroupKey("");
+      return;
+    }
+    if (!groupedLineSeries.some((series) => series.key === selectedBarGroupKey)) {
+      setSelectedBarGroupKey(groupedLineSeries[0]?.key || "");
+    }
+  }, [chartGroupingEnabled, groupedLineSeries, selectedBarGroupKey]);
   const customerArrMatrixRows = useMemo(() => {
     const snapshotsByCustomer = new Map<string, Map<string, number>>();
     const periodKeys = new Set(customerPeriodColumns.map((column) => column.key));
@@ -963,6 +1260,24 @@ export default function StripeBillingOverviewPage() {
           </div>
 
           <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="stripe-billing-chart-group">
+              Chart grouping
+            </label>
+            <select
+              id="stripe-billing-chart-group"
+              className="stripe-ui__control"
+              value={chartGroupBy}
+              onChange={(e) => setChartGroupBy(e.target.value as ChartGroupBy)}
+            >
+              {CHART_GROUP_OPTIONS.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="stripe-ui__field">
             <label className="stripe-ui__field-label" htmlFor="stripe-billing-run">
               Load charts
             </label>
@@ -1015,6 +1330,40 @@ export default function StripeBillingOverviewPage() {
             </div>
           </section>
 
+          {chartGroupingEnabled && (
+            <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+              <div className="stripe-ui__section-head">
+                <div>
+                  <h2 className="stripe-ui__panel-title">Grouped Charts</h2>
+                  <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                    Line charts are split by {chartGroupingLabel.toLowerCase()}. Bar charts use a selected group view.
+                  </p>
+                </div>
+                <div className="stripe-ui__hint">{`${groupedLineSeries.length} groups shown`}</div>
+              </div>
+
+              <div className="stripe-ui__control-grid" style={{ marginTop: "0.8rem" }}>
+                <div className="stripe-ui__field">
+                  <label className="stripe-ui__field-label" htmlFor="stripe-billing-bar-group-select">
+                    Bar chart group
+                  </label>
+                  <select
+                    id="stripe-billing-bar-group-select"
+                    className="stripe-ui__control"
+                    value={selectedBarSeries?.key || ""}
+                    onChange={(e) => setSelectedBarGroupKey(e.target.value)}
+                  >
+                    {groupedLineSeries.map((series) => (
+                      <option key={series.key} value={series.key}>
+                        {series.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </section>
+          )}
+
           <div
             style={{
               display: "grid",
@@ -1023,69 +1372,129 @@ export default function StripeBillingOverviewPage() {
               alignItems: "start",
             }}
           >
-            <LineChartCard
-              title="MRR Over Time"
-              subtitle="MRR at the end of each selected period."
-              points={points}
-              valueAccessor={(p) => p.mrrEnd}
-              valueFormatter={(v) => formatMoney(v, currency)}
-              stroke="#4f8df9"
-            />
+            {chartGroupingEnabled ? (
+              <MultiLineChartCard
+                title="MRR Over Time"
+                subtitle={`MRR at the end of each period, split by ${chartGroupingLabel.toLowerCase()}.`}
+                periods={chartPeriods}
+                series={groupedLineSeries}
+                valueAccessor={(p) => p.mrrEnd}
+                valueFormatter={(v) => formatMoney(v, currency)}
+              />
+            ) : (
+              <LineChartCard
+                title="MRR Over Time"
+                subtitle="MRR at the end of each selected period."
+                points={points}
+                valueAccessor={(p) => p.mrrEnd}
+                valueFormatter={(v) => formatMoney(v, currency)}
+                stroke="#4f8df9"
+              />
+            )}
 
             <GrowthBreakdownChart
-              points={points}
+              points={barChartPoints}
               currency={currency}
               subtitle={
                 hasStripeExactSeries
-                  ? "Stacked contributions for New, Reactivation, Expansion, Contraction, and Churn by period."
+                  ? chartGroupingEnabled
+                    ? `Stacked contributions for ${selectedBarSeries?.label || "selected group"} (includes Reactivation).`
+                    : "Stacked contributions for New, Reactivation, Expansion, Contraction, and Churn by period."
                   : "Stacked contributions for New, Expansion, Contraction, and Churn by period."
               }
               includeReactivation={hasStripeExactSeries}
             />
 
-            <LineChartCard
-              title="MRR Growth Rate Over Time"
-              subtitle={selectedGrowthWindow?.subtitle || "Period-over-period MRR growth rate."}
-              points={points}
-              valueAccessor={(p) => mrrGrowthByKey.get(p.key) || 0}
-              valueFormatter={(v) => formatPercent(v)}
-              stroke="#f59e0b"
-              includeZero
-              headerControl={
-                <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
-                  <label htmlFor="mrr-growth-window" className="stripe-ui__hint">
-                    Growth window
-                  </label>
-                  <select
-                    id="mrr-growth-window"
-                    className="stripe-ui__control"
-                    value={selectedGrowthWindow?.value || ""}
-                    onChange={(e) => setMrrGrowthWindow(e.target.value)}
-                    style={{ minWidth: "220px" }}
-                  >
-                    {growthWindowOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              }
-            />
+            {chartGroupingEnabled ? (
+              <MultiLineChartCard
+                title="MRR Growth Rate Over Time"
+                subtitle={`Period-over-period MRR growth rate, split by ${chartGroupingLabel.toLowerCase()}.`}
+                periods={chartPeriods}
+                series={groupedGrowthLineSeries}
+                valueAccessor={(p) => p.mrrGrowthRatePct}
+                valueFormatter={(v) => formatPercent(v)}
+                includeZero
+                headerControl={
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
+                    <label htmlFor="mrr-growth-window" className="stripe-ui__hint">
+                      Growth window
+                    </label>
+                    <select
+                      id="mrr-growth-window"
+                      className="stripe-ui__control"
+                      value={selectedGrowthWindow?.value || ""}
+                      onChange={(e) => setMrrGrowthWindow(e.target.value)}
+                      style={{ minWidth: "220px" }}
+                    >
+                      {growthWindowOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                }
+              />
+            ) : (
+              <LineChartCard
+                title="MRR Growth Rate Over Time"
+                subtitle={selectedGrowthWindow?.subtitle || "Period-over-period MRR growth rate."}
+                points={points}
+                valueAccessor={(p) => mrrGrowthByKey.get(p.key) || 0}
+                valueFormatter={(v) => formatPercent(v)}
+                stroke="#f59e0b"
+                includeZero
+                headerControl={
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
+                    <label htmlFor="mrr-growth-window" className="stripe-ui__hint">
+                      Growth window
+                    </label>
+                    <select
+                      id="mrr-growth-window"
+                      className="stripe-ui__control"
+                      value={selectedGrowthWindow?.value || ""}
+                      onChange={(e) => setMrrGrowthWindow(e.target.value)}
+                      style={{ minWidth: "220px" }}
+                    >
+                      {growthWindowOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                }
+              />
+            )}
 
-            <LineChartCard
-              title="ARR Over Time"
-              subtitle="ARR = MRR x 12 at period end."
-              points={points}
-              valueAccessor={(p) => p.arr}
-              valueFormatter={(v) => formatMoney(v, currency)}
-              stroke="#1fc16b"
-            />
+            {chartGroupingEnabled ? (
+              <MultiLineChartCard
+                title="ARR Over Time"
+                subtitle={`ARR = MRR x 12, split by ${chartGroupingLabel.toLowerCase()}.`}
+                periods={chartPeriods}
+                series={groupedLineSeries}
+                valueAccessor={(p) => p.arr}
+                valueFormatter={(v) => formatMoney(v, currency)}
+              />
+            ) : (
+              <LineChartCard
+                title="ARR Over Time"
+                subtitle="ARR = MRR x 12 at period end."
+                points={points}
+                valueAccessor={(p) => p.arr}
+                valueFormatter={(v) => formatMoney(v, currency)}
+                stroke="#1fc16b"
+              />
+            )}
 
             <DeltaBarChartCard
               title="ARR Growth Over Time"
-              subtitle="Absolute ARR change per period."
-              points={points}
+              subtitle={
+                chartGroupingEnabled
+                  ? `Absolute ARR change for ${selectedBarSeries?.label || "selected group"} per period.`
+                  : "Absolute ARR change per period."
+              }
+              points={barChartPoints}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => formatMoney(v, currency)}
             />

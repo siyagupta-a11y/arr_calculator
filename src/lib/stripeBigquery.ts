@@ -145,12 +145,20 @@ export type StripeThroughMrrReportResult = {
 };
 
 export type StripeBillingOverviewGrain = "daily" | "weekly" | "monthly" | "quarterly";
+export type StripeBillingOverviewGroupBy =
+  | "none"
+  | "product_id"
+  | "price_id"
+  | "subscription_item_id"
+  | "subscription_id"
+  | "customer_id";
 
 export type StripeBillingOverviewRequest = {
   startDate: string;
   endDate: string;
   grain: StripeBillingOverviewGrain;
   targetCurrency: string;
+  groupBy?: StripeBillingOverviewGroupBy;
 };
 
 export type StripeBillingOverviewPoint = {
@@ -179,10 +187,18 @@ export type StripeBillingOverviewCustomerArrRow = {
   arr: number;
 };
 
+export type StripeBillingOverviewGroupedSeries = {
+  groupKey: string;
+  groupLabel: string;
+  historyPoints: StripeBillingOverviewPoint[];
+  points: StripeBillingOverviewPoint[];
+};
+
 export type StripeBillingOverviewResult = {
   startDate: string;
   endDate: string;
   grain: StripeBillingOverviewGrain;
+  groupBy: StripeBillingOverviewGroupBy;
   targetCurrency: string;
   currentMrr: number;
   currentArr: number;
@@ -190,6 +206,7 @@ export type StripeBillingOverviewResult = {
   points: StripeBillingOverviewPoint[];
   stripeExactHistoryPoints: StripeBillingOverviewPoint[];
   stripeExactPoints: StripeBillingOverviewPoint[];
+  groupedSeries: StripeBillingOverviewGroupedSeries[];
   customerArrRows: StripeBillingOverviewCustomerArrRow[];
 };
 
@@ -1436,6 +1453,35 @@ function normalizeStripeBillingOverviewGrain(grain: string | undefined): StripeB
   return "monthly";
 }
 
+function normalizeStripeBillingOverviewGroupBy(groupBy: string | undefined): StripeBillingOverviewGroupBy {
+  const candidate = String(groupBy || "").trim().toLowerCase();
+  if (candidate === "product_id") return "product_id";
+  if (candidate === "price_id") return "price_id";
+  if (candidate === "subscription_item_id") return "subscription_item_id";
+  if (candidate === "subscription_id") return "subscription_id";
+  if (candidate === "customer_id") return "customer_id";
+  return "none";
+}
+
+function stripeBillingOverviewGroupKeyExpr(groupBy: StripeBillingOverviewGroupBy) {
+  if (groupBy === "product_id") {
+    return "COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_id')), ''), NULLIF(TRIM(JSON_VALUE(raw_json, '$.product')), ''), '(blank)')";
+  }
+  if (groupBy === "price_id") {
+    return "COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_id')), ''), NULLIF(TRIM(JSON_VALUE(raw_json, '$.price')), ''), '(blank)')";
+  }
+  if (groupBy === "subscription_item_id") {
+    return "COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item_id')), ''), NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item')), ''), '(blank)')";
+  }
+  if (groupBy === "subscription_id") {
+    return "COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_id')), ''), '(blank)')";
+  }
+  if (groupBy === "customer_id") {
+    return "customer_id";
+  }
+  return "'(all)'";
+}
+
 function buildStripeThroughMrrDetailBaseCte(table: string, productsTable: string) {
   return `
 WITH source AS (
@@ -1893,6 +1939,7 @@ export async function queryStripeBillingOverviewFromBigQuery(
   const startDateIso = startDate.toISOString().slice(0, 10);
   const endDateIso = endDate.toISOString().slice(0, 10);
   const grain = normalizeStripeBillingOverviewGrain(request.grain);
+  const groupBy = normalizeStripeBillingOverviewGroupBy(request.groupBy);
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
 
   const profile = normalizeProfile(options?.profile);
@@ -1902,6 +1949,7 @@ export async function queryStripeBillingOverviewFromBigQuery(
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
   const table = getStripeArrCorrectMrrChangeTable();
+  const groupKeyExpr = stripeBillingOverviewGroupKeyExpr(groupBy);
 
   const pointsQuery = `
 WITH bounds AS (
@@ -2455,6 +2503,336 @@ FROM bucket_series
 ORDER BY bucket_start
 `;
 
+  const groupedSeriesQuery =
+    groupBy === "none"
+      ? null
+      : `
+WITH bounds AS (
+  SELECT
+    DATE(@start_date) AS requested_start_date,
+    DATE(@end_date) AS requested_end_date,
+    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS requested_end_exclusive_date,
+    CASE
+      WHEN @grain = 'daily' THEN DATE_SUB(DATE(@start_date), INTERVAL 90 DAY)
+      WHEN @grain = 'weekly' THEN DATE_SUB(DATE(@start_date), INTERVAL 13 WEEK)
+      WHEN @grain = 'monthly' THEN DATE_SUB(DATE(@start_date), INTERVAL 3 MONTH)
+      ELSE DATE_SUB(DATE(@start_date), INTERVAL 3 MONTH)
+    END AS series_start_date
+),
+bucket_candidates AS (
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 DAY) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.series_start_date, b.requested_end_date, INTERVAL 1 DAY)) AS d
+  WHERE @grain = 'daily'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 WEEK) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.series_start_date, WEEK(MONDAY)),
+      DATE_TRUNC(b.requested_end_date, WEEK(MONDAY)),
+      INTERVAL 1 WEEK
+    )
+  ) AS d
+  WHERE @grain = 'weekly'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 MONTH) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.series_start_date, MONTH),
+      DATE_TRUNC(b.requested_end_date, MONTH),
+      INTERVAL 1 MONTH
+    )
+  ) AS d
+  WHERE @grain = 'monthly'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 3 MONTH) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.series_start_date, QUARTER),
+      DATE_TRUNC(b.requested_end_date, QUARTER),
+      INTERVAL 3 MONTH
+    )
+  ) AS d
+  WHERE @grain = 'quarterly'
+),
+buckets AS (
+  SELECT
+    bc.bucket_start,
+    GREATEST(bc.bucket_start, b.series_start_date) AS effective_start,
+    LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date) AS effective_end_exclusive
+  FROM bucket_candidates bc
+  CROSS JOIN bounds b
+  WHERE GREATEST(bc.bucket_start, b.series_start_date) < LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date)
+),
+raw_events AS (
+  SELECT
+    local_event_timestamp,
+    COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major,
+    TO_JSON_STRING(t) AS raw_json
+  FROM \`${table}\` AS t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND local_event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+),
+events_with_group AS (
+  SELECT
+    re.local_event_timestamp,
+    re.customer_id,
+    re.mrr_change_major,
+    ${groupKeyExpr} AS group_key
+  FROM raw_events re
+),
+selected_groups AS (
+  SELECT
+    e.group_key,
+    e.group_key AS group_label,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS current_mrr
+  FROM events_with_group e
+  GROUP BY e.group_key
+  HAVING ABS(COALESCE(SUM(e.mrr_change_major), 0.0)) > 1e-9
+  ORDER BY ABS(current_mrr) DESC, group_label ASC
+  LIMIT @group_limit
+),
+events_base AS (
+  SELECT
+    e.local_event_timestamp,
+    e.customer_id,
+    sg.group_key,
+    sg.group_label,
+    e.mrr_change_major
+  FROM events_with_group e
+  JOIN selected_groups sg
+    ON sg.group_key = e.group_key
+),
+grouped_sub_item_events AS (
+  SELECT
+    local_event_timestamp,
+    customer_id,
+    group_key,
+    group_label,
+    COALESCE(SUM(mrr_change_major), 0.0) AS mrr_change_major
+  FROM events_base
+  GROUP BY
+    local_event_timestamp,
+    customer_id,
+    group_key,
+    group_label
+),
+grouped_sub_item_events_with_mrr AS (
+  SELECT
+    local_event_timestamp,
+    DATE(local_event_timestamp) AS local_event_date,
+    customer_id,
+    group_key,
+    group_label,
+    mrr_change_major,
+    SUM(mrr_change_major) OVER (
+      PARTITION BY customer_id, group_key
+      ORDER BY local_event_timestamp ASC
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS mrr,
+    COUNTIF(ABS(mrr_change_major) > 1e-9) OVER (
+      PARTITION BY customer_id, group_key
+      ORDER BY local_event_timestamp ASC
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS mrr_change_count
+  FROM grouped_sub_item_events
+),
+grouped_sub_item_events_with_previous_mrr AS (
+  SELECT
+    local_event_timestamp,
+    local_event_date,
+    customer_id,
+    group_key,
+    group_label,
+    mrr_change_major,
+    mrr,
+    COALESCE(
+      LAG(mrr) OVER (
+        PARTITION BY customer_id, group_key
+        ORDER BY local_event_timestamp ASC
+      ),
+      0.0
+    ) AS previous_mrr,
+    mrr_change_count
+  FROM grouped_sub_item_events_with_mrr
+),
+customer_events AS (
+  SELECT
+    local_event_timestamp,
+    local_event_date,
+    customer_id,
+    group_key,
+    group_label,
+    mrr_change_major,
+    mrr,
+    previous_mrr,
+    mrr_change_count,
+    CASE
+      WHEN ABS(mrr) > 1e-9 AND ABS(previous_mrr) <= 1e-9 AND mrr_change_count = 1 THEN 'ACTIVE_START'
+      WHEN ABS(mrr) > 1e-9 AND ABS(previous_mrr) <= 1e-9 AND mrr_change_count > 1 THEN 'REACTIVATE'
+      WHEN ABS(mrr) > 1e-9 AND ABS(previous_mrr) > 1e-9 AND mrr > previous_mrr THEN 'ACTIVE_UPGRADE'
+      WHEN ABS(mrr) > 1e-9 AND ABS(previous_mrr) > 1e-9 AND mrr < previous_mrr THEN 'ACTIVE_DOWNGRADE'
+      WHEN ABS(mrr) <= 1e-9 AND ABS(previous_mrr) > 1e-9 THEN 'ACTIVE_END'
+      ELSE 'ACTIVE_NO_CHANGE'
+    END AS event_type
+  FROM grouped_sub_item_events_with_previous_mrr
+),
+daily_group_events AS (
+  SELECT
+    local_event_date,
+    group_key,
+    group_label,
+    COALESCE(SUM(mrr_change_major), 0.0) AS net_mrr_change,
+    COALESCE(SUM(IF(event_type = 'ACTIVE_START', mrr_change_major, 0.0)), 0.0) AS new_mrr,
+    COALESCE(SUM(IF(event_type = 'REACTIVATE', mrr_change_major, 0.0)), 0.0) AS reactivation_mrr,
+    COALESCE(SUM(IF(event_type = 'ACTIVE_UPGRADE', mrr_change_major, 0.0)), 0.0) AS expansion_mrr,
+    COALESCE(SUM(IF(event_type = 'ACTIVE_DOWNGRADE', mrr_change_major, 0.0)), 0.0) AS contraction_mrr,
+    COALESCE(SUM(IF(event_type = 'ACTIVE_END', mrr_change_major, 0.0)), 0.0) AS churn_mrr
+  FROM customer_events
+  GROUP BY
+    local_event_date,
+    group_key,
+    group_label
+),
+series_dates AS (
+  SELECT
+    d AS local_date
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.series_start_date, b.requested_end_date, INTERVAL 1 DAY)) AS d
+),
+base_before_series_by_group AS (
+  SELECT
+    e.group_key,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS base_mrr
+  FROM grouped_sub_item_events e
+  CROSS JOIN bounds b
+  WHERE e.local_event_timestamp < TIMESTAMP(b.series_start_date)
+  GROUP BY e.group_key
+),
+daily_series_by_group AS (
+  SELECT
+    sg.group_key,
+    sg.group_label,
+    sd.local_date,
+    COALESCE(dge.new_mrr, 0.0) AS new_mrr,
+    COALESCE(dge.reactivation_mrr, 0.0) AS reactivation_mrr,
+    COALESCE(dge.expansion_mrr, 0.0) AS expansion_mrr,
+    COALESCE(dge.contraction_mrr, 0.0) AS contraction_mrr,
+    COALESCE(dge.churn_mrr, 0.0) AS churn_mrr,
+    COALESCE(dge.net_mrr_change, 0.0) AS net_mrr_change,
+    COALESCE(base.base_mrr, 0.0)
+      + SUM(COALESCE(dge.net_mrr_change, 0.0)) OVER (
+        PARTITION BY sg.group_key
+        ORDER BY sd.local_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      ) AS mrr_end
+  FROM selected_groups sg
+  CROSS JOIN series_dates sd
+  LEFT JOIN daily_group_events dge
+    ON dge.group_key = sg.group_key
+    AND dge.local_event_date = sd.local_date
+  LEFT JOIN base_before_series_by_group base
+    ON base.group_key = sg.group_key
+),
+bucket_group_series AS (
+  SELECT
+    bu.bucket_start,
+    bu.effective_start,
+    DATE_SUB(bu.effective_end_exclusive, INTERVAL 1 DAY) AS effective_end,
+    dsg.group_key,
+    dsg.group_label,
+    COALESCE(SUM(dsg.new_mrr), 0.0) AS new_mrr,
+    COALESCE(SUM(dsg.reactivation_mrr), 0.0) AS reactivation_mrr,
+    COALESCE(SUM(dsg.expansion_mrr), 0.0) AS expansion_mrr,
+    COALESCE(SUM(dsg.contraction_mrr), 0.0) AS contraction_mrr,
+    COALESCE(SUM(dsg.churn_mrr), 0.0) AS churn_mrr,
+    COALESCE(SUM(dsg.net_mrr_change), 0.0) AS net_mrr_change,
+    COALESCE(
+      MAX(
+        IF(
+          dsg.local_date = DATE_SUB(bu.effective_end_exclusive, INTERVAL 1 DAY),
+          dsg.mrr_end,
+          NULL
+        )
+      ),
+      0.0
+    ) AS mrr_end
+  FROM buckets bu
+  JOIN daily_series_by_group dsg
+    ON dsg.local_date >= bu.effective_start
+    AND dsg.local_date < bu.effective_end_exclusive
+  GROUP BY
+    bu.bucket_start,
+    bu.effective_start,
+    bu.effective_end_exclusive,
+    dsg.group_key,
+    dsg.group_label
+)
+SELECT
+  bgs.group_key,
+  bgs.group_label,
+  CASE
+    WHEN @grain = 'quarterly'
+    THEN CONCAT(CAST(EXTRACT(YEAR FROM bgs.bucket_start) AS STRING), '-Q', CAST(EXTRACT(QUARTER FROM bgs.bucket_start) AS STRING))
+    ELSE FORMAT_DATE('%Y-%m-%d', bgs.effective_start)
+  END AS period_key,
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', bgs.effective_start)
+    WHEN @grain = 'weekly' THEN CONCAT('Week of ', FORMAT_DATE('%Y-%m-%d', bgs.effective_start))
+    WHEN @grain = 'monthly' THEN FORMAT_DATE('%b %Y', bgs.bucket_start)
+    ELSE CONCAT('Q', CAST(EXTRACT(QUARTER FROM bgs.bucket_start) AS STRING), ' ', CAST(EXTRACT(YEAR FROM bgs.bucket_start) AS STRING))
+  END AS period_label,
+  FORMAT_DATE('%Y-%m-%d', bgs.effective_start) AS period_start,
+  FORMAT_DATE('%Y-%m-%d', bgs.effective_end) AS period_end,
+  ROUND(bgs.mrr_end, 2) AS mrr_end,
+  ROUND(bgs.new_mrr, 2) AS new_mrr,
+  ROUND(bgs.reactivation_mrr, 2) AS reactivation_mrr,
+  ROUND(bgs.expansion_mrr, 2) AS expansion_mrr,
+  ROUND(bgs.contraction_mrr, 2) AS contraction_mrr,
+  ROUND(bgs.churn_mrr, 2) AS churn_mrr,
+  ROUND(bgs.net_mrr_change, 2) AS net_mrr_change,
+  ROUND(
+    COALESCE(
+      SAFE_DIVIDE(
+        bgs.mrr_end - LAG(bgs.mrr_end) OVER (PARTITION BY bgs.group_key ORDER BY bgs.bucket_start),
+        NULLIF(ABS(LAG(bgs.mrr_end) OVER (PARTITION BY bgs.group_key ORDER BY bgs.bucket_start)), 0.0)
+      ) * 100.0,
+      0.0
+    ),
+    2
+  ) AS mrr_growth_rate_pct,
+  ROUND(bgs.mrr_end * 12.0, 2) AS arr,
+  ROUND(
+    COALESCE(
+      (bgs.mrr_end * 12.0) - LAG(bgs.mrr_end * 12.0) OVER (PARTITION BY bgs.group_key ORDER BY bgs.bucket_start),
+      0.0
+    ),
+    2
+  ) AS arr_growth
+FROM bucket_group_series bgs
+ORDER BY bgs.group_label ASC, bgs.bucket_start ASC
+`;
+
   const customerArrQuery = `
 WITH bounds AS (
   SELECT
@@ -2642,11 +3020,18 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
     { name: "grain", type: "STRING", value: grain },
     { name: "target_currency", type: "STRING", value: targetCurrency },
   ];
+  const groupedParams: BigQueryNamedParameter[] = [
+    ...params,
+    { name: "group_limit", type: "INT64", value: "8" },
+  ];
 
-  const [pointRows, stripeExactPointRows, customerArrRawRows] = await Promise.all([
+  const [pointRows, stripeExactPointRows, customerArrRawRows, groupedSeriesRawRows] = await Promise.all([
     runBigQueryQueryRows(accessToken, projectId, location, pointsQuery, params),
     runBigQueryQueryRows(accessToken, projectId, location, stripeExactPointsQuery, params),
     runBigQueryQueryRows(accessToken, projectId, location, customerArrQuery, params),
+    groupedSeriesQuery
+      ? runBigQueryQueryRows(accessToken, projectId, location, groupedSeriesQuery, groupedParams)
+      : Promise.resolve([] as Record<string, unknown>[]),
   ]);
 
   const allPoints: StripeBillingOverviewPoint[] = pointRows.map((row) => ({
@@ -2681,6 +3066,43 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
     arr: asNumber(row.arr),
     arrGrowth: asNumber(row.arr_growth),
   }));
+  const groupedSeriesByKey = new Map<
+    string,
+    {
+      groupKey: string;
+      groupLabel: string;
+      allPoints: StripeBillingOverviewPoint[];
+    }
+  >();
+  for (const row of groupedSeriesRawRows) {
+    const groupKey = asString(row.group_key) || "(blank)";
+    const groupLabel = asString(row.group_label) || groupKey;
+    const point: StripeBillingOverviewPoint = {
+      key: asString(row.period_key),
+      label: asString(row.period_label),
+      periodStart: asString(row.period_start),
+      periodEnd: asString(row.period_end),
+      mrrEnd: asNumber(row.mrr_end),
+      newMrr: asNumber(row.new_mrr),
+      reactivationMrr: asNumber(row.reactivation_mrr),
+      expansionMrr: asNumber(row.expansion_mrr),
+      contractionMrr: asNumber(row.contraction_mrr),
+      churnMrr: asNumber(row.churn_mrr),
+      netMrrChange: asNumber(row.net_mrr_change),
+      mrrGrowthRatePct: asNumber(row.mrr_growth_rate_pct),
+      arr: asNumber(row.arr),
+      arrGrowth: asNumber(row.arr_growth),
+    };
+    if (!groupedSeriesByKey.has(groupKey)) {
+      groupedSeriesByKey.set(groupKey, {
+        groupKey,
+        groupLabel,
+        allPoints: [point],
+      });
+      continue;
+    }
+    groupedSeriesByKey.get(groupKey)!.allPoints.push(point);
+  }
   const customerArrRows: StripeBillingOverviewCustomerArrRow[] = customerArrRawRows.map((row) => ({
     customerId: asString(row.customer_id),
     periodKey: asString(row.period_key),
@@ -2696,11 +3118,26 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
   const stripeExactPoints = allStripeExactPoints.filter(
     (point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso,
   );
+  const groupedSeries: StripeBillingOverviewGroupedSeries[] = Array.from(groupedSeriesByKey.values())
+    .map((series) => ({
+      groupKey: series.groupKey,
+      groupLabel: series.groupLabel,
+      historyPoints: series.allPoints.filter((point) => point.periodStart < startDateIso),
+      points: series.allPoints.filter((point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso),
+    }))
+    .filter((series) => series.points.length > 0)
+    .sort((a, b) => {
+      const aLatestArr = a.points.length ? a.points[a.points.length - 1].arr : 0;
+      const bLatestArr = b.points.length ? b.points[b.points.length - 1].arr : 0;
+      if (Math.abs(bLatestArr - aLatestArr) > 1e-9) return bLatestArr - aLatestArr;
+      return a.groupLabel.localeCompare(b.groupLabel);
+    });
   const currentMrr = points.length ? points[points.length - 1].mrrEnd : 0;
   return {
     startDate: startDateIso,
     endDate: endDateIso,
     grain,
+    groupBy,
     targetCurrency: targetCurrency.toUpperCase(),
     currentMrr,
     currentArr: Math.round(currentMrr * 12 * 100) / 100,
@@ -2708,6 +3145,7 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
     points,
     stripeExactHistoryPoints,
     stripeExactPoints,
+    groupedSeries,
     customerArrRows,
   };
 }

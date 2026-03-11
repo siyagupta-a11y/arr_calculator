@@ -3,6 +3,7 @@ import {
   queryStripeBillingOverviewFromBigQuery,
   type StripeBigQueryProfile,
   type StripeBillingOverviewGrain,
+  type StripeBillingOverviewGroupBy,
   type StripeBillingOverviewRequest,
 } from "@/lib/stripeBigquery";
 
@@ -20,6 +21,15 @@ const ALLOWED_GRAINS = new Set<StripeBillingOverviewGrain>([
   "quarterly",
 ]);
 
+const ALLOWED_GROUP_BY = new Set<StripeBillingOverviewGroupBy>([
+  "none",
+  "product_id",
+  "price_id",
+  "subscription_item_id",
+  "subscription_id",
+  "customer_id",
+]);
+
 function isIsoDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
@@ -28,6 +38,7 @@ type ApiBody = {
   startDate?: string;
   endDate?: string;
   grain?: string;
+  groupBy?: string;
 };
 
 function parsePayload(raw: Partial<ApiBody>): StripeBillingOverviewRequest {
@@ -39,6 +50,8 @@ function parsePayload(raw: Partial<ApiBody>): StripeBillingOverviewRequest {
 
   const grainRaw = String(raw.grain || "monthly").trim().toLowerCase() as StripeBillingOverviewGrain;
   const grain = ALLOWED_GRAINS.has(grainRaw) ? grainRaw : "monthly";
+  const groupByRaw = String(raw.groupBy || "none").trim().toLowerCase() as StripeBillingOverviewGroupBy;
+  const groupBy = ALLOWED_GROUP_BY.has(groupByRaw) ? groupByRaw : "none";
 
   const targetCurrency =
     String(process.env.STRIPE_BILLING_OVERVIEW_TARGET_CURRENCY || "").trim() ||
@@ -50,6 +63,7 @@ function parsePayload(raw: Partial<ApiBody>): StripeBillingOverviewRequest {
     startDate,
     endDate,
     grain,
+    groupBy,
     targetCurrency,
   };
 }
@@ -83,6 +97,7 @@ export async function GET(req: Request) {
       startDate: searchParams.get("startDate") || "",
       endDate: searchParams.get("endDate") || "",
       grain: searchParams.get("grain") || "monthly",
+      groupBy: searchParams.get("groupBy") || "none",
     };
     const report = await validateAndRun(body);
     return NextResponse.json(report);
