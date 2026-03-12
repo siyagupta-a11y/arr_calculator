@@ -149,6 +149,12 @@ export default function QuickBooksPage() {
             <a href="/api/quickbooks/connect" className="stripe-ui__hero-link">
               Connect QuickBooks
             </a>
+            <Link href="/eula" className="stripe-ui__hero-link">
+              EULA
+            </Link>
+            <Link href="/privacy-policy" className="stripe-ui__hero-link">
+              Privacy Policy
+            </Link>
           </div>
         </div>
       </section>
