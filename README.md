@@ -5,6 +5,7 @@ This is a Next.js ARR dashboard.
 - `/` HubSpot ARR report
 - `/stripe` Stripe ARR report
 - `/stripe-arr-correct` Stripe ARR (Correct) report
+- `/quickbooks` QuickBooks OAuth + data access page
 - `POST /api/report` HubSpot report API
 - `GET|POST /api/stripe-report` Stripe report API
 - `GET /api/stripe-report/export` Stripe full CSV export API (all filtered/grouped rows)
@@ -12,6 +13,12 @@ This is a Next.js ARR dashboard.
 - `GET /api/stripe-arr-correct-report/export` Stripe ARR (Correct) CSV export API
 - `GET|POST /api/stripe-sync` Stripe sync API
 - `GET /api/stripe-sync/status` Stripe sync health/status API
+- `GET /api/quickbooks/connect` Start Intuit OAuth
+- `GET /api/quickbooks/callback` Intuit OAuth callback
+- `GET /api/quickbooks/status` QuickBooks connection status
+- `GET /api/quickbooks/company-info` Fetch QuickBooks CompanyInfo
+- `POST /api/quickbooks/query` Run a QuickBooks SQL-like query
+- `POST /api/quickbooks/disconnect` Clear saved QuickBooks tokens
 
 ## Automatic Stripe Sync
 
@@ -54,6 +61,27 @@ Optional blob key path:
 - `STRIPE_SYNC_BLOB_PATH` (default `arr/stripe-sync-store-v1.json`)
 
 If blob token is missing, local `/tmp` fallback is used (not persistent across redeploys/instances).
+
+## QuickBooks OAuth Setup
+
+1. In the Intuit app dashboard, set your redirect URI to:
+   - `https://YOUR_DOMAIN/api/quickbooks/callback`
+2. In Vercel, configure:
+   - `QUICKBOOKS_CLIENT_ID`
+   - `QUICKBOOKS_CLIENT_SECRET`
+   - `QUICKBOOKS_REDIRECT_URI`
+3. Optional:
+   - `QUICKBOOKS_ENV` (`production` default, `sandbox` supported)
+   - `QUICKBOOKS_SCOPES` (default `com.intuit.quickbooks.accounting`)
+   - `QUICKBOOKS_MINOR_VERSION` (default `75`)
+   - `QUICKBOOKS_TOKEN_BLOB_PATH` (default `arr/quickbooks/tokens-v1.json`)
+   - `QUICKBOOKS_TOKEN_STORE_PATH` (default `/tmp/arr-quickbooks-tokens-v1.json`)
+
+Fallback env names are also accepted:
+
+- client id: `INTUIT_CLIENT_ID`, `QB_CLIENT_ID`, `CLIENT_ID`
+- client secret: `INTUIT_CLIENT_SECRET`, `QB_CLIENT_SECRET`, `CLIENT_SECRET`
+- redirect URI: `INTUIT_REDIRECT_URI`, `QB_REDIRECT_URI`, `REDIRECT_URI`
 
 ## BigQuery Source (Optional)
 
@@ -173,6 +201,12 @@ Stripe:
 - `STRIPE_INVOICE_STATUS` (optional, default `paid`)
 - `STRIPE_TARGET_CURRENCY` (optional, default `USD`)
 - `BLOB_READ_WRITE_TOKEN` (required for persistent sync store)
+
+QuickBooks:
+
+- `QUICKBOOKS_CLIENT_ID`
+- `QUICKBOOKS_CLIENT_SECRET`
+- `QUICKBOOKS_REDIRECT_URI`
 
 ## Optional Tuning
 
