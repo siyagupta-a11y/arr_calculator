@@ -435,6 +435,9 @@ export default function StripePage() {
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Link href="/combined-billing-overview" className="stripe-ui__hero-link">
+              Open Combined Billing Overview
+            </Link>
             <Link href="/stripe-arr-correct" className="stripe-ui__hero-link">
               Open Stripe ARR (Correct)
             </Link>
