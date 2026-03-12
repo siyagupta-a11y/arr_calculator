@@ -319,6 +319,12 @@ export default function DiffSheetPage() {
             <Link href="/hubspot" className="stripe-ui__hero-link">
               Open HubSpot report
             </Link>
+            <Link href="/ai-spend" className="stripe-ui__hero-link">
+              Open AI spend
+            </Link>
+            <Link href="/quickbooks" className="stripe-ui__hero-link">
+              Open QuickBooks
+            </Link>
           </div>
         </div>
       </section>

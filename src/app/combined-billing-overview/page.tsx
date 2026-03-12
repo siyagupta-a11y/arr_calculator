@@ -1528,6 +1528,12 @@ export default function CombinedBillingOverviewPage() {
             <Link href="/stripe-through-mrr" className="stripe-ui__hero-link">
               Open Stripe through MRR
             </Link>
+            <Link href="/ai-spend" className="stripe-ui__hero-link">
+              Open AI spend
+            </Link>
+            <Link href="/quickbooks" className="stripe-ui__hero-link">
+              Open QuickBooks
+            </Link>
           </div>
         </div>
       </section>

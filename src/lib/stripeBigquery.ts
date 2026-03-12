@@ -210,6 +210,70 @@ export type StripeBillingOverviewResult = {
   customerArrRows: StripeBillingOverviewCustomerArrRow[];
 };
 
+export type StripeAiSpendGrain = "daily" | "weekly" | "monthly" | "quarterly";
+
+export type StripeAiSpendRequest = {
+  startDate: string;
+  endDate: string;
+  grain: StripeAiSpendGrain;
+  targetCurrency: string;
+  topLimit?: number;
+  detailLimit?: number;
+};
+
+export type StripeAiSpendPoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  revenue: number;
+  lineCount: number;
+  customerCount: number;
+};
+
+export type StripeAiSpendGroupRow = {
+  key: string;
+  label: string;
+  revenue: number;
+  lineCount: number;
+};
+
+export type StripeAiSpendPriceRow = {
+  priceId: string;
+  priceLabel: string;
+  productId: string;
+  productLabel: string;
+  revenue: number;
+  lineCount: number;
+};
+
+export type StripeAiSpendDetailRow = {
+  invoiceDate: string;
+  customerId: string;
+  customerName: string;
+  lineItemId: string;
+  lineItemDescription: string;
+  priceId: string;
+  priceLabel: string;
+  productId: string;
+  productLabel: string;
+  revenue: number;
+  quantity: number;
+};
+
+export type StripeAiSpendResult = {
+  startDate: string;
+  endDate: string;
+  grain: StripeAiSpendGrain;
+  targetCurrency: string;
+  totalRevenue: number;
+  points: StripeAiSpendPoint[];
+  topCustomers: StripeAiSpendGroupRow[];
+  topProducts: StripeAiSpendGroupRow[];
+  topPrices: StripeAiSpendPriceRow[];
+  detailRows: StripeAiSpendDetailRow[];
+};
+
 type BigQueryNamedParameter = {
   name: string;
   type: "INT64" | "STRING";
@@ -651,6 +715,10 @@ function normalizeGroupByFields(fields?: StripeBigQueryGroupField[]) {
 
 function asInt(v: unknown) {
   return Math.max(0, Math.floor(asNumber(v)));
+}
+
+function round2(v: number) {
+  return Math.round((Number(v) || 0) * 100) / 100;
 }
 
 function parseIsoDateUtc(dateText: string) {
@@ -1446,6 +1514,14 @@ function normalizeStripeThroughMrrGroupBy(groupBy: string | undefined): StripeTh
 }
 
 function normalizeStripeBillingOverviewGrain(grain: string | undefined): StripeBillingOverviewGrain {
+  const candidate = String(grain || "").trim().toLowerCase();
+  if (candidate === "daily") return "daily";
+  if (candidate === "weekly") return "weekly";
+  if (candidate === "quarterly") return "quarterly";
+  return "monthly";
+}
+
+function normalizeStripeAiSpendGrain(grain: string | undefined): StripeAiSpendGrain {
   const candidate = String(grain || "").trim().toLowerCase();
   if (candidate === "daily") return "daily";
   if (candidate === "weekly") return "weekly";
@@ -3252,6 +3328,318 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
     stripeExactPoints,
     groupedSeries,
     customerArrRows,
+  };
+}
+
+export async function queryStripeAiSpendFromBigQuery(
+  request: StripeAiSpendRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeAiSpendResult> {
+  const startDate = parseIsoDateUtc(request.startDate);
+  const endDate = parseIsoDateUtc(request.endDate);
+  if (!startDate || !endDate) {
+    throw new Error("Invalid startDate/endDate");
+  }
+  if (endDate.getTime() < startDate.getTime()) {
+    throw new Error("endDate must be >= startDate");
+  }
+
+  const startDateIso = startDate.toISOString().slice(0, 10);
+  const endDateIso = endDate.toISOString().slice(0, 10);
+  const grain = normalizeStripeAiSpendGrain(request.grain);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const topLimit = Math.max(1, Math.min(500, asInt(request.topLimit || 50)));
+  const detailLimit = Math.max(1, Math.min(1000, asInt(request.detailLimit || 200)));
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+
+  const baseCte = `
+WITH latest_invoice_lines AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      il.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY il.id
+        ORDER BY il.batch_timestamp DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.stripe.invoice_lines\` il
+  )
+  WHERE rn = 1
+),
+latest_prices AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      p.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY p.id
+        ORDER BY p.batch_timestamp DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.stripe.prices\` p
+  )
+  WHERE rn = 1
+),
+latest_products AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      p.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY p.id
+        ORDER BY p.batch_timestamp DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.stripe.products\` p
+  )
+  WHERE rn = 1
+),
+latest_invoices AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      i.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY i.id
+        ORDER BY i.batch_timestamp DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.stripe.invoices\` i
+  )
+  WHERE rn = 1
+),
+metered_lines AS (
+  SELECT
+    DATE(COALESCE(i.date, il.period_start)) AS event_date,
+    COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    COALESCE(
+      NULLIF(TRIM(CAST(i.customer_name AS STRING)), ''),
+      COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)')
+    ) AS customer_name,
+    COALESCE(NULLIF(TRIM(CAST(il.id AS STRING)), ''), '(blank)') AS line_item_id,
+    COALESCE(NULLIF(TRIM(CAST(il.description AS STRING)), ''), '(blank)') AS line_item_description,
+    COALESCE(NULLIF(TRIM(CAST(il.price_id AS STRING)), ''), '(blank)') AS price_id,
+    COALESCE(
+      NULLIF(TRIM(CAST(p.nickname AS STRING)), ''),
+      COALESCE(NULLIF(TRIM(CAST(il.price_id AS STRING)), ''), '(blank)')
+    ) AS price_label,
+    COALESCE(NULLIF(TRIM(CAST(p.product_id AS STRING)), ''), '(blank)') AS product_id,
+    COALESCE(
+      NULLIF(TRIM(CAST(prod.description AS STRING)), ''),
+      NULLIF(TRIM(CAST(prod.name AS STRING)), ''),
+      COALESCE(NULLIF(TRIM(CAST(p.product_id AS STRING)), ''), '(blank)')
+    ) AS product_label,
+    CAST(COALESCE(il.amount, 0) AS FLOAT64) / 100.0 AS revenue_major,
+    CAST(COALESCE(il.quantity, 0) AS FLOAT64) AS quantity
+  FROM latest_invoice_lines il
+  LEFT JOIN latest_prices p
+    ON p.id = il.price_id
+  LEFT JOIN latest_products prod
+    ON prod.id = p.product_id
+  LEFT JOIN latest_invoices i
+    ON i.id = il.invoice_id
+  WHERE
+    LOWER(COALESCE(p.recurring_usage_type, '')) = 'metered'
+    AND LOWER(COALESCE(il.currency, i.currency, '')) = @target_currency
+    AND COALESCE(i.paid, FALSE) = TRUE
+    AND DATE(COALESCE(i.date, il.period_start)) BETWEEN DATE(@start_date) AND DATE(@end_date)
+)
+`;
+
+  const summaryQuery = `
+${baseCte}
+SELECT
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', bucket_start)
+    WHEN @grain = 'weekly' THEN FORMAT_DATE('%Y-%m-%d', bucket_start)
+    WHEN @grain = 'monthly' THEN FORMAT_DATE('%Y-%m', bucket_start)
+    ELSE CONCAT(CAST(EXTRACT(YEAR FROM bucket_start) AS STRING), '-Q', CAST(EXTRACT(QUARTER FROM bucket_start) AS STRING))
+  END AS period_key,
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', bucket_start)
+    WHEN @grain = 'weekly' THEN CONCAT('Week of ', FORMAT_DATE('%Y-%m-%d', bucket_start))
+    WHEN @grain = 'monthly' THEN FORMAT_DATE('%b %Y', bucket_start)
+    ELSE CONCAT('Q', CAST(EXTRACT(QUARTER FROM bucket_start) AS STRING), ' ', CAST(EXTRACT(YEAR FROM bucket_start) AS STRING))
+  END AS period_label,
+  FORMAT_DATE('%Y-%m-%d', bucket_start) AS period_start,
+  FORMAT_DATE(
+    '%Y-%m-%d',
+    CASE
+      WHEN @grain = 'daily' THEN bucket_start
+      WHEN @grain = 'weekly' THEN DATE_SUB(DATE_ADD(bucket_start, INTERVAL 1 WEEK), INTERVAL 1 DAY)
+      WHEN @grain = 'monthly' THEN DATE_SUB(DATE_ADD(bucket_start, INTERVAL 1 MONTH), INTERVAL 1 DAY)
+      ELSE DATE_SUB(DATE_ADD(bucket_start, INTERVAL 3 MONTH), INTERVAL 1 DAY)
+    END
+  ) AS period_end,
+  ROUND(SUM(revenue_major), 2) AS revenue,
+  COUNT(*) AS line_count,
+  COUNT(DISTINCT customer_id) AS customer_count
+FROM (
+  SELECT
+    CASE
+      WHEN @grain = 'daily' THEN event_date
+      WHEN @grain = 'weekly' THEN DATE_TRUNC(event_date, WEEK(MONDAY))
+      WHEN @grain = 'monthly' THEN DATE_TRUNC(event_date, MONTH)
+      ELSE DATE_TRUNC(event_date, QUARTER)
+    END AS bucket_start,
+    revenue_major,
+    customer_id
+  FROM metered_lines
+)
+GROUP BY bucket_start
+ORDER BY bucket_start ASC
+`;
+
+  const topCustomersQuery = `
+${baseCte}
+SELECT
+  customer_id AS group_key,
+  customer_name AS group_label,
+  ROUND(SUM(revenue_major), 2) AS revenue,
+  COUNT(*) AS line_count
+FROM metered_lines
+GROUP BY group_key, group_label
+ORDER BY revenue DESC, group_label ASC
+LIMIT @top_limit
+`;
+
+  const topProductsQuery = `
+${baseCte}
+SELECT
+  product_id AS group_key,
+  product_label AS group_label,
+  ROUND(SUM(revenue_major), 2) AS revenue,
+  COUNT(*) AS line_count
+FROM metered_lines
+GROUP BY group_key, group_label
+ORDER BY revenue DESC, group_label ASC
+LIMIT @top_limit
+`;
+
+  const topPricesQuery = `
+${baseCte}
+SELECT
+  price_id,
+  price_label,
+  product_id,
+  product_label,
+  ROUND(SUM(revenue_major), 2) AS revenue,
+  COUNT(*) AS line_count
+FROM metered_lines
+GROUP BY price_id, price_label, product_id, product_label
+ORDER BY revenue DESC, price_label ASC
+LIMIT @top_limit
+`;
+
+  const detailQuery = `
+${baseCte}
+SELECT
+  FORMAT_DATE('%Y-%m-%d', event_date) AS invoice_date,
+  customer_id,
+  customer_name,
+  line_item_id,
+  line_item_description,
+  price_id,
+  price_label,
+  product_id,
+  product_label,
+  ROUND(revenue_major, 2) AS revenue,
+  quantity
+FROM metered_lines
+ORDER BY revenue DESC, invoice_date DESC, line_item_id DESC
+LIMIT @detail_limit
+`;
+
+  const baseParams: BigQueryNamedParameter[] = [
+    { name: "start_date", type: "STRING", value: startDateIso },
+    { name: "end_date", type: "STRING", value: endDateIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+    { name: "grain", type: "STRING", value: grain },
+  ];
+
+  const [summaryRows, topCustomersRows, topProductsRows, topPricesRows, detailRowsRaw] = await Promise.all([
+    runBigQueryQueryRows(accessToken, projectId, location, summaryQuery, baseParams),
+    runBigQueryQueryRows(accessToken, projectId, location, topCustomersQuery, [
+      ...baseParams,
+      { name: "top_limit", type: "INT64", value: String(topLimit) },
+    ]),
+    runBigQueryQueryRows(accessToken, projectId, location, topProductsQuery, [
+      ...baseParams,
+      { name: "top_limit", type: "INT64", value: String(topLimit) },
+    ]),
+    runBigQueryQueryRows(accessToken, projectId, location, topPricesQuery, [
+      ...baseParams,
+      { name: "top_limit", type: "INT64", value: String(topLimit) },
+    ]),
+    runBigQueryQueryRows(accessToken, projectId, location, detailQuery, [
+      ...baseParams,
+      { name: "detail_limit", type: "INT64", value: String(detailLimit) },
+    ]),
+  ]);
+
+  const points: StripeAiSpendPoint[] = summaryRows.map((row) => ({
+    key: asString(row.period_key),
+    label: asString(row.period_label),
+    periodStart: asString(row.period_start),
+    periodEnd: asString(row.period_end),
+    revenue: asNumber(row.revenue),
+    lineCount: asInt(row.line_count),
+    customerCount: asInt(row.customer_count),
+  }));
+
+  const topCustomers: StripeAiSpendGroupRow[] = topCustomersRows.map((row) => ({
+    key: asString(row.group_key) || "(blank)",
+    label: asString(row.group_label) || "(blank)",
+    revenue: asNumber(row.revenue),
+    lineCount: asInt(row.line_count),
+  }));
+
+  const topProducts: StripeAiSpendGroupRow[] = topProductsRows.map((row) => ({
+    key: asString(row.group_key) || "(blank)",
+    label: asString(row.group_label) || "(blank)",
+    revenue: asNumber(row.revenue),
+    lineCount: asInt(row.line_count),
+  }));
+
+  const topPrices: StripeAiSpendPriceRow[] = topPricesRows.map((row) => ({
+    priceId: asString(row.price_id) || "(blank)",
+    priceLabel: asString(row.price_label) || "(blank)",
+    productId: asString(row.product_id) || "(blank)",
+    productLabel: asString(row.product_label) || "(blank)",
+    revenue: asNumber(row.revenue),
+    lineCount: asInt(row.line_count),
+  }));
+
+  const detailRows: StripeAiSpendDetailRow[] = detailRowsRaw.map((row) => ({
+    invoiceDate: asString(row.invoice_date),
+    customerId: asString(row.customer_id),
+    customerName: asString(row.customer_name),
+    lineItemId: asString(row.line_item_id),
+    lineItemDescription: asString(row.line_item_description),
+    priceId: asString(row.price_id),
+    priceLabel: asString(row.price_label),
+    productId: asString(row.product_id),
+    productLabel: asString(row.product_label),
+    revenue: asNumber(row.revenue),
+    quantity: asNumber(row.quantity),
+  }));
+
+  const totalRevenue = points.reduce((sum, point) => sum + point.revenue, 0);
+
+  return {
+    startDate: startDateIso,
+    endDate: endDateIso,
+    grain,
+    targetCurrency: targetCurrency.toUpperCase(),
+    totalRevenue: round2(totalRevenue),
+    points,
+    topCustomers,
+    topProducts,
+    topPrices,
+    detailRows,
   };
 }
 

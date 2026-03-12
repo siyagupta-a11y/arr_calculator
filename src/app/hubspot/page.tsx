@@ -1750,6 +1750,12 @@ export default function Home() {
             <Link href="/stripe-billing-overview" className="stripe-ui__hero-link">
               Open Stripe Billing Overview
             </Link>
+            <Link href="/ai-spend" className="stripe-ui__hero-link">
+              Open AI spend
+            </Link>
+            <Link href="/quickbooks" className="stripe-ui__hero-link">
+              Open QuickBooks
+            </Link>
           </div>
         </div>
       </section>
