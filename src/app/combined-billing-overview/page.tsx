@@ -18,6 +18,8 @@ type CombinedPoint = {
   churnMrr: number;
   netMrrChange: number;
   mrrGrowthRatePct: number;
+  ndrPct: number;
+  gdrPct: number;
   arr: number;
   arrGrowth: number;
 };
@@ -240,6 +242,8 @@ function buildHubPointsFromAccounts(
       churnMrr,
       netMrrChange,
       mrrGrowthRatePct,
+      ndrPct: 0,
+      gdrPct: 0,
       arr,
       arrGrowth,
     };
@@ -299,6 +303,27 @@ function formatPercent(value: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value || 0)}%`;
+}
+
+function csvEscape(value: string | number) {
+  const text = String(value ?? "");
+  if (/[",\n]/.test(text)) {
+    return `"${text.replace(/"/g, "\"\"")}"`;
+  }
+  return text;
+}
+
+function downloadCsv(filename: string, rows: Array<Array<string | number>>) {
+  const lines = rows.map((row) => row.map((cell) => csvEscape(cell)).join(","));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function tickIndices(size: number) {
@@ -493,6 +518,265 @@ function LineChartCard({
             </text>
           </svg>
         </div>
+      )}
+    </section>
+  );
+}
+
+type RetentionRatesChartCardProps = {
+  points: CombinedPoint[];
+};
+
+function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [showTable, setShowTable] = useState(false);
+
+  const width = 640;
+  const height = 250;
+  const paddingLeft = 54;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 42;
+  const plotWidth = width - paddingLeft - paddingRight;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  const ndrValues = points.map((point) => point.ndrPct);
+  const gdrValues = points.map((point) => point.gdrPct);
+  const allValues = [...ndrValues, ...gdrValues];
+
+  const minRaw = allValues.length ? Math.min(...allValues) : 0;
+  const maxRaw = allValues.length ? Math.max(...allValues) : 1;
+  let minValue = minRaw;
+  let maxValue = maxRaw;
+  if (Math.abs(maxValue - minValue) < 1e-9) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+
+  const xAt = (idx: number) => {
+    if (points.length <= 1) return paddingLeft + plotWidth / 2;
+    return paddingLeft + (idx / (points.length - 1)) * plotWidth;
+  };
+  const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+
+  const ndrPath = points
+    .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(point.ndrPct)}`)
+    .join(" ");
+  const gdrPath = points
+    .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(point.gdrPct)}`)
+    .join(" ");
+
+  const hoveredPoint =
+    hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length ? points[hoverIndex] : null;
+  const hoveredX = hoveredPoint && hoverIndex != null ? xAt(hoverIndex) : 0;
+  const hoveredNdrY = hoveredPoint ? yAt(hoveredPoint.ndrPct) : 0;
+  const hoveredGdrY = hoveredPoint ? yAt(hoveredPoint.gdrPct) : 0;
+  const hoveredY = hoveredPoint ? Math.min(hoveredNdrY, hoveredGdrY) : 0;
+
+  const tooltipWidth = 250;
+  const tooltipHeight = 58;
+  const tooltipX = Math.max(
+    paddingLeft,
+    Math.min(paddingLeft + plotWidth - tooltipWidth, hoveredX - tooltipWidth / 2),
+  );
+  const tooltipY = Math.max(paddingTop + 4, hoveredY - tooltipHeight - 10);
+
+  const exportTableCsv = () => {
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    const rows: Array<Array<string | number>> = [
+      ["Period", "NDR (%)", "GDR (%)"],
+      ...points.map((point) => [point.label, round2(point.ndrPct), round2(point.gdrPct)]),
+    ];
+    downloadCsv(`combined-ndr-gdr-${stamp}.csv`, rows);
+  };
+
+  return (
+    <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+      <div className="stripe-ui__section-head">
+        <div>
+          <h2 className="stripe-ui__panel-title">NDR / GDR Over Time</h2>
+          <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+            Retention rates based on prior-period combined MRR baseline. Click chart to open the plotted table.
+          </p>
+        </div>
+        <div className="stripe-ui__hint" aria-live="polite">
+          {hoveredPoint
+            ? `${hoveredPoint.label}: NDR ${formatPercent(hoveredPoint.ndrPct)} | GDR ${formatPercent(hoveredPoint.gdrPct)}`
+            : "Hover on chart for values"}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: "0.8rem", flexWrap: "wrap", marginTop: "0.7rem" }}>
+        <span className="stripe-ui__hint" style={{ color: "#4f8df9" }}>NDR</span>
+        <span className="stripe-ui__hint" style={{ color: "#ef4444" }}>GDR</span>
+      </div>
+
+      {points.length === 0 ? (
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.9rem", marginBottom: 0 }}>
+          No data for selected range.
+        </p>
+      ) : (
+        <>
+          <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem", cursor: "pointer" }}>
+            <svg
+              viewBox={`0 0 ${width} ${height}`}
+              role="img"
+              aria-label="NDR and GDR over time chart"
+              style={{ width: "100%", display: "block" }}
+              onClick={() => setShowTable(true)}
+              onMouseLeave={() => setHoverIndex(null)}
+              onMouseMove={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const relX = ((e.clientX - rect.left) / rect.width) * width;
+                const clamped = Math.max(paddingLeft, Math.min(paddingLeft + plotWidth, relX));
+                const ratio = points.length > 1 ? (clamped - paddingLeft) / plotWidth : 0;
+                const idx = Math.max(0, Math.min(points.length - 1, Math.round(ratio * Math.max(points.length - 1, 0))));
+                setHoverIndex(idx);
+              }}
+            >
+              <line
+                x1={paddingLeft}
+                y1={paddingTop + plotHeight}
+                x2={paddingLeft + plotWidth}
+                y2={paddingTop + plotHeight}
+                stroke="#36557f"
+                strokeWidth={1}
+              />
+              <line
+                x1={paddingLeft}
+                y1={paddingTop}
+                x2={paddingLeft}
+                y2={paddingTop + plotHeight}
+                stroke="#36557f"
+                strokeWidth={1}
+              />
+
+              {points.map((point, idx) => {
+                const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
+                const right = idx === points.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+                return (
+                  <rect
+                    key={`hover-${point.key}`}
+                    x={left}
+                    y={paddingTop}
+                    width={Math.max(1, right - left)}
+                    height={plotHeight}
+                    fill="transparent"
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                );
+              })}
+
+              <path d={ndrPath} fill="none" stroke="#4f8df9" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+              <path d={gdrPath} fill="none" stroke="#ef4444" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+
+              {hoverIndex != null && points[hoverIndex] && (
+                <line
+                  x1={xAt(hoverIndex)}
+                  y1={paddingTop}
+                  x2={xAt(hoverIndex)}
+                  y2={paddingTop + plotHeight}
+                  stroke="#89a9d4"
+                  strokeOpacity={0.5}
+                  strokeDasharray="4 4"
+                />
+              )}
+
+              {hoveredPoint && (
+                <g>
+                  <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx={6} fill="#0e203b" opacity={0.97} />
+                  <text x={tooltipX + 10} y={tooltipY + 16} fill="#d9e6fa" fontSize="11.5">
+                    {hoveredPoint.label}
+                  </text>
+                  <text x={tooltipX + 10} y={tooltipY + 33} fill="#4f8df9" fontSize="12.5" fontWeight="600">
+                    NDR: {formatPercent(hoveredPoint.ndrPct)}
+                  </text>
+                  <text x={tooltipX + 10} y={tooltipY + 50} fill="#ef4444" fontSize="12.5" fontWeight="600">
+                    GDR: {formatPercent(hoveredPoint.gdrPct)}
+                  </text>
+                </g>
+              )}
+
+              {points.map((point, idx) => (
+                <g key={point.key}>
+                  <circle
+                    cx={xAt(idx)}
+                    cy={yAt(point.ndrPct)}
+                    r={hoverIndex === idx ? 4.6 : 3.2}
+                    fill="#4f8df9"
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                  <circle
+                    cx={xAt(idx)}
+                    cy={yAt(point.gdrPct)}
+                    r={hoverIndex === idx ? 4.6 : 3.2}
+                    fill="#ef4444"
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                </g>
+              ))}
+
+              {tickIndices(points.length).map((idx) => (
+                <text
+                  key={`tick-${idx}`}
+                  x={xAt(idx)}
+                  y={height - 12}
+                  textAnchor={idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle"}
+                  fill="#b7c9e6"
+                  fontSize="12"
+                >
+                  {points[idx]?.label || ""}
+                </text>
+              ))}
+
+              <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#8ea7cb" fontSize="12">
+                {formatPercent(maxValue)}
+              </text>
+              <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#8ea7cb" fontSize="12">
+                {formatPercent(minValue)}
+              </text>
+            </svg>
+          </div>
+
+          {showTable && (
+            <div className="stripe-ui__panel" style={{ marginTop: "0.9rem", padding: "0.85rem" }}>
+              <div className="stripe-ui__section-head" style={{ marginBottom: "0.65rem" }}>
+                <h3 className="stripe-ui__panel-title" style={{ margin: 0, fontSize: "1rem" }}>
+                  NDR / GDR Table
+                </h3>
+                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                  <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={exportTableCsv}>
+                    Export CSV
+                  </button>
+                  <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => setShowTable(false)}>
+                    Hide table
+                  </button>
+                </div>
+              </div>
+
+              <div className="stripe-ui__table-wrap">
+                <table className="stripe-ui__table" aria-label="NDR and GDR table">
+                  <thead>
+                    <tr>
+                      <th>Period</th>
+                      <th className="stripe-ui__num">NDR</th>
+                      <th className="stripe-ui__num">GDR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {points.map((point) => (
+                      <tr key={`retention-row-${point.key}`}>
+                        <td>{point.label}</td>
+                        <td className="stripe-ui__num">{formatPercent(point.ndrPct)}</td>
+                        <td className="stripe-ui__num">{formatPercent(point.gdrPct)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </section>
   );
@@ -1002,6 +1286,8 @@ export default function CombinedBillingOverviewPage() {
           churnMrr: round2((hub?.churnMrr || 0) + (stripePoint?.churnMrr || 0)),
           netMrrChange: round2((hub?.netMrrChange || 0) + (stripePoint?.netMrrChange || 0)),
           mrrGrowthRatePct: 0,
+          ndrPct: 0,
+          gdrPct: 0,
           arr: round2((hub?.arr || 0) + (stripePoint?.arr || 0)),
           arrGrowth: round2((hub?.arrGrowth || 0) + (stripePoint?.arrGrowth || 0)),
         };
@@ -1012,7 +1298,15 @@ export default function CombinedBillingOverviewPage() {
         const mrrGrowthRatePct = Math.abs(prevMrr) > 1e-9
           ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
           : 0;
-        return { ...point, mrrGrowthRatePct };
+        const ndrPct =
+          Math.abs(prevMrr) > 1e-9
+            ? round2(((prevMrr + point.expansionMrr + point.contractionMrr + point.churnMrr) / prevMrr) * 100)
+            : 0;
+        const gdrPct =
+          Math.abs(prevMrr) > 1e-9
+            ? round2(((prevMrr + point.contractionMrr + point.churnMrr) / prevMrr) * 100)
+            : 0;
+        return { ...point, mrrGrowthRatePct, ndrPct, gdrPct };
       });
 
       const currentMrr = combinedPoints.length ? combinedPoints[combinedPoints.length - 1].mrrEnd : 0;
@@ -1213,6 +1507,8 @@ export default function CombinedBillingOverviewPage() {
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => formatMoney(v, currency)}
             />
+
+            <RetentionRatesChartCard points={points} />
           </div>
         </>
       )}
