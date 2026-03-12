@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { downloadSvgAsPng } from "@/lib/chartDownload";
 
 type Grain = "daily" | "weekly" | "monthly" | "quarterly";
 type ChartGroupBy = "none" | "product_id" | "price_id" | "subscription_item_id" | "subscription_id" | "customer_id";
@@ -288,6 +289,8 @@ function LineChartCard({
   headerControl,
 }: LineChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const chartRef = useRef<SVGSVGElement | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   const width = 640;
   const height = 250;
@@ -331,6 +334,15 @@ function LineChartCard({
     Math.min(paddingLeft + plotWidth - tooltipWidth, hoveredX - tooltipWidth / 2),
   );
   const tooltipY = Math.max(paddingTop + 4, hoveredY - tooltipHeight - 10);
+  const downloadChart = useCallback(async () => {
+    if (!chartRef.current || downloading) return;
+    setDownloading(true);
+    try {
+      await downloadSvgAsPng(chartRef.current, `stripe-billing-overview-${title}`);
+    } finally {
+      setDownloading(false);
+    }
+  }, [downloading, title]);
 
   return (
     <section className="stripe-ui__panel ui-reveal ui-reveal-2">
@@ -342,6 +354,9 @@ function LineChartCard({
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
+            {downloading ? "Downloading..." : "Download chart"}
+          </button>
           {headerControl}
           <div className="stripe-ui__hint" aria-live="polite">
             {hoveredPoint
@@ -358,6 +373,7 @@ function LineChartCard({
       ) : (
         <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
           <svg
+            ref={chartRef}
             viewBox={`0 0 ${width} ${height}`}
             role="img"
             aria-label={title}
@@ -491,6 +507,8 @@ function MultiLineChartCard({
   headerControl,
 }: MultiLineChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const chartRef = useRef<SVGSVGElement | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   const width = 640;
   const height = 250;
@@ -518,6 +536,15 @@ function MultiLineChartCard({
   const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
 
   const hoveredPeriod = hoverIndex != null && hoverIndex >= 0 && hoverIndex < periods.length ? periods[hoverIndex] : null;
+  const downloadChart = useCallback(async () => {
+    if (!chartRef.current || downloading) return;
+    setDownloading(true);
+    try {
+      await downloadSvgAsPng(chartRef.current, `stripe-billing-overview-${title}`);
+    } finally {
+      setDownloading(false);
+    }
+  }, [downloading, title]);
 
   return (
     <section className="stripe-ui__panel ui-reveal ui-reveal-2">
@@ -529,6 +556,9 @@ function MultiLineChartCard({
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
+            {downloading ? "Downloading..." : "Download chart"}
+          </button>
           {headerControl}
           <div className="stripe-ui__hint" aria-live="polite">
             {hoveredPeriod ? hoveredPeriod.label : "Hover on chart for values"}
@@ -552,6 +582,7 @@ function MultiLineChartCard({
         <>
           <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
             <svg
+              ref={chartRef}
               viewBox={`0 0 ${width} ${height}`}
               role="img"
               aria-label={title}
@@ -694,6 +725,8 @@ function GrowthBreakdownChart({
   includeReactivation = false,
 }: GrowthBreakdownChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const chartRef = useRef<SVGSVGElement | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   const width = 640;
   const height = 280;
@@ -758,6 +791,15 @@ function GrowthBreakdownChart({
 
   const barWidth = points.length > 0 ? Math.max(8, Math.min(28, (plotWidth / Math.max(points.length, 1)) * 0.62)) : 14;
   const hovered = hoverIndex != null && hoverIndex >= 0 && hoverIndex < bars.length ? bars[hoverIndex] : null;
+  const downloadChart = useCallback(async () => {
+    if (!chartRef.current || downloading) return;
+    setDownloading(true);
+    try {
+      await downloadSvgAsPng(chartRef.current, `stripe-billing-overview-${title}`);
+    } finally {
+      setDownloading(false);
+    }
+  }, [downloading, title]);
 
   return (
     <section className="stripe-ui__panel ui-reveal ui-reveal-2">
@@ -768,10 +810,15 @@ function GrowthBreakdownChart({
             {subtitle}
           </p>
         </div>
-        <div className="stripe-ui__hint" aria-live="polite">
-          {hovered
-            ? `${hovered.point.label}: Net ${formatMoney(hovered.point.netMrrChange, currency)}`
-            : "Hover on bars for values"}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
+            {downloading ? "Downloading..." : "Download chart"}
+          </button>
+          <div className="stripe-ui__hint" aria-live="polite">
+            {hovered
+              ? `${hovered.point.label}: Net ${formatMoney(hovered.point.netMrrChange, currency)}`
+              : "Hover on bars for values"}
+          </div>
         </div>
       </div>
 
@@ -790,6 +837,7 @@ function GrowthBreakdownChart({
       ) : (
         <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
           <svg
+            ref={chartRef}
             viewBox={`0 0 ${width} ${height}`}
             role="img"
             aria-label="Growth breakdown chart"
@@ -926,6 +974,8 @@ type DeltaBarChartProps = {
 
 function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormatter }: DeltaBarChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const chartRef = useRef<SVGSVGElement | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   const width = 640;
   const height = 280;
@@ -958,6 +1008,15 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
     hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length
       ? points[hoverIndex]
       : null;
+  const downloadChart = useCallback(async () => {
+    if (!chartRef.current || downloading) return;
+    setDownloading(true);
+    try {
+      await downloadSvgAsPng(chartRef.current, `stripe-billing-overview-${title}`);
+    } finally {
+      setDownloading(false);
+    }
+  }, [downloading, title]);
 
   return (
     <section className="stripe-ui__panel ui-reveal ui-reveal-2">
@@ -968,10 +1027,15 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
             {subtitle}
           </p>
         </div>
-        <div className="stripe-ui__hint" aria-live="polite">
-          {hovered
-            ? `${hovered.label}: ${valueFormatter(valueAccessor(hovered))}`
-            : "Hover on bars for values"}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
+            {downloading ? "Downloading..." : "Download chart"}
+          </button>
+          <div className="stripe-ui__hint" aria-live="polite">
+            {hovered
+              ? `${hovered.label}: ${valueFormatter(valueAccessor(hovered))}`
+              : "Hover on bars for values"}
+          </div>
         </div>
       </div>
 
@@ -982,6 +1046,7 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
       ) : (
         <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
           <svg
+            ref={chartRef}
             viewBox={`0 0 ${width} ${height}`}
             role="img"
             aria-label={title}
