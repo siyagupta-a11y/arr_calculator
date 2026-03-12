@@ -292,6 +292,10 @@ function buildTrendPointsFromAccounts(
   const baselineArrTotal = round2(
     Array.from(baselineAccountArrByAccount.values()).reduce((acc, value) => acc + value, 0),
   );
+  const allAccountKeys = new Set<string>([
+    ...Array.from(accountArrByPeriod.keys()),
+    ...Array.from(baselineAccountArrByAccount.keys()),
+  ]);
 
   return periodOrder.map((period, idx) => {
     const prevPeriodKey = idx > 0 ? periodOrder[idx - 1].key : "";
@@ -316,7 +320,8 @@ function buildTrendPointsFromAccounts(
     let contractionMrr = 0;
     let churnMrr = 0;
 
-    for (const [accountKey, accountTotals] of accountArrByPeriod.entries()) {
+    for (const accountKey of allAccountKeys) {
+      const accountTotals = accountArrByPeriod.get(accountKey) || {};
       const currArr = round2(accountTotals[period.key] || 0);
       const prevAccountArr = round2(
         idx === 0
