@@ -1202,13 +1202,36 @@ export default function Home() {
     };
 
     try {
-      const fetchReport = async (requestPayload: ReportRequest) => {
-        const res = await fetch("/api/report", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(requestPayload),
-        });
-        const text = await res.text();
+      const fetchReport = async (requestPayload: ReportRequest, attempt = 0): Promise<ReportResponse> => {
+        const maxRetries = 2;
+        const shouldRetry = (message: string) =>
+          /fetch failed|failed to fetch|network|timed out|timeout|aborted|load failed/i.test(message);
+
+        let res: Response;
+        let text = "";
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 45_000);
+          try {
+            res = await fetch("/api/report", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(requestPayload),
+              signal: controller.signal,
+            });
+          } finally {
+            clearTimeout(timeoutId);
+          }
+          text = await res.text();
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err || "Request failed");
+          if (attempt < maxRetries && shouldRetry(message)) {
+            await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+            return fetchReport(requestPayload, attempt + 1);
+          }
+          throw err;
+        }
+
         let json: unknown = null;
         try {
           json = text ? JSON.parse(text) : null;
@@ -1218,12 +1241,27 @@ export default function Home() {
 
         if (!res.ok) {
           if (json && typeof json === "object" && "error" in json) {
-            throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+            const apiError = String((json as { error?: unknown }).error || "Request failed");
+            if (attempt < maxRetries && res.status >= 500) {
+              await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+              return fetchReport(requestPayload, attempt + 1);
+            }
+            throw new Error(apiError);
+          }
+          if (attempt < maxRetries && res.status >= 500) {
+            await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+            return fetchReport(requestPayload, attempt + 1);
           }
           throw new Error(text || "Request failed");
         }
 
-        if (!json || typeof json !== "object") throw new Error("Invalid API response");
+        if (!json || typeof json !== "object") {
+          if (attempt < maxRetries) {
+            await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+            return fetchReport(requestPayload, attempt + 1);
+          }
+          throw new Error("Invalid API response");
+        }
         return json as ReportResponse;
       };
 
