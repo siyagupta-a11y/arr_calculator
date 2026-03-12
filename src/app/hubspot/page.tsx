@@ -371,6 +371,60 @@ function buildTrendPointsFromAccounts(
   });
 }
 
+function aggregateTrendPointsByPeriod(
+  templatePoints: TrendPoint[],
+  seriesList: Array<{ points: TrendPoint[] }>,
+) {
+  if (!templatePoints.length || !seriesList.length) return templatePoints;
+
+  const pointMaps = seriesList.map((series) => {
+    const byKey = new Map<string, TrendPoint>();
+    for (const point of series.points || []) {
+      byKey.set(point.key, point);
+    }
+    return byKey;
+  });
+
+  return templatePoints.map((template) => {
+    let mrr = 0;
+    let arr = 0;
+    let newMrr = 0;
+    let expansionMrr = 0;
+    let contractionMrr = 0;
+    let churnMrr = 0;
+    let netMrrChange = 0;
+    let mrrGrowthRatePct = 0;
+    let arrGrowth = 0;
+
+    for (const pointMap of pointMaps) {
+      const point = pointMap.get(template.key);
+      if (!point) continue;
+      mrr += point.mrr || 0;
+      arr += point.arr || 0;
+      newMrr += point.newMrr || 0;
+      expansionMrr += point.expansionMrr || 0;
+      contractionMrr += point.contractionMrr || 0;
+      churnMrr += point.churnMrr || 0;
+      netMrrChange += point.netMrrChange || 0;
+      mrrGrowthRatePct += point.mrrGrowthRatePct || 0;
+      arrGrowth += point.arrGrowth || 0;
+    }
+
+    return {
+      ...template,
+      mrr: round2(mrr),
+      arr: round2(arr),
+      newMrr: round2(newMrr),
+      expansionMrr: round2(expansionMrr),
+      contractionMrr: round2(contractionMrr),
+      churnMrr: round2(churnMrr),
+      netMrrChange: round2(netMrrChange),
+      mrrGrowthRatePct: round2(mrrGrowthRatePct),
+      arrGrowth: round2(arrGrowth),
+    };
+  });
+}
+
 type LineChartProps = {
   title: string;
   subtitle: string;
@@ -1105,7 +1159,7 @@ export default function Home() {
   const [mode, setMode] = useState<ReportMode>("arr");
   const [grain, setGrain] = useState<Grain>("monthly");
   const [chartGroupBy, setChartGroupBy] = useState<ChartGroupField>("none");
-  const [selectedBarGroupKey, setSelectedBarGroupKey] = useState<string>("__all__");
+  const [selectedBarGroupKeys, setSelectedBarGroupKeys] = useState<string[]>([]);
 
   const [groupByFields, setGroupByFields] = useState<GroupField[]>([]);
   const [groupByToAdd, setGroupByToAdd] = useState<GroupField | "none">("none");
@@ -1516,21 +1570,42 @@ export default function Home() {
 
   useEffect(() => {
     if (chartGroupBy === "none") {
-      setSelectedBarGroupKey("__all__");
+      if (selectedBarGroupKeys.length > 0) setSelectedBarGroupKeys([]);
       return;
     }
-    if (groupedChartSeries.length === 0) return;
-    if (!groupedChartSeries.some((series) => series.key === selectedBarGroupKey)) {
-      setSelectedBarGroupKey(groupedChartSeries[0].key);
+    if (groupedChartSeries.length === 0) {
+      if (selectedBarGroupKeys.length > 0) setSelectedBarGroupKeys([]);
+      return;
     }
-  }, [chartGroupBy, groupedChartSeries, selectedBarGroupKey]);
+    const availableKeys = new Set(groupedChartSeries.map((series) => series.key));
+    const validSelected = selectedBarGroupKeys.filter((key) => availableKeys.has(key));
+    if (validSelected.length === 0) {
+      const first = groupedChartSeries[0]?.key;
+      setSelectedBarGroupKeys(first ? [first] : []);
+      return;
+    }
+    if (validSelected.length !== selectedBarGroupKeys.length) {
+      setSelectedBarGroupKeys(validSelected);
+    }
+  }, [chartGroupBy, groupedChartSeries, selectedBarGroupKeys]);
 
-  const selectedBarSeries = useMemo(() => {
-    if (chartGroupBy === "none") return null;
-    return groupedChartSeries.find((series) => series.key === selectedBarGroupKey) || groupedChartSeries[0] || null;
-  }, [chartGroupBy, groupedChartSeries, selectedBarGroupKey]);
+  const selectedBarSeriesList = useMemo(() => {
+    if (chartGroupBy === "none") return [] as GroupTrendSeries[];
+    const selected = groupedChartSeries.filter((series) => selectedBarGroupKeys.includes(series.key));
+    return selected.length ? selected : groupedChartSeries.slice(0, 1);
+  }, [chartGroupBy, groupedChartSeries, selectedBarGroupKeys]);
 
-  const barChartPoints = selectedBarSeries?.points || chartPoints;
+  const selectedBarSeriesLabel = useMemo(() => {
+    if (chartGroupBy === "none") return "selected groups";
+    if (selectedBarSeriesList.length === 1) return selectedBarSeriesList[0].label;
+    if (selectedBarSeriesList.length === groupedChartSeries.length) return `all ${groupedChartSeries.length} groups`;
+    return `${selectedBarSeriesList.length} selected groups`;
+  }, [chartGroupBy, selectedBarSeriesList, groupedChartSeries.length]);
+
+  const barChartPoints = useMemo(() => {
+    if (chartGroupBy === "none") return chartPoints;
+    return aggregateTrendPointsByPeriod(chartPoints, selectedBarSeriesList);
+  }, [chartGroupBy, chartPoints, selectedBarSeriesList]);
   const chartGroupingLabel = CHART_GROUP_OPTIONS.find((opt) => opt.key === chartGroupBy)?.label || "Overall";
   const chartGroupingEnabled = chartGroupBy !== "none" && groupedChartSeries.length > 0;
 
@@ -1862,29 +1937,54 @@ export default function Home() {
                 <div>
                   <h2 className="stripe-ui__panel-title">Grouped Charts</h2>
                   <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-                    Line charts are split by {chartGroupingLabel.toLowerCase()}. Bar charts use a selected group view.
+                    Line charts are split by {chartGroupingLabel.toLowerCase()}. Bar charts sum selected groups.
                   </p>
                 </div>
                 <div className="stripe-ui__hint">{`${groupedChartSeries.length} groups shown`}</div>
               </div>
 
               <div className="stripe-ui__control-grid" style={{ marginTop: "0.8rem" }}>
-                <div className="stripe-ui__field">
-                  <label className="stripe-ui__field-label" htmlFor="hubspot-bar-group-select">
-                    Bar chart group
+                <div className="stripe-ui__field" style={{ gridColumn: "1 / -1" }}>
+                  <label className="stripe-ui__field-label" htmlFor="hubspot-bar-group-list">
+                    Bar chart groups
                   </label>
-                  <select
-                    id="hubspot-bar-group-select"
-                    className="stripe-ui__control"
-                    value={selectedBarSeries?.key || ""}
-                    onChange={(e) => setSelectedBarGroupKey(e.target.value)}
-                  >
+                  <div id="hubspot-bar-group-list" className="stripe-ui__chips">
                     {groupedChartSeries.map((series) => (
-                      <option key={series.key} value={series.key}>
+                      <button
+                        key={series.key}
+                        type="button"
+                        className="stripe-ui__chip"
+                        style={{
+                          borderColor: selectedBarGroupKeys.includes(series.key) ? series.color : undefined,
+                          color: selectedBarGroupKeys.includes(series.key) ? "#dbe7fb" : undefined,
+                          boxShadow: selectedBarGroupKeys.includes(series.key)
+                            ? `inset 0 0 0 1px ${series.color}`
+                            : undefined,
+                        }}
+                        onClick={() =>
+                          setSelectedBarGroupKeys((prev) => {
+                            if (prev.includes(series.key)) {
+                              if (prev.length <= 1) return prev;
+                              return prev.filter((key) => key !== series.key);
+                            }
+                            return [...prev, series.key];
+                          })
+                        }
+                      >
                         {series.label}
-                      </option>
+                      </button>
                     ))}
-                  </select>
+                  </div>
+                  <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.55rem", flexWrap: "wrap" }}>
+                    <button
+                      className="stripe-ui__btn stripe-ui__btn--ghost"
+                      type="button"
+                      onClick={() => setSelectedBarGroupKeys(groupedChartSeries.map((series) => series.key))}
+                    >
+                      Select all
+                    </button>
+                    <span className="stripe-ui__hint">{`${selectedBarSeriesList.length} selected`}</span>
+                  </div>
                 </div>
               </div>
             </section>
@@ -1966,7 +2066,7 @@ export default function Home() {
               title="ARR Growth Over Time"
               subtitle={
                 chartGroupingEnabled
-                  ? `Absolute Contracted ARR change for ${selectedBarSeries?.label || "selected group"} per period.`
+                  ? `Absolute Contracted ARR change for ${selectedBarSeriesLabel} per period.`
                   : "Absolute Contracted ARR change per period."
               }
               points={barChartPoints}

@@ -209,6 +209,63 @@ function computeMrrGrowthRates(points: OverviewPoint[], lookbackPeriods: number)
   });
 }
 
+function aggregateOverviewPointsByPeriod(
+  templatePoints: OverviewPoint[],
+  seriesList: Array<{ points: OverviewPoint[] }>,
+) {
+  if (!templatePoints.length || !seriesList.length) return templatePoints;
+
+  const pointMaps = seriesList.map((series) => {
+    const byKey = new Map<string, OverviewPoint>();
+    for (const point of series.points || []) {
+      byKey.set(point.key, point);
+    }
+    return byKey;
+  });
+
+  return templatePoints.map((template) => {
+    let mrrEnd = 0;
+    let newMrr = 0;
+    let reactivationMrr = 0;
+    let expansionMrr = 0;
+    let contractionMrr = 0;
+    let churnMrr = 0;
+    let netMrrChange = 0;
+    let mrrGrowthRatePct = 0;
+    let arr = 0;
+    let arrGrowth = 0;
+
+    for (const pointMap of pointMaps) {
+      const point = pointMap.get(template.key);
+      if (!point) continue;
+      mrrEnd += point.mrrEnd || 0;
+      newMrr += point.newMrr || 0;
+      reactivationMrr += point.reactivationMrr || 0;
+      expansionMrr += point.expansionMrr || 0;
+      contractionMrr += point.contractionMrr || 0;
+      churnMrr += point.churnMrr || 0;
+      netMrrChange += point.netMrrChange || 0;
+      mrrGrowthRatePct += point.mrrGrowthRatePct || 0;
+      arr += point.arr || 0;
+      arrGrowth += point.arrGrowth || 0;
+    }
+
+    return {
+      ...template,
+      mrrEnd: Math.round(mrrEnd * 100) / 100,
+      newMrr: Math.round(newMrr * 100) / 100,
+      reactivationMrr: Math.round(reactivationMrr * 100) / 100,
+      expansionMrr: Math.round(expansionMrr * 100) / 100,
+      contractionMrr: Math.round(contractionMrr * 100) / 100,
+      churnMrr: Math.round(churnMrr * 100) / 100,
+      netMrrChange: Math.round(netMrrChange * 100) / 100,
+      mrrGrowthRatePct: Math.round(mrrGrowthRatePct * 100) / 100,
+      arr: Math.round(arr * 100) / 100,
+      arrGrowth: Math.round(arrGrowth * 100) / 100,
+    };
+  });
+}
+
 type LineChartProps = {
   title: string;
   subtitle: string;
@@ -1008,7 +1065,7 @@ export default function StripeBillingOverviewPage() {
   const [endDate, setEndDate] = useState(defaults.endDate);
   const [grain, setGrain] = useState<Grain>("monthly");
   const [chartGroupBy, setChartGroupBy] = useState<ChartGroupBy>("none");
-  const [selectedBarGroupKey, setSelectedBarGroupKey] = useState<string>("");
+  const [selectedBarGroupKeys, setSelectedBarGroupKeys] = useState<string[]>([]);
   const [mrrGrowthWindow, setMrrGrowthWindow] = useState<string>(defaultGrowthWindowValue("monthly"));
 
   const [loading, setLoading] = useState(false);
@@ -1117,11 +1174,21 @@ export default function StripeBillingOverviewPage() {
     [groupedSeries, selectedGrowthLookback],
   );
   const chartGroupingEnabled = chartGroupBy !== "none" && groupedLineSeries.length > 0;
-  const selectedBarSeries = useMemo(() => {
-    if (!chartGroupingEnabled) return null;
-    return groupedLineSeries.find((series) => series.key === selectedBarGroupKey) || groupedLineSeries[0] || null;
-  }, [chartGroupingEnabled, groupedLineSeries, selectedBarGroupKey]);
-  const barChartPoints = selectedBarSeries?.points || points;
+  const selectedBarSeriesList = useMemo(() => {
+    if (!chartGroupingEnabled) return [] as typeof groupedLineSeries;
+    const selected = groupedLineSeries.filter((series) => selectedBarGroupKeys.includes(series.key));
+    return selected.length ? selected : groupedLineSeries.slice(0, 1);
+  }, [chartGroupingEnabled, groupedLineSeries, selectedBarGroupKeys]);
+  const selectedBarSeriesLabel = useMemo(() => {
+    if (!chartGroupingEnabled) return "selected groups";
+    if (selectedBarSeriesList.length === 1) return selectedBarSeriesList[0].label;
+    if (selectedBarSeriesList.length === groupedLineSeries.length) return `all ${groupedLineSeries.length} groups`;
+    return `${selectedBarSeriesList.length} selected groups`;
+  }, [chartGroupingEnabled, selectedBarSeriesList, groupedLineSeries.length]);
+  const barChartPoints = useMemo(() => {
+    if (!chartGroupingEnabled) return points;
+    return aggregateOverviewPointsByPeriod(points, selectedBarSeriesList);
+  }, [chartGroupingEnabled, points, selectedBarSeriesList]);
   const chartGroupingLabel = CHART_GROUP_OPTIONS.find((option) => option.key === chartGroupBy)?.label || "Overall";
   const chartPeriods = useMemo(
     () => points.map((point) => ({ key: point.key, label: point.label })),
@@ -1129,13 +1196,20 @@ export default function StripeBillingOverviewPage() {
   );
   useEffect(() => {
     if (!chartGroupingEnabled) {
-      if (selectedBarGroupKey !== "") setSelectedBarGroupKey("");
+      if (selectedBarGroupKeys.length > 0) setSelectedBarGroupKeys([]);
       return;
     }
-    if (!groupedLineSeries.some((series) => series.key === selectedBarGroupKey)) {
-      setSelectedBarGroupKey(groupedLineSeries[0]?.key || "");
+    const availableKeys = new Set(groupedLineSeries.map((series) => series.key));
+    const validSelected = selectedBarGroupKeys.filter((key) => availableKeys.has(key));
+    if (validSelected.length === 0) {
+      const first = groupedLineSeries[0]?.key;
+      setSelectedBarGroupKeys(first ? [first] : []);
+      return;
     }
-  }, [chartGroupingEnabled, groupedLineSeries, selectedBarGroupKey]);
+    if (validSelected.length !== selectedBarGroupKeys.length) {
+      setSelectedBarGroupKeys(validSelected);
+    }
+  }, [chartGroupingEnabled, groupedLineSeries, selectedBarGroupKeys]);
   const customerArrMatrixRows = useMemo(() => {
     const snapshotsByCustomer = new Map<string, Map<string, number>>();
     const periodKeys = new Set(customerPeriodColumns.map((column) => column.key));
@@ -1339,29 +1413,54 @@ export default function StripeBillingOverviewPage() {
                 <div>
                   <h2 className="stripe-ui__panel-title">Grouped Charts</h2>
                   <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-                    Line charts are split by {chartGroupingLabel.toLowerCase()}. Bar charts use a selected group view.
+                    Line charts are split by {chartGroupingLabel.toLowerCase()}. Bar charts sum selected groups.
                   </p>
                 </div>
                 <div className="stripe-ui__hint">{`${groupedLineSeries.length} groups shown`}</div>
               </div>
 
               <div className="stripe-ui__control-grid" style={{ marginTop: "0.8rem" }}>
-                <div className="stripe-ui__field">
-                  <label className="stripe-ui__field-label" htmlFor="stripe-billing-bar-group-select">
-                    Bar chart group
+                <div className="stripe-ui__field" style={{ gridColumn: "1 / -1" }}>
+                  <label className="stripe-ui__field-label" htmlFor="stripe-billing-bar-group-list">
+                    Bar chart groups
                   </label>
-                  <select
-                    id="stripe-billing-bar-group-select"
-                    className="stripe-ui__control"
-                    value={selectedBarSeries?.key || ""}
-                    onChange={(e) => setSelectedBarGroupKey(e.target.value)}
-                  >
+                  <div id="stripe-billing-bar-group-list" className="stripe-ui__chips">
                     {groupedLineSeries.map((series) => (
-                      <option key={series.key} value={series.key}>
+                      <button
+                        key={series.key}
+                        type="button"
+                        className="stripe-ui__chip"
+                        style={{
+                          borderColor: selectedBarGroupKeys.includes(series.key) ? series.color : undefined,
+                          color: selectedBarGroupKeys.includes(series.key) ? "#dbe7fb" : undefined,
+                          boxShadow: selectedBarGroupKeys.includes(series.key)
+                            ? `inset 0 0 0 1px ${series.color}`
+                            : undefined,
+                        }}
+                        onClick={() =>
+                          setSelectedBarGroupKeys((prev) => {
+                            if (prev.includes(series.key)) {
+                              if (prev.length <= 1) return prev;
+                              return prev.filter((key) => key !== series.key);
+                            }
+                            return [...prev, series.key];
+                          })
+                        }
+                      >
                         {series.label}
-                      </option>
+                      </button>
                     ))}
-                  </select>
+                  </div>
+                  <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.55rem", flexWrap: "wrap" }}>
+                    <button
+                      className="stripe-ui__btn stripe-ui__btn--ghost"
+                      type="button"
+                      onClick={() => setSelectedBarGroupKeys(groupedLineSeries.map((series) => series.key))}
+                    >
+                      Select all
+                    </button>
+                    <span className="stripe-ui__hint">{`${selectedBarSeriesList.length} selected`}</span>
+                  </div>
                 </div>
               </div>
             </section>
@@ -1401,7 +1500,7 @@ export default function StripeBillingOverviewPage() {
               subtitle={
                 hasStripeExactSeries
                   ? chartGroupingEnabled
-                    ? `Stacked contributions for ${selectedBarSeries?.label || "selected group"} (includes Reactivation).`
+                    ? `Stacked contributions for ${selectedBarSeriesLabel} (includes Reactivation).`
                     : "Stacked contributions for New, Reactivation, Expansion, Contraction, and Churn by period."
                   : "Stacked contributions for New, Expansion, Contraction, and Churn by period."
               }
@@ -1494,7 +1593,7 @@ export default function StripeBillingOverviewPage() {
               title="ARR Growth Over Time"
               subtitle={
                 chartGroupingEnabled
-                  ? `Absolute ARR change for ${selectedBarSeries?.label || "selected group"} per period.`
+                  ? `Absolute ARR change for ${selectedBarSeriesLabel} per period.`
                   : "Absolute ARR change per period."
               }
               points={barChartPoints}
