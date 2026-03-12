@@ -65,6 +65,19 @@ type PeriodRef = {
   label: string;
 };
 
+type RetentionSource = "combined" | "salesled" | "selfserve";
+
+type RetentionSeriesPoint = {
+  key: string;
+  label: string;
+  selfserveGdrPct: number;
+  salesledGdrPct: number;
+  combinedGdrPct: number;
+  selfserveNdrPct: number;
+  salesledNdrPct: number;
+  combinedNdrPct: number;
+};
+
 type CombinedOverviewData = {
   startDate: string;
   endDate: string;
@@ -73,6 +86,7 @@ type CombinedOverviewData = {
   currentMrr: number;
   currentArr: number;
   points: CombinedPoint[];
+  retentionPoints: RetentionSeriesPoint[];
 };
 
 function round2(n: number) {
@@ -229,6 +243,7 @@ function buildHubPointsFromAccounts(
     }
 
     const netMrrChange = round2(newMrr + expansionMrr + contractionMrr + churnMrr);
+    const retention = calculateRetentionRates(prevMrr, expansionMrr, contractionMrr, churnMrr);
 
     return {
       key: period.key,
@@ -242,8 +257,8 @@ function buildHubPointsFromAccounts(
       churnMrr,
       netMrrChange,
       mrrGrowthRatePct,
-      ndrPct: 0,
-      gdrPct: 0,
+      ndrPct: retention.ndrPct,
+      gdrPct: retention.gdrPct,
       arr,
       arrGrowth,
     };
@@ -303,6 +318,16 @@ function formatPercent(value: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value || 0)}%`;
+}
+
+function calculateRetentionRates(prevMrr: number, expansionMrr: number, contractionMrr: number, churnMrr: number) {
+  if (Math.abs(prevMrr) <= 1e-9) {
+    return { ndrPct: 0, gdrPct: 0 };
+  }
+  return {
+    ndrPct: round2(((prevMrr + expansionMrr + contractionMrr + churnMrr) / prevMrr) * 100),
+    gdrPct: round2(((prevMrr + contractionMrr + churnMrr) / prevMrr) * 100),
+  };
 }
 
 function csvEscape(value: string | number) {
@@ -524,12 +549,13 @@ function LineChartCard({
 }
 
 type RetentionRatesChartCardProps = {
-  points: CombinedPoint[];
+  points: RetentionSeriesPoint[];
 };
 
 function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [showTable, setShowTable] = useState(false);
+  const [source, setSource] = useState<RetentionSource>("combined");
 
   const width = 640;
   const height = 250;
@@ -540,8 +566,27 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
   const plotWidth = width - paddingLeft - paddingRight;
   const plotHeight = height - paddingTop - paddingBottom;
 
-  const ndrValues = points.map((point) => point.ndrPct);
-  const gdrValues = points.map((point) => point.gdrPct);
+  const sourceLabel =
+    source === "salesled"
+      ? "Sales-led (HubSpot only)"
+      : source === "selfserve"
+        ? "Self-serve (Stripe Billing Overview only)"
+        : "Combined";
+  const ndrFor = (point: RetentionSeriesPoint) =>
+    source === "salesled"
+      ? point.salesledNdrPct
+      : source === "selfserve"
+        ? point.selfserveNdrPct
+        : point.combinedNdrPct;
+  const gdrFor = (point: RetentionSeriesPoint) =>
+    source === "salesled"
+      ? point.salesledGdrPct
+      : source === "selfserve"
+        ? point.selfserveGdrPct
+        : point.combinedGdrPct;
+
+  const ndrValues = points.map((point) => ndrFor(point));
+  const gdrValues = points.map((point) => gdrFor(point));
   const allValues = [...ndrValues, ...gdrValues];
 
   const minRaw = allValues.length ? Math.min(...allValues) : 0;
@@ -560,17 +605,19 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
   const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
 
   const ndrPath = points
-    .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(point.ndrPct)}`)
+    .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(ndrFor(point))}`)
     .join(" ");
   const gdrPath = points
-    .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(point.gdrPct)}`)
+    .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(gdrFor(point))}`)
     .join(" ");
 
   const hoveredPoint =
     hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length ? points[hoverIndex] : null;
+  const hoveredNdr = hoveredPoint ? ndrFor(hoveredPoint) : 0;
+  const hoveredGdr = hoveredPoint ? gdrFor(hoveredPoint) : 0;
   const hoveredX = hoveredPoint && hoverIndex != null ? xAt(hoverIndex) : 0;
-  const hoveredNdrY = hoveredPoint ? yAt(hoveredPoint.ndrPct) : 0;
-  const hoveredGdrY = hoveredPoint ? yAt(hoveredPoint.gdrPct) : 0;
+  const hoveredNdrY = hoveredPoint ? yAt(hoveredNdr) : 0;
+  const hoveredGdrY = hoveredPoint ? yAt(hoveredGdr) : 0;
   const hoveredY = hoveredPoint ? Math.min(hoveredNdrY, hoveredGdrY) : 0;
 
   const tooltipWidth = 250;
@@ -583,9 +630,17 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
 
   const exportTableCsv = () => {
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    const tableRows: Array<[string, number[]]> = [
+      ["selfserve GDR", points.map((point) => point.selfserveGdrPct)],
+      ["salesled GDR", points.map((point) => point.salesledGdrPct)],
+      ["Combined GDR", points.map((point) => point.combinedGdrPct)],
+      ["selfserve NDR", points.map((point) => point.selfserveNdrPct)],
+      ["salesled NDR", points.map((point) => point.salesledNdrPct)],
+      ["Combined NDR", points.map((point) => point.combinedNdrPct)],
+    ];
     const rows: Array<Array<string | number>> = [
-      ["Period", "NDR (%)", "GDR (%)"],
-      ...points.map((point) => [point.label, round2(point.ndrPct), round2(point.gdrPct)]),
+      ["Metric", ...points.map((point) => point.label)],
+      ...tableRows.map(([metric, values]) => [metric, ...values.map((value) => round2(value))]),
     ];
     downloadCsv(`combined-ndr-gdr-${stamp}.csv`, rows);
   };
@@ -596,17 +651,38 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
         <div>
           <h2 className="stripe-ui__panel-title">NDR / GDR Over Time</h2>
           <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-            Retention rates based on prior-period combined MRR baseline. Click chart to open the plotted table.
+            {sourceLabel} retention rates based on prior-period MRR baseline. Click chart to open the plotted table.
           </p>
         </div>
         <div className="stripe-ui__hint" aria-live="polite">
           {hoveredPoint
-            ? `${hoveredPoint.label}: NDR ${formatPercent(hoveredPoint.ndrPct)} | GDR ${formatPercent(hoveredPoint.gdrPct)}`
+            ? `${hoveredPoint.label}: NDR ${formatPercent(hoveredNdr)} | GDR ${formatPercent(hoveredGdr)}`
             : "Hover on chart for values"}
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: "0.8rem", flexWrap: "wrap", marginTop: "0.7rem" }}>
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.7rem" }}>
+        <button
+          className={`stripe-ui__btn ${source === "combined" ? "stripe-ui__btn--primary" : "stripe-ui__btn--secondary"}`}
+          onClick={() => setSource("combined")}
+        >
+          Combined
+        </button>
+        <button
+          className={`stripe-ui__btn ${source === "salesled" ? "stripe-ui__btn--primary" : "stripe-ui__btn--secondary"}`}
+          onClick={() => setSource("salesled")}
+        >
+          Sales-led
+        </button>
+        <button
+          className={`stripe-ui__btn ${source === "selfserve" ? "stripe-ui__btn--primary" : "stripe-ui__btn--secondary"}`}
+          onClick={() => setSource("selfserve")}
+        >
+          Self-serve
+        </button>
+      </div>
+
+      <div style={{ display: "flex", gap: "0.8rem", flexWrap: "wrap", marginTop: "0.65rem" }}>
         <span className="stripe-ui__hint" style={{ color: "#4f8df9" }}>NDR</span>
         <span className="stripe-ui__hint" style={{ color: "#ef4444" }}>GDR</span>
       </div>
@@ -689,10 +765,10 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
                     {hoveredPoint.label}
                   </text>
                   <text x={tooltipX + 10} y={tooltipY + 33} fill="#4f8df9" fontSize="12.5" fontWeight="600">
-                    NDR: {formatPercent(hoveredPoint.ndrPct)}
+                    NDR: {formatPercent(hoveredNdr)}
                   </text>
                   <text x={tooltipX + 10} y={tooltipY + 50} fill="#ef4444" fontSize="12.5" fontWeight="600">
-                    GDR: {formatPercent(hoveredPoint.gdrPct)}
+                    GDR: {formatPercent(hoveredGdr)}
                   </text>
                 </g>
               )}
@@ -701,14 +777,14 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
                 <g key={point.key}>
                   <circle
                     cx={xAt(idx)}
-                    cy={yAt(point.ndrPct)}
+                    cy={yAt(ndrFor(point))}
                     r={hoverIndex === idx ? 4.6 : 3.2}
                     fill="#4f8df9"
                     onMouseEnter={() => setHoverIndex(idx)}
                   />
                   <circle
                     cx={xAt(idx)}
-                    cy={yAt(point.gdrPct)}
+                    cy={yAt(gdrFor(point))}
                     r={hoverIndex === idx ? 4.6 : 3.2}
                     fill="#ef4444"
                     onMouseEnter={() => setHoverIndex(idx)}
@@ -758,19 +834,63 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
                 <table className="stripe-ui__table" aria-label="NDR and GDR table">
                   <thead>
                     <tr>
-                      <th>Period</th>
-                      <th className="stripe-ui__num">NDR</th>
-                      <th className="stripe-ui__num">GDR</th>
+                      <th>Metric</th>
+                      {points.map((point) => (
+                        <th key={`retention-head-${point.key}`} className="stripe-ui__num">
+                          {point.label}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {points.map((point) => (
-                      <tr key={`retention-row-${point.key}`}>
-                        <td>{point.label}</td>
-                        <td className="stripe-ui__num">{formatPercent(point.ndrPct)}</td>
-                        <td className="stripe-ui__num">{formatPercent(point.gdrPct)}</td>
-                      </tr>
-                    ))}
+                    <tr>
+                      <td>selfserve GDR</td>
+                      {points.map((point) => (
+                        <td key={`row-self-gdr-${point.key}`} className="stripe-ui__num">
+                          {formatPercent(point.selfserveGdrPct)}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td>salesled GDR</td>
+                      {points.map((point) => (
+                        <td key={`row-sales-gdr-${point.key}`} className="stripe-ui__num">
+                          {formatPercent(point.salesledGdrPct)}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td>Combined GDR</td>
+                      {points.map((point) => (
+                        <td key={`row-combined-gdr-${point.key}`} className="stripe-ui__num">
+                          {formatPercent(point.combinedGdrPct)}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td>selfserve NDR</td>
+                      {points.map((point) => (
+                        <td key={`row-self-ndr-${point.key}`} className="stripe-ui__num">
+                          {formatPercent(point.selfserveNdrPct)}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td>salesled NDR</td>
+                      {points.map((point) => (
+                        <td key={`row-sales-ndr-${point.key}`} className="stripe-ui__num">
+                          {formatPercent(point.salesledNdrPct)}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td>Combined NDR</td>
+                      {points.map((point) => (
+                        <td key={`row-combined-ndr-${point.key}`} className="stripe-ui__num">
+                          {formatPercent(point.combinedNdrPct)}
+                        </td>
+                      ))}
+                    </tr>
                   </tbody>
                 </table>
               </div>
@@ -1261,6 +1381,47 @@ export default function CombinedBillingOverviewPage() {
       const hubPrevMrr = round2(hubBaselineArr / 12);
       const initialPrevCombinedMrr = round2(stripePrevMrr + hubPrevMrr);
 
+      const rawSelfserve: CombinedPoint[] = periodOrder.map((period) => {
+        const canonical = canonicalHubPeriodKey(period.key, grain);
+        const stripePoint = stripePointMap.get(canonical);
+        const stripeNewWithReactivation = round2((stripePoint?.newMrr || 0) + (stripePoint?.reactivationMrr || 0));
+
+        const stripeFallbackStart =
+          grain === "daily"
+            ? period.key
+            : grain === "monthly"
+              ? `${period.key}-01`
+              : stripePoint?.periodStart || period.key;
+
+        return {
+          key: canonical || period.key,
+          label: period.label,
+          periodStart: stripePoint?.periodStart || stripeFallbackStart,
+          periodEnd: stripePoint?.periodEnd || stripeFallbackStart,
+          mrrEnd: round2(stripePoint?.mrrEnd || 0),
+          newMrr: stripeNewWithReactivation,
+          expansionMrr: round2(stripePoint?.expansionMrr || 0),
+          contractionMrr: round2(stripePoint?.contractionMrr || 0),
+          churnMrr: round2(stripePoint?.churnMrr || 0),
+          netMrrChange: round2(stripePoint?.netMrrChange || 0),
+          mrrGrowthRatePct: 0,
+          ndrPct: 0,
+          gdrPct: 0,
+          arr: round2(stripePoint?.arr || 0),
+          arrGrowth: round2(stripePoint?.arrGrowth || 0),
+        };
+      });
+
+      const selfservePoints = rawSelfserve.map((point, idx) => {
+        const prevMrr = idx === 0 ? stripePrevMrr : rawSelfserve[idx - 1].mrrEnd;
+        const mrrGrowthRatePct =
+          Math.abs(prevMrr) > 1e-9
+            ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
+            : 0;
+        const retention = calculateRetentionRates(prevMrr, point.expansionMrr, point.contractionMrr, point.churnMrr);
+        return { ...point, mrrGrowthRatePct, ndrPct: retention.ndrPct, gdrPct: retention.gdrPct };
+      });
+
       const rawCombined: CombinedPoint[] = periodOrder.map((period) => {
         const canonical = canonicalHubPeriodKey(period.key, grain);
         const hub = hubPointMap.get(canonical);
@@ -1295,21 +1456,28 @@ export default function CombinedBillingOverviewPage() {
 
       const combinedPoints = rawCombined.map((point, idx) => {
         const prevMrr = idx === 0 ? initialPrevCombinedMrr : rawCombined[idx - 1].mrrEnd;
-        const mrrGrowthRatePct = Math.abs(prevMrr) > 1e-9
-          ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
-          : 0;
-        const ndrPct =
+        const mrrGrowthRatePct =
           Math.abs(prevMrr) > 1e-9
-            ? round2(((prevMrr + point.expansionMrr + point.contractionMrr + point.churnMrr) / prevMrr) * 100)
+            ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
             : 0;
-        const gdrPct =
-          Math.abs(prevMrr) > 1e-9
-            ? round2(((prevMrr + point.contractionMrr + point.churnMrr) / prevMrr) * 100)
-            : 0;
-        return { ...point, mrrGrowthRatePct, ndrPct, gdrPct };
+        const retention = calculateRetentionRates(prevMrr, point.expansionMrr, point.contractionMrr, point.churnMrr);
+        return { ...point, mrrGrowthRatePct, ndrPct: retention.ndrPct, gdrPct: retention.gdrPct };
       });
 
       const currentMrr = combinedPoints.length ? combinedPoints[combinedPoints.length - 1].mrrEnd : 0;
+      const retentionPoints: RetentionSeriesPoint[] = periodOrder.map((period, idx) => {
+        const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+        return {
+          key,
+          label: period.label,
+          selfserveGdrPct: selfservePoints[idx]?.gdrPct || 0,
+          salesledGdrPct: hubPoints[idx]?.gdrPct || 0,
+          combinedGdrPct: combinedPoints[idx]?.gdrPct || 0,
+          selfserveNdrPct: selfservePoints[idx]?.ndrPct || 0,
+          salesledNdrPct: hubPoints[idx]?.ndrPct || 0,
+          combinedNdrPct: combinedPoints[idx]?.ndrPct || 0,
+        };
+      });
 
       setData({
         startDate,
@@ -1319,6 +1487,7 @@ export default function CombinedBillingOverviewPage() {
         currentMrr,
         currentArr: round2(currentMrr * 12),
         points: combinedPoints,
+        retentionPoints,
       });
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
@@ -1328,6 +1497,7 @@ export default function CombinedBillingOverviewPage() {
   }
 
   const points = useMemo(() => data?.points ?? [], [data]);
+  const retentionPoints = useMemo(() => data?.retentionPoints ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
 
   return (
@@ -1508,7 +1678,7 @@ export default function CombinedBillingOverviewPage() {
               valueFormatter={(v) => formatMoney(v, currency)}
             />
 
-            <RetentionRatesChartCard points={points} />
+            <RetentionRatesChartCard points={retentionPoints} />
           </div>
         </>
       )}
