@@ -13,6 +13,7 @@ This is a Next.js ARR dashboard.
 - `GET /api/stripe-arr-correct-report/export` Stripe ARR (Correct) CSV export API
 - `GET|POST /api/stripe-sync` Stripe sync API
 - `GET /api/stripe-sync/status` Stripe sync health/status API
+- `GET|POST /api/stripe-bigquery-refresh` Rebuild Stripe external BigQuery tables from GCS bucket folders
 - `GET /api/quickbooks/connect` Start Intuit OAuth
 - `GET /api/quickbooks/callback` Intuit OAuth callback
 - `GET /api/quickbooks/status` QuickBooks connection status
@@ -25,6 +26,7 @@ This is a Next.js ARR dashboard.
 Vercel cron runs Stripe sync automatically every 5 minutes:
 
 - `*/5 * * * *` (`/api/stripe-sync`)
+- `0 * * * *` (`/api/stripe-bigquery-refresh`) hourly refresh of bucket-backed external Stripe tables
 
 `/api/stripe-sync` accepts:
 
@@ -47,6 +49,16 @@ Use `/api/stripe-sync/status` to verify live progress. It returns:
 - `stats.rangeExhausted`
 - `secondsSinceUpdate`
 - `healthy`
+
+`/api/stripe-bigquery-refresh` accepts:
+
+```json
+{
+  "dryRun": false
+}
+```
+
+The route is cron-authenticated with `CRON_SECRET` (same pattern as `/api/stripe-sync`) and can also be triggered manually.
 
 ## Persistence Across Redeployments
 
@@ -167,6 +179,34 @@ Optional env vars:
 - `DRY_RUN=true` (prints SQL without creating tables)
 
 This script creates/replaces **external tables** named from each immediate child folder under `livemode/`.
+
+### Hourly Bucket -> BigQuery Refresh
+
+If your Stripe lake lands in GCS and BigQuery tables are external tables over those folders, this app now includes an hourly cron:
+
+- `0 * * * *` -> `GET /api/stripe-bigquery-refresh`
+
+Required env vars for this job:
+
+- `GOOGLE_SERVICE_ACCOUNT_JSON` (or `GOOGLE_SERVICE_ACCOUNT_JSON_BASE64`)
+- `GCS_BUCKET`
+- `BQ_PROJECT_ID` (optional if present in service account JSON)
+
+Optional env vars:
+
+- `BQ_DATASET` (default `stripe`)
+- `BQ_LOCATION` (default `US`)
+- `STRIPE_BQ_SNAPSHOT_MODE` (default `livemode`; set to `testmode` if needed)
+- `STRIPE_BQ_SNAPSHOT` (optional explicit snapshot like `2026031309`; normally auto-detected)
+- `GCS_FILE_GLOB` (default `*`)
+- `SOURCE_FORMAT` (default `PARQUET`)
+- `STRIPE_BQ_BUCKET_REFRESH_DRY_RUN` (`true/false`, default `false`)
+
+Behavior:
+
+- Each run finds the latest snapshot folder in `gs://<GCS_BUCKET>/` that contains `<snapshot>/<mode>/...`.
+- It then rebuilds external tables to point at that snapshot.
+- Folder `invoice_line_items` is mapped to table `invoice_lines` so existing app queries keep working.
 
 ### Stripe Discount Handling (BigQuery)
 
