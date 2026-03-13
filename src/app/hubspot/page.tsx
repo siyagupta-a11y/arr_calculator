@@ -1008,7 +1008,7 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
                           height={h}
                           fill={component.color}
                           rx={1.2}
-                          data-tooltip={`${bar.point.label}: ${component.label}: ${formatMoney(value, currency)}`}
+                          data-tooltip={`${bar.point.label}: ${component.label}: ${fmtMoney(value, "normal")}`}
                           onMouseEnter={() => setHoverIndex(idx)}
                         />
                       );
@@ -1027,7 +1027,7 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
                         height={h}
                         fill={component.color}
                         rx={1.2}
-                        data-tooltip={`${bar.point.label}: ${component.label}: ${formatMoney(value, currency)}`}
+                        data-tooltip={`${bar.point.label}: ${component.label}: ${fmtMoney(value, "normal")}`}
                         onMouseEnter={() => setHoverIndex(idx)}
                       />
                     );

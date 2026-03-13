@@ -21,7 +21,7 @@ function svgDimensions(svg: SVGSVGElement) {
 }
 
 function resolveChartBackground(svg: SVGSVGElement) {
-  let current: HTMLElement | null = svg;
+  let current: Element | null = svg;
   while (current) {
     const bg = window.getComputedStyle(current).backgroundColor;
     if (bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)") {
