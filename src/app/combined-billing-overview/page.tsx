@@ -76,7 +76,10 @@ type QuickBooksSalesMarketingCostPoint = {
 
 type QuickBooksSalesMarketingCostResponse = {
   realmId: string;
-  accountMatchMode: "exact_names" | "keywords";
+  accountMatchMode: "department" | "exact_names" | "keywords";
+  departmentIds?: string[];
+  departmentNames?: string[];
+  matchedDepartments?: Array<{ id: string; name: string }>;
   accountNames: string[];
   keywords: string[];
   accountingMethod: string;
@@ -2012,7 +2015,11 @@ export default function CombinedBillingOverviewPage() {
             };
           });
 
-          if (qbCosts.matchedAccounts.length === 0) {
+          const matchedDepartmentCount = qbCosts.matchedDepartments?.length || 0;
+          if (qbCosts.accountMatchMode === "department" && matchedDepartmentCount === 0) {
+            nextCacNotice =
+              "QuickBooks is connected, but no Sales/Marketing departments matched. Set QUICKBOOKS_CAC_DEPARTMENT_IDS or QUICKBOOKS_CAC_DEPARTMENT_NAMES.";
+          } else if (qbCosts.accountMatchMode !== "department" && qbCosts.matchedAccounts.length === 0) {
             nextCacNotice =
               "QuickBooks is connected, but no sales/marketing expense accounts matched in this range. Configure QUICKBOOKS_CAC_EXPENSE_ACCOUNT_NAMES if your account names differ.";
           }

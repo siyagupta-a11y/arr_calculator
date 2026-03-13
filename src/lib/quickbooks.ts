@@ -43,6 +43,11 @@ type QuickBooksSalesMarketingCostPoint = {
   matchedAccounts: string[];
 };
 
+type QuickBooksDepartment = {
+  id: string;
+  name: string;
+};
+
 type QuickBooksProfitAndLossCol = {
   value?: string;
 };
@@ -53,6 +58,13 @@ type QuickBooksProfitAndLossRow = {
   Header?: { ColData?: QuickBooksProfitAndLossCol[] };
   ColData?: QuickBooksProfitAndLossCol[];
   Rows?: { Row?: QuickBooksProfitAndLossRow[] };
+};
+
+type QuickBooksQueryDepartment = {
+  Id?: unknown;
+  Name?: unknown;
+  FullyQualifiedName?: unknown;
+  Active?: unknown;
 };
 
 function clean(value: string | undefined | null) {
@@ -128,6 +140,13 @@ function parseCsvList(raw: string) {
     .filter(Boolean);
 }
 
+function parseCsvListRaw(raw: string) {
+  return raw
+    .split(/[,\n]/)
+    .map((token) => clean(token))
+    .filter(Boolean);
+}
+
 function normalizeQuickBooksMoney(value: unknown) {
   const text = String(value ?? "").trim();
   if (!text) return null;
@@ -150,11 +169,19 @@ function amountFromColData(cols: QuickBooksProfitAndLossCol[] | undefined) {
 function collectSalesMarketingCostsFromRows(params: {
   rows: QuickBooksProfitAndLossRow[];
   inExpensesSection: boolean;
+  includeAllExpenseAccounts: boolean;
   exactAccountNames: string[];
   keywordMatchers: string[];
   matchedAccounts: Set<string>;
 }): number {
-  const { rows, inExpensesSection, exactAccountNames, keywordMatchers, matchedAccounts } = params;
+  const {
+    rows,
+    inExpensesSection,
+    includeAllExpenseAccounts,
+    exactAccountNames,
+    keywordMatchers,
+    matchedAccounts,
+  } = params;
   let total = 0;
 
   for (const row of rows) {
@@ -172,9 +199,10 @@ function collectSalesMarketingCostsFromRows(params: {
       const accountLower = accountName.toLowerCase();
       const isMatch =
         accountLower &&
-        (exactAccountNames.length > 0
-          ? exactAccountNames.includes(accountLower)
-          : keywordMatchers.some((keyword) => accountLower.includes(keyword)));
+        (includeAllExpenseAccounts ||
+          (exactAccountNames.length > 0
+            ? exactAccountNames.includes(accountLower)
+            : keywordMatchers.some((keyword) => accountLower.includes(keyword))));
       if (isMatch) {
         const amount = amountFromColData(row.ColData);
         if (amount != null) {
@@ -189,6 +217,7 @@ function collectSalesMarketingCostsFromRows(params: {
       total += collectSalesMarketingCostsFromRows({
         rows: childRows,
         inExpensesSection: nextInExpenses,
+        includeAllExpenseAccounts,
         exactAccountNames,
         keywordMatchers,
         matchedAccounts,
@@ -201,6 +230,7 @@ function collectSalesMarketingCostsFromRows(params: {
 
 function parseSalesMarketingCostsFromProfitAndLoss(
   payload: unknown,
+  includeAllExpenseAccounts: boolean,
   exactAccountNames: string[],
   keywordMatchers: string[],
 ) {
@@ -210,11 +240,60 @@ function parseSalesMarketingCostsFromProfitAndLoss(
   const total = collectSalesMarketingCostsFromRows({
     rows,
     inExpensesSection: false,
+    includeAllExpenseAccounts,
     exactAccountNames,
     keywordMatchers,
     matchedAccounts,
   });
   return { total, matchedAccounts: Array.from(matchedAccounts).sort() };
+}
+
+async function listQuickBooksDepartments(): Promise<QuickBooksDepartment[]> {
+  let departmentsRaw: unknown[] = [];
+  try {
+    const response = await runQuickBooksQuery("SELECT * FROM Department MAXRESULTS 1000");
+    const queryResponse = response.queryResponse as { Department?: unknown[] } | null;
+    departmentsRaw = Array.isArray(queryResponse?.Department) ? queryResponse?.Department || [] : [];
+  } catch {
+    return [];
+  }
+
+  const mapped: QuickBooksDepartment[] = [];
+  for (const row of departmentsRaw) {
+    const dept = (row || {}) as QuickBooksQueryDepartment;
+    const id = clean(typeof dept.Id === "string" || typeof dept.Id === "number" ? String(dept.Id) : "");
+    const nameCandidate =
+      clean(typeof dept.Name === "string" ? dept.Name : "") ||
+      clean(typeof dept.FullyQualifiedName === "string" ? dept.FullyQualifiedName : "");
+    const active =
+      typeof dept.Active === "boolean"
+        ? dept.Active
+        : String(dept.Active || "").trim().toLowerCase() !== "false";
+    if (!id || !nameCandidate || !active) continue;
+    mapped.push({ id, name: nameCandidate });
+  }
+  return mapped;
+}
+
+function resolveQuickBooksDepartmentsByName(
+  departments: QuickBooksDepartment[],
+  targetDepartmentNames: string[],
+): QuickBooksDepartment[] {
+  const targets = Array.from(new Set(targetDepartmentNames.map((name) => clean(name).toLowerCase()).filter(Boolean)));
+  if (targets.length === 0) return [];
+  return departments.filter((dept) => {
+    const lower = dept.name.toLowerCase();
+    return targets.some((target) => lower === target || lower.includes(target));
+  });
+}
+
+function resolveQuickBooksDepartmentsById(
+  departments: QuickBooksDepartment[],
+  targetDepartmentIds: string[],
+): QuickBooksDepartment[] {
+  const targets = new Set(targetDepartmentIds.map((id) => clean(id)).filter(Boolean));
+  if (targets.size === 0) return [];
+  return departments.filter((dept) => targets.has(dept.id));
 }
 
 function validateDateRange(startDate: string, endDate: string) {
@@ -482,6 +561,26 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(startDate: strin
   const { connection } = await ensureValidConnection();
   const { minorVersion } = getQuickBooksConfig();
 
+  const configuredDepartmentIds = Array.from(
+    new Set(parseCsvListRaw(process.env.QUICKBOOKS_CAC_DEPARTMENT_IDS || "")),
+  );
+  const configuredDepartmentNames = Array.from(
+    new Set(parseCsvList(process.env.QUICKBOOKS_CAC_DEPARTMENT_NAMES || "sales,marketing")),
+  );
+  const allDepartments = await listQuickBooksDepartments();
+  const matchedDepartments =
+    configuredDepartmentIds.length > 0
+      ? resolveQuickBooksDepartmentsById(allDepartments, configuredDepartmentIds)
+      : resolveQuickBooksDepartmentsByName(allDepartments, configuredDepartmentNames);
+  const departmentIds = Array.from(
+    new Set(
+      (configuredDepartmentIds.length > 0 ? configuredDepartmentIds : matchedDepartments.map((dept) => dept.id))
+        .map((id) => clean(id))
+        .filter(Boolean),
+    ),
+  );
+  const useDepartmentFilter = departmentIds.length > 0;
+
   const configuredAccountNames = parseCsvList(process.env.QUICKBOOKS_CAC_EXPENSE_ACCOUNT_NAMES || "");
   const configuredKeywords = parseCsvList(process.env.QUICKBOOKS_CAC_EXPENSE_KEYWORDS || "");
   const keywordMatchers =
@@ -506,6 +605,9 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(startDate: strin
       accounting_method: accountingMethod,
       minorversion: minorVersion,
     });
+    if (useDepartmentFilter) {
+      qs.set("department", departmentIds.join(","));
+    }
     const reportPayload = await quickBooksGetJson(
       `/v3/company/${encodeURIComponent(connection.realmId)}/reports/ProfitAndLoss?${qs.toString()}`,
     );
@@ -520,6 +622,7 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(startDate: strin
     }
     const parsed = parseSalesMarketingCostsFromProfitAndLoss(
       reportPayload,
+      useDepartmentFilter,
       configuredAccountNames,
       keywordMatchers,
     );
@@ -539,7 +642,16 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(startDate: strin
 
   return {
     realmId: connection.realmId,
-    accountMatchMode: configuredAccountNames.length > 0 ? "exact_names" : "keywords",
+    accountMatchMode: useDepartmentFilter
+      ? "department"
+      : configuredAccountNames.length > 0
+        ? "exact_names"
+        : "keywords",
+    departmentIds,
+    departmentNames: configuredDepartmentNames,
+    matchedDepartments: matchedDepartments.length
+      ? matchedDepartments
+      : configuredDepartmentIds.map((id) => ({ id, name: id })),
     accountNames: configuredAccountNames,
     keywords: keywordMatchers,
     accountingMethod,
