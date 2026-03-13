@@ -716,9 +716,7 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
       accounting_method: accountingMethod,
       minorversion: minorVersion,
     });
-    if (useSelectedAccounts) {
-      qs.set("account", selectedAccountIds.join(","));
-    } else if (useDepartmentFilter) {
+    if (useDepartmentFilter) {
       qs.set("department", departmentIds.join(","));
     }
     const reportPayload = await quickBooksGetJson(
@@ -735,7 +733,7 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
     }
     const parsed = parseSalesMarketingCostsFromProfitAndLoss(
       reportPayload,
-      useSelectedAccounts || useDepartmentFilter,
+      useDepartmentFilter,
       effectiveExactAccountNames,
       effectiveKeywords,
     );
