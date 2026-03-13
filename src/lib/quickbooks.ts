@@ -34,6 +34,27 @@ type QuickBooksTokenResponse = {
   x_refresh_token_expires_in: number;
 };
 
+type QuickBooksSalesMarketingCostPoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  totalCost: number;
+  matchedAccounts: string[];
+};
+
+type QuickBooksProfitAndLossCol = {
+  value?: string;
+};
+
+type QuickBooksProfitAndLossRow = {
+  type?: string;
+  group?: string;
+  Header?: { ColData?: QuickBooksProfitAndLossCol[] };
+  ColData?: QuickBooksProfitAndLossCol[];
+  Rows?: { Row?: QuickBooksProfitAndLossRow[] };
+};
+
 function clean(value: string | undefined | null) {
   return String(value || "").trim();
 }
@@ -64,6 +85,145 @@ function parseScopes(raw: string) {
     .map((token) => token.trim())
     .filter(Boolean);
   return tokens.length > 0 ? tokens : [QUICKBOOKS_DEFAULT_SCOPE];
+}
+
+function parseDateOnly(value: string) {
+  const trimmed = clean(value);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]) - 1;
+  const day = Number(m[3]);
+  const parsed = new Date(Date.UTC(year, month, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month ||
+    parsed.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+function isoDateOnly(value: Date) {
+  return value.toISOString().slice(0, 10);
+}
+
+function isoMonthKey(value: Date) {
+  return value.toISOString().slice(0, 7);
+}
+
+function endOfUtcMonth(value: Date) {
+  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth() + 1, 0));
+}
+
+function startOfNextUtcMonth(value: Date) {
+  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth() + 1, 1));
+}
+
+function parseCsvList(raw: string) {
+  return raw
+    .split(/[,\n]/)
+    .map((token) => clean(token).toLowerCase())
+    .filter(Boolean);
+}
+
+function normalizeQuickBooksMoney(value: unknown) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const normalized = text
+    .replace(/[$,\s]/g, "")
+    .replace(/^\((.*)\)$/, "-$1");
+  const num = Number(normalized);
+  return Number.isFinite(num) ? num : null;
+}
+
+function amountFromColData(cols: QuickBooksProfitAndLossCol[] | undefined) {
+  const list = Array.isArray(cols) ? cols : [];
+  for (let i = list.length - 1; i >= 1; i -= 1) {
+    const parsed = normalizeQuickBooksMoney(list[i]?.value);
+    if (parsed != null) return parsed;
+  }
+  return null;
+}
+
+function collectSalesMarketingCostsFromRows(params: {
+  rows: QuickBooksProfitAndLossRow[];
+  inExpensesSection: boolean;
+  exactAccountNames: string[];
+  keywordMatchers: string[];
+  matchedAccounts: Set<string>;
+}): number {
+  const { rows, inExpensesSection, exactAccountNames, keywordMatchers, matchedAccounts } = params;
+  let total = 0;
+
+  for (const row of rows) {
+    const group = clean(row.group).toLowerCase();
+    const sectionLabel = clean(row.Header?.ColData?.[0]?.value).toLowerCase();
+    const nextInExpenses =
+      inExpensesSection ||
+      group === "expenses" ||
+      sectionLabel === "expenses" ||
+      sectionLabel === "expense";
+    const type = clean(row.type).toLowerCase();
+
+    if (type === "data" && nextInExpenses) {
+      const accountName = clean(row.ColData?.[0]?.value);
+      const accountLower = accountName.toLowerCase();
+      const isMatch =
+        accountLower &&
+        (exactAccountNames.length > 0
+          ? exactAccountNames.includes(accountLower)
+          : keywordMatchers.some((keyword) => accountLower.includes(keyword)));
+      if (isMatch) {
+        const amount = amountFromColData(row.ColData);
+        if (amount != null) {
+          total += amount;
+          matchedAccounts.add(accountName);
+        }
+      }
+    }
+
+    const childRows = Array.isArray(row.Rows?.Row) ? row.Rows?.Row : [];
+    if (childRows.length > 0) {
+      total += collectSalesMarketingCostsFromRows({
+        rows: childRows,
+        inExpensesSection: nextInExpenses,
+        exactAccountNames,
+        keywordMatchers,
+        matchedAccounts,
+      });
+    }
+  }
+
+  return total;
+}
+
+function parseSalesMarketingCostsFromProfitAndLoss(
+  payload: unknown,
+  exactAccountNames: string[],
+  keywordMatchers: string[],
+) {
+  const rows = ((payload as { Rows?: { Row?: QuickBooksProfitAndLossRow[] } } | null)?.Rows?.Row || [])
+    .filter(Boolean);
+  const matchedAccounts = new Set<string>();
+  const total = collectSalesMarketingCostsFromRows({
+    rows,
+    inExpensesSection: false,
+    exactAccountNames,
+    keywordMatchers,
+    matchedAccounts,
+  });
+  return { total, matchedAccounts: Array.from(matchedAccounts).sort() };
+}
+
+function validateDateRange(startDate: string, endDate: string) {
+  const start = parseDateOnly(startDate);
+  if (!start) throw new Error("Invalid startDate. Expected YYYY-MM-DD.");
+  const end = parseDateOnly(endDate);
+  if (!end) throw new Error("Invalid endDate. Expected YYYY-MM-DD.");
+  if (end.getTime() < start.getTime()) throw new Error("endDate must be >= startDate.");
+  return { start, end };
 }
 
 function getQuickBooksConfig(): QuickBooksConfig {
@@ -314,6 +474,78 @@ export async function fetchQuickBooksCompanyInfo() {
     realmId: connection.realmId,
     companyInfo: companyInfo || null,
     raw: payload,
+  };
+}
+
+export async function fetchQuickBooksSalesMarketingCostsByMonth(startDate: string, endDate: string) {
+  const { start, end } = validateDateRange(startDate, endDate);
+  const { connection } = await ensureValidConnection();
+  const { minorVersion } = getQuickBooksConfig();
+
+  const configuredAccountNames = parseCsvList(process.env.QUICKBOOKS_CAC_EXPENSE_ACCOUNT_NAMES || "");
+  const configuredKeywords = parseCsvList(process.env.QUICKBOOKS_CAC_EXPENSE_KEYWORDS || "");
+  const keywordMatchers =
+    configuredKeywords.length > 0
+      ? configuredKeywords
+      : ["sales", "marketing", "advertising", "promotion", "promo"];
+
+  const accountingMethod = clean(process.env.QUICKBOOKS_CAC_ACCOUNTING_METHOD || "Accrual");
+  const points: QuickBooksSalesMarketingCostPoint[] = [];
+  const matchedAccounts = new Set<string>();
+  let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  let reportCurrency = "";
+
+  while (cursor.getTime() <= end.getTime()) {
+    const monthStart = cursor;
+    const monthEnd = endOfUtcMonth(monthStart);
+    const boundedStart = monthStart.getTime() < start.getTime() ? start : monthStart;
+    const boundedEnd = monthEnd.getTime() > end.getTime() ? end : monthEnd;
+    const qs = new URLSearchParams({
+      start_date: isoDateOnly(boundedStart),
+      end_date: isoDateOnly(boundedEnd),
+      accounting_method: accountingMethod,
+      minorversion: minorVersion,
+    });
+    const reportPayload = await quickBooksGetJson(
+      `/v3/company/${encodeURIComponent(connection.realmId)}/reports/ProfitAndLoss?${qs.toString()}`,
+    );
+    if (!reportCurrency) {
+      reportCurrency = clean(
+        (
+          reportPayload as {
+            Header?: { Currency?: string };
+          } | null
+        )?.Header?.Currency,
+      );
+    }
+    const parsed = parseSalesMarketingCostsFromProfitAndLoss(
+      reportPayload,
+      configuredAccountNames,
+      keywordMatchers,
+    );
+    parsed.matchedAccounts.forEach((name) => matchedAccounts.add(name));
+    const monthKey = isoMonthKey(monthStart);
+    points.push({
+      key: monthKey,
+      label: monthKey,
+      periodStart: isoDateOnly(boundedStart),
+      periodEnd: isoDateOnly(boundedEnd),
+      totalCost: Math.round(parsed.total * 100) / 100,
+      matchedAccounts: parsed.matchedAccounts,
+    });
+
+    cursor = startOfNextUtcMonth(cursor);
+  }
+
+  return {
+    realmId: connection.realmId,
+    accountMatchMode: configuredAccountNames.length > 0 ? "exact_names" : "keywords",
+    accountNames: configuredAccountNames,
+    keywords: keywordMatchers,
+    accountingMethod,
+    currency: reportCurrency || "USD",
+    points,
+    matchedAccounts: Array.from(matchedAccounts).sort(),
   };
 }
 

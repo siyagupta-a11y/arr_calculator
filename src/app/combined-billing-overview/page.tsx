@@ -42,6 +42,15 @@ type StripeOverviewPoint = {
   arrGrowth: number;
 };
 
+type StripeOverviewCustomerArrRow = {
+  customerId: string;
+  periodKey: string;
+  periodLabel: string;
+  periodStart: string;
+  periodEnd: string;
+  arr: number;
+};
+
 type StripeOverviewResponse = {
   startDate: string;
   endDate: string;
@@ -53,6 +62,37 @@ type StripeOverviewResponse = {
   points: StripeOverviewPoint[];
   stripeExactHistoryPoints?: StripeOverviewPoint[];
   stripeExactPoints?: StripeOverviewPoint[];
+  customerArrRows?: StripeOverviewCustomerArrRow[];
+};
+
+type QuickBooksSalesMarketingCostPoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  totalCost: number;
+  matchedAccounts: string[];
+};
+
+type QuickBooksSalesMarketingCostResponse = {
+  realmId: string;
+  accountMatchMode: "exact_names" | "keywords";
+  accountNames: string[];
+  keywords: string[];
+  accountingMethod: string;
+  currency: string;
+  points: QuickBooksSalesMarketingCostPoint[];
+  matchedAccounts: string[];
+};
+
+type CacPoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  salesMarketingCost: number;
+  newCustomerCount: number;
+  cac: number;
 };
 
 type CombinedLiveArrResponse = {
@@ -97,6 +137,7 @@ type CombinedOverviewData = {
   projectedArr: number;
   points: CombinedPoint[];
   retentionPoints: RetentionSeriesPoint[];
+  cacPoints: CacPoint[];
 };
 
 function round2(n: number) {
@@ -299,6 +340,29 @@ function canonicalStripePeriodKey(point: StripeOverviewPoint, grain: CombinedGra
   return quarterKeyFromIsoDate(String(point.periodStart || ""));
 }
 
+function canonicalStripeCustomerPeriodKey(row: StripeOverviewCustomerArrRow, grain: CombinedGrain) {
+  const periodStart = String(row.periodStart || "").trim();
+  const periodKey = String(row.periodKey || "").trim();
+  if (grain === "daily") {
+    return (periodStart || periodKey).slice(0, 10);
+  }
+  if (grain === "monthly") {
+    return (periodStart || periodKey).slice(0, 7);
+  }
+  const fromStart = quarterKeyFromIsoDate(periodStart);
+  if (fromStart) return fromStart;
+  const quarterKeyMatch = /^(\d{4})-Q([1-4])$/i.exec(periodKey);
+  if (quarterKeyMatch) return `${quarterKeyMatch[1]}-Q${quarterKeyMatch[2]}`;
+  return periodKey;
+}
+
+function conciseErrorMessage(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : fallback;
+  const trimmed = String(message || fallback).trim();
+  if (!trimmed) return fallback;
+  return trimmed.length > 220 ? `${trimmed.slice(0, 220)}...` : trimmed;
+}
+
 function defaultDateRange() {
   const end = new Date();
   const start = new Date(end.getFullYear() - 1, end.getMonth(), 1);
@@ -368,17 +432,22 @@ function tickIndices(size: number) {
   return Array.from(out).sort((a, b) => a - b);
 }
 
-type LineChartProps = {
+type LineChartPointBase = {
+  key: string;
+  label: string;
+};
+
+type LineChartProps<TPoint extends LineChartPointBase> = {
   title: string;
   subtitle: string;
-  points: CombinedPoint[];
-  valueAccessor: (point: CombinedPoint) => number;
+  points: TPoint[];
+  valueAccessor: (point: TPoint) => number;
   valueFormatter: (value: number) => string;
   stroke: string;
   includeZero?: boolean;
 };
 
-function LineChartCard({
+function LineChartCard<TPoint extends LineChartPointBase>({
   title,
   subtitle,
   points,
@@ -386,7 +455,7 @@ function LineChartCard({
   valueFormatter,
   stroke,
   includeZero = false,
-}: LineChartProps) {
+}: LineChartProps<TPoint>) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const chartRef = useRef<SVGSVGElement | null>(null);
   const [downloading, setDownloading] = useState(false);
@@ -1341,11 +1410,13 @@ export default function CombinedBillingOverviewPage() {
   const [hasRunOnce, setHasRunOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<CombinedOverviewData | null>(null);
+  const [cacNotice, setCacNotice] = useState<string | null>(null);
 
   async function run() {
     setHasRunOnce(true);
     setLoading(true);
     setError(null);
+    setCacNotice(null);
 
     try {
       const fetchJson = async <T,>(url: string, payload: unknown): Promise<T> => {
@@ -1383,6 +1454,11 @@ export default function CombinedBillingOverviewPage() {
         grain,
       };
       const stripePayload = { startDate, endDate, grain };
+      const stripeBaselinePayload = {
+        startDate: previousRange.startDate,
+        endDate: previousRange.endDate,
+        grain,
+      };
 
       const [hubspotMain, hubspotBaseline, stripe, liveArrData] = await Promise.all([
         fetchJson<ReportResponse>("/api/report", hubspotPayload),
@@ -1390,6 +1466,13 @@ export default function CombinedBillingOverviewPage() {
         fetchJson<StripeOverviewResponse>("/api/stripe-billing-overview-report", stripePayload),
         fetchJson<CombinedLiveArrResponse>("/api/combined-live-arr", {}),
       ]);
+
+      let stripeBaseline: StripeOverviewResponse | null = null;
+      try {
+        stripeBaseline = await fetchJson<StripeOverviewResponse>("/api/stripe-billing-overview-report", stripeBaselinePayload);
+      } catch {
+        stripeBaseline = null;
+      }
 
       const periodOrder: PeriodRef[] = (hubspotMain.periods || []).map((period) => ({
         key: String(period.key || ""),
@@ -1559,6 +1642,134 @@ export default function CombinedBillingOverviewPage() {
         };
       });
 
+      const hubNewCustomerCountByPeriod = new Map<string, number>();
+      periodOrder.forEach((period, idx) => {
+        const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+        const prevKey = idx > 0 ? periodOrder[idx - 1].key : "";
+        let count = 0;
+        for (const [accountKey, accountTotals] of accountArrByPeriod.entries()) {
+          const currArr = round2(accountTotals[period.key] || 0);
+          const prevArr = round2(
+            idx === 0
+              ? baselineAccountArrByAccount.get(accountKey) || 0
+              : prevKey
+                ? accountTotals[prevKey] || 0
+                : 0,
+          );
+          const currHas = Math.abs(currArr) > 1e-9;
+          const prevHas = Math.abs(prevArr) > 1e-9;
+          if (!prevHas && currHas) count += 1;
+        }
+        hubNewCustomerCountByPeriod.set(key, count);
+      });
+
+      const stripeArrByCustomer = new Map<string, Map<string, number>>();
+      for (const row of stripe.customerArrRows || []) {
+        const customerId = String(row.customerId || "").trim();
+        const key = canonicalStripeCustomerPeriodKey(row, grain);
+        if (!customerId || !key) continue;
+        if (!stripeArrByCustomer.has(customerId)) stripeArrByCustomer.set(customerId, new Map<string, number>());
+        const valuesByPeriod = stripeArrByCustomer.get(customerId)!;
+        valuesByPeriod.set(key, round2((valuesByPeriod.get(key) || 0) + Number(row.arr || 0)));
+      }
+
+      const stripeBaselineArrByCustomer = new Map<string, number>();
+      for (const row of stripeBaseline?.customerArrRows || []) {
+        const customerId = String(row.customerId || "").trim();
+        if (!customerId) continue;
+        stripeBaselineArrByCustomer.set(
+          customerId,
+          round2((stripeBaselineArrByCustomer.get(customerId) || 0) + Number(row.arr || 0)),
+        );
+      }
+
+      const stripeNewCustomerCountByPeriod = new Map<string, number>();
+      periodOrder.forEach((period, idx) => {
+        const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+        const prevKey = idx > 0 ? canonicalHubPeriodKey(periodOrder[idx - 1].key, grain) || periodOrder[idx - 1].key : "";
+        let count = 0;
+        for (const [customerId, valuesByPeriod] of stripeArrByCustomer.entries()) {
+          const currArr = round2(valuesByPeriod.get(key) || 0);
+          const prevArr = round2(
+            idx === 0
+              ? stripeBaselineArrByCustomer.get(customerId) || 0
+              : prevKey
+                ? valuesByPeriod.get(prevKey) || 0
+                : 0,
+          );
+          const currHas = Math.abs(currArr) > 1e-9;
+          const prevHas = Math.abs(prevArr) > 1e-9;
+          if (!prevHas && currHas) count += 1;
+        }
+        stripeNewCustomerCountByPeriod.set(key, count);
+      });
+
+      const combinedNewCustomerCountByPeriod = new Map<string, number>();
+      periodOrder.forEach((period) => {
+        const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+        const count = (hubNewCustomerCountByPeriod.get(key) || 0) + (stripeNewCustomerCountByPeriod.get(key) || 0);
+        combinedNewCustomerCountByPeriod.set(key, count);
+      });
+
+      let cacPoints: CacPoint[] = [];
+      let nextCacNotice: string | null = null;
+      if (grain !== "monthly") {
+        nextCacNotice = "CAC currently supports monthly grain. Switch Time grain to Monthly to load CAC over time.";
+      } else {
+        try {
+          const qbCosts = await fetchJson<QuickBooksSalesMarketingCostResponse>(
+            "/api/quickbooks/sales-marketing-costs",
+            { startDate, endDate },
+          );
+          const costByMonth = new Map<string, number>();
+          for (const point of qbCosts.points || []) {
+            const key = String(point.key || point.periodStart || "").trim().slice(0, 7);
+            if (!key) continue;
+            costByMonth.set(key, round2((costByMonth.get(key) || 0) + Number(point.totalCost || 0)));
+          }
+
+          cacPoints = periodOrder.map((period) => {
+            const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+            const salesMarketingCost = round2(costByMonth.get(key) || 0);
+            const newCustomerCount = combinedNewCustomerCountByPeriod.get(key) || 0;
+            const cac = newCustomerCount > 0 ? round2(salesMarketingCost / newCustomerCount) : 0;
+            const periodStart =
+              grain === "monthly" ? `${key}-01` : key;
+            return {
+              key,
+              label: period.label,
+              periodStart,
+              periodEnd: periodStart,
+              salesMarketingCost,
+              newCustomerCount,
+              cac,
+            };
+          });
+
+          if (qbCosts.matchedAccounts.length === 0) {
+            nextCacNotice =
+              "QuickBooks is connected, but no sales/marketing expense accounts matched in this range. Configure QUICKBOOKS_CAC_EXPENSE_ACCOUNT_NAMES if your account names differ.";
+          }
+        } catch (cacError: unknown) {
+          nextCacNotice = `CAC unavailable: ${conciseErrorMessage(cacError, "QuickBooks cost query failed.")}`;
+          cacPoints = periodOrder.map((period) => {
+            const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+            const periodStart = grain === "monthly" ? `${key}-01` : key;
+            return {
+              key,
+              label: period.label,
+              periodStart,
+              periodEnd: periodStart,
+              salesMarketingCost: 0,
+              newCustomerCount: combinedNewCustomerCountByPeriod.get(key) || 0,
+              cac: 0,
+            };
+          });
+        }
+      }
+
+      setCacNotice(nextCacNotice);
+
       setData({
         startDate,
         endDate,
@@ -1571,6 +1782,7 @@ export default function CombinedBillingOverviewPage() {
         projectedArr: round2(liveArrData.projectedArr || 0),
         points: combinedPoints,
         retentionPoints,
+        cacPoints,
       });
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
@@ -1581,6 +1793,7 @@ export default function CombinedBillingOverviewPage() {
 
   const points = useMemo(() => data?.points ?? [], [data]);
   const retentionPoints = useMemo(() => data?.retentionPoints ?? [], [data]);
+  const cacPoints = useMemo(() => data?.cacPoints ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
 
   return (
@@ -1702,6 +1915,14 @@ export default function CombinedBillingOverviewPage() {
         </div>
       )}
 
+      {!loading && !error && cacNotice && (
+        <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+          <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+            {cacNotice}
+          </p>
+        </section>
+      )}
+
       {!loading && !error && data && (
         <>
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
@@ -1773,6 +1994,16 @@ export default function CombinedBillingOverviewPage() {
               points={points}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => formatMoney(v, currency)}
+            />
+
+            <LineChartCard
+              title="CAC Over Time"
+              subtitle="CAC = QuickBooks Sales/Marketing cost divided by new customer count (periods with 0 new customers are shown as 0)."
+              points={cacPoints}
+              valueAccessor={(p) => p.cac}
+              valueFormatter={(v) => formatMoney(v, currency)}
+              stroke="#e879f9"
+              includeZero
             />
 
             <RetentionRatesChartCard points={retentionPoints} />
