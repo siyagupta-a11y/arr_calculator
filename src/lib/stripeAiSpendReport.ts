@@ -715,7 +715,6 @@ async function listAllReportTypes() {
 
   while (true) {
     const params = new URLSearchParams();
-    params.set("limit", "100");
     if (startingAfter) params.set("starting_after", startingAfter);
 
     const page = await stripeRequestJson<StripeListResponse<StripeReportType>>("/reporting/report_types", {
@@ -767,7 +766,6 @@ function getReportRunIntervalUnix(run: StripeReportRun, key: "interval_start" | 
 
 async function listRecentReportRuns(reportTypeId: string, startUnix: number, endUnix: number) {
   const params = new URLSearchParams();
-  params.set("limit", "25");
   params.set("report_type", reportTypeId);
   params.set("created[gte]", String(Math.floor(Date.now() / 1000) - 6 * 60 * 60));
 
