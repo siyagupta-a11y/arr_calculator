@@ -188,6 +188,19 @@ function amountFromColData(cols: QuickBooksProfitAndLossCol[] | undefined) {
   return null;
 }
 
+function matchesExpenseAccountName(accountLower: string, exactAccountNames: string[]) {
+  const account = clean(accountLower).toLowerCase();
+  if (!account) return false;
+  for (const candidate of exactAccountNames) {
+    const target = clean(candidate).toLowerCase();
+    if (!target) continue;
+    if (account === target) return true;
+    if (account.endsWith(`:${target}`)) return true;
+    if (target.endsWith(`:${account}`)) return true;
+  }
+  return false;
+}
+
 function collectSalesMarketingCostsFromRows(params: {
   rows: QuickBooksProfitAndLossRow[];
   inExpensesSection: boolean;
@@ -223,7 +236,7 @@ function collectSalesMarketingCostsFromRows(params: {
         accountLower &&
         (includeAllExpenseAccounts ||
           (exactAccountNames.length > 0
-            ? exactAccountNames.includes(accountLower)
+            ? matchesExpenseAccountName(accountLower, exactAccountNames)
             : keywordMatchers.some((keyword) => accountLower.includes(keyword))));
       if (isMatch) {
         const amount = amountFromColData(row.ColData);
@@ -668,6 +681,23 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
     configuredKeywords.length > 0
       ? configuredKeywords
       : ["sales", "marketing", "advertising", "promotion", "promo"];
+  let selectedAccountNames: string[] = [];
+  if (useSelectedAccounts) {
+    const expenseAccounts = await listQuickBooksExpenseAccounts();
+    const byId = new Map(expenseAccounts.map((account) => [account.id, account]));
+    selectedAccountNames = Array.from(
+      new Set(
+        selectedAccountIds
+          .map((id) => byId.get(id))
+          .filter((account): account is QuickBooksExpenseAccount => Boolean(account))
+          .flatMap((account) => [account.name, account.fullyQualifiedName])
+          .map((value) => clean(value).toLowerCase())
+          .filter(Boolean),
+      ),
+    );
+  }
+  const effectiveExactAccountNames = useSelectedAccounts ? selectedAccountNames : configuredAccountNames;
+  const effectiveKeywords = useSelectedAccounts ? [] : keywordMatchers;
 
   const accountingMethod = clean(process.env.QUICKBOOKS_CAC_ACCOUNTING_METHOD || "Accrual");
   const points: QuickBooksSalesMarketingCostPoint[] = [];
@@ -706,8 +736,8 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
     const parsed = parseSalesMarketingCostsFromProfitAndLoss(
       reportPayload,
       useSelectedAccounts || useDepartmentFilter,
-      configuredAccountNames,
-      keywordMatchers,
+      effectiveExactAccountNames,
+      effectiveKeywords,
     );
     parsed.matchedAccounts.forEach((name) => matchedAccounts.add(name));
     const monthKey = isoMonthKey(monthStart);

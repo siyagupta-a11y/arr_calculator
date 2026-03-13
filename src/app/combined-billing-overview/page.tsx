@@ -684,6 +684,7 @@ type CacChartCardProps = {
   onSelectAllAccounts: () => void;
   onClearAccounts: () => void;
   onSaveDefaultSelection: () => void;
+  onApplySelection: () => void;
 };
 
 function CacChartCard({
@@ -702,6 +703,7 @@ function CacChartCard({
   onSelectAllAccounts,
   onClearAccounts,
   onSaveDefaultSelection,
+  onApplySelection,
 }: CacChartCardProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [showTable, setShowTable] = useState(false);
@@ -837,6 +839,9 @@ function CacChartCard({
                 </button>
                 <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={onClearAccounts} disabled={accountsLoading}>
                   Clear
+                </button>
+                <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={onApplySelection}>
+                  Apply selection
                 </button>
                 <button
                   className="stripe-ui__btn stripe-ui__btn--primary"
@@ -2590,6 +2595,10 @@ export default function CombinedBillingOverviewPage() {
               onSelectAllAccounts={selectAllCacAccounts}
               onClearAccounts={clearCacAccounts}
               onSaveDefaultSelection={() => void saveCacDefaultSelection()}
+              onApplySelection={() => {
+                setCacAccountMenuOpen(false);
+                void run();
+              }}
             />
 
             <RetentionRatesChartCard points={retentionPoints} />
