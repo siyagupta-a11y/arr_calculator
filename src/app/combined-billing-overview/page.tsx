@@ -644,6 +644,272 @@ function LineChartCard<TPoint extends LineChartPointBase>({
   );
 }
 
+type CacChartCardProps = {
+  points: CacPoint[];
+  currency: string;
+};
+
+function CacChartCard({ points, currency }: CacChartCardProps) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [showTable, setShowTable] = useState(false);
+  const chartRef = useRef<SVGSVGElement | null>(null);
+  const [downloading, setDownloading] = useState(false);
+
+  const width = 640;
+  const height = 250;
+  const paddingLeft = 54;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 42;
+  const plotWidth = width - paddingLeft - paddingRight;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  const values = points.map((point) => point.cac);
+  const minRaw = values.length ? Math.min(...values) : 0;
+  const maxRaw = values.length ? Math.max(...values) : 1;
+  let minValue = Math.min(minRaw, 0);
+  let maxValue = Math.max(maxRaw, 0);
+  if (Math.abs(maxValue - minValue) < 1e-9) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+
+  const xAt = (idx: number) => {
+    if (points.length <= 1) return paddingLeft + plotWidth / 2;
+    return paddingLeft + (idx / (points.length - 1)) * plotWidth;
+  };
+  const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+
+  const pathD = points
+    .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(point.cac)}`)
+    .join(" ");
+
+  const hoveredPoint =
+    hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length ? points[hoverIndex] : null;
+  const hoveredX = hoveredPoint && hoverIndex != null ? xAt(hoverIndex) : 0;
+  const hoveredY = hoveredPoint ? yAt(hoveredPoint.cac) : 0;
+
+  const tooltipWidth = 280;
+  const tooltipHeight = 72;
+  const tooltipX = Math.max(
+    paddingLeft,
+    Math.min(paddingLeft + plotWidth - tooltipWidth, hoveredX - tooltipWidth / 2),
+  );
+  const tooltipY = Math.max(paddingTop + 4, hoveredY - tooltipHeight - 10);
+
+  const downloadChart = useCallback(async () => {
+    if (!chartRef.current || downloading) return;
+    setDownloading(true);
+    try {
+      await downloadSvgAsPng(chartRef.current, "combined-billing-overview-cac-over-time");
+    } finally {
+      setDownloading(false);
+    }
+  }, [downloading]);
+
+  const exportTableCsv = () => {
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    const rows: Array<Array<string | number>> = [
+      ["Period", "CAC", "Sales & Marketing Cost", "Total Users"],
+      ...points.map((point) => [
+        point.label,
+        round2(point.cac),
+        round2(point.salesMarketingCost),
+        Math.max(0, Math.round(point.newCustomerCount || 0)),
+      ]),
+    ];
+    downloadCsv(`combined-cac-over-time-${stamp}.csv`, rows);
+  };
+
+  return (
+    <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+      <div className="stripe-ui__section-head">
+        <div>
+          <h2 className="stripe-ui__panel-title">CAC Over Time</h2>
+          <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+            CAC = Sales & Marketing Cost / Total Users. Click the chart to open the data table.
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
+            {downloading ? "Downloading..." : "Download chart"}
+          </button>
+          <div className="stripe-ui__hint" aria-live="polite">
+            {hoveredPoint
+              ? `${hoveredPoint.label}: CAC ${formatMoney(hoveredPoint.cac, currency)}`
+              : "Hover on chart for values"}
+          </div>
+        </div>
+      </div>
+
+      {points.length === 0 ? (
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>
+          No data for selected range.
+        </p>
+      ) : (
+        <>
+          <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem", cursor: "pointer" }}>
+            <svg
+              ref={chartRef}
+              viewBox={`0 0 ${width} ${height}`}
+              role="img"
+              aria-label="CAC over time chart"
+              style={{ width: "100%", display: "block" }}
+              onClick={() => setShowTable(true)}
+              onMouseLeave={() => setHoverIndex(null)}
+              onMouseMove={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const relX = ((e.clientX - rect.left) / rect.width) * width;
+                const clamped = Math.max(paddingLeft, Math.min(paddingLeft + plotWidth, relX));
+                const ratio = points.length > 1 ? (clamped - paddingLeft) / plotWidth : 0;
+                const idx = Math.max(0, Math.min(points.length - 1, Math.round(ratio * Math.max(points.length - 1, 0))));
+                setHoverIndex(idx);
+              }}
+            >
+              <line
+                x1={paddingLeft}
+                y1={paddingTop + plotHeight}
+                x2={paddingLeft + plotWidth}
+                y2={paddingTop + plotHeight}
+                stroke="#36557f"
+                strokeWidth={1}
+              />
+              <line
+                x1={paddingLeft}
+                y1={paddingTop}
+                x2={paddingLeft}
+                y2={paddingTop + plotHeight}
+                stroke="#36557f"
+                strokeWidth={1}
+              />
+
+              {points.map((point, idx) => {
+                const left = idx === 0 ? paddingLeft : (xAt(idx - 1) + xAt(idx)) / 2;
+                const right = idx === points.length - 1 ? paddingLeft + plotWidth : (xAt(idx) + xAt(idx + 1)) / 2;
+                return (
+                  <rect
+                    key={`hover-${point.key}`}
+                    x={left}
+                    y={paddingTop}
+                    width={Math.max(1, right - left)}
+                    height={plotHeight}
+                    fill="transparent"
+                    onMouseEnter={() => setHoverIndex(idx)}
+                  />
+                );
+              })}
+
+              <path d={pathD} fill="none" stroke="#e879f9" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+
+              {hoverIndex != null && points[hoverIndex] && (
+                <line
+                  x1={xAt(hoverIndex)}
+                  y1={paddingTop}
+                  x2={xAt(hoverIndex)}
+                  y2={paddingTop + plotHeight}
+                  stroke="#89a9d4"
+                  strokeOpacity={0.5}
+                  strokeDasharray="4 4"
+                />
+              )}
+
+              {hoveredPoint && (
+                <g>
+                  <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx={6} fill="#0e203b" opacity={0.97} />
+                  <text x={tooltipX + 10} y={tooltipY + 16} fill="#d9e6fa" fontSize="11.5">
+                    {hoveredPoint.label}
+                  </text>
+                  <text x={tooltipX + 10} y={tooltipY + 33} fill="#e879f9" fontSize="12.5" fontWeight="600">
+                    CAC: {formatMoney(hoveredPoint.cac, currency)}
+                  </text>
+                  <text x={tooltipX + 10} y={tooltipY + 50} fill="#d9e6fa" fontSize="11.5">
+                    S&M Cost: {formatMoney(hoveredPoint.salesMarketingCost, currency)}
+                  </text>
+                  <text x={tooltipX + 10} y={tooltipY + 65} fill="#d9e6fa" fontSize="11.5">
+                    Total Users: {Math.max(0, Math.round(hoveredPoint.newCustomerCount || 0))}
+                  </text>
+                </g>
+              )}
+
+              {points.map((point, idx) => (
+                <circle
+                  key={point.key}
+                  cx={xAt(idx)}
+                  cy={yAt(point.cac)}
+                  r={hoverIndex === idx ? 4.6 : 3.2}
+                  fill="#e879f9"
+                  onMouseEnter={() => setHoverIndex(idx)}
+                />
+              ))}
+
+              {tickIndices(points.length).map((idx) => (
+                <text
+                  key={`tick-${idx}`}
+                  x={xAt(idx)}
+                  y={height - 12}
+                  textAnchor={idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle"}
+                  fill="#b7c9e6"
+                  fontSize="12"
+                >
+                  {points[idx]?.label || ""}
+                </text>
+              ))}
+
+              <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#8ea7cb" fontSize="12">
+                {formatMoney(maxValue, currency)}
+              </text>
+              <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#8ea7cb" fontSize="12">
+                {formatMoney(minValue, currency)}
+              </text>
+            </svg>
+          </div>
+
+          {showTable && (
+            <div className="stripe-ui__panel" style={{ marginTop: "0.9rem", padding: "0.85rem" }}>
+              <div className="stripe-ui__section-head" style={{ marginBottom: "0.65rem" }}>
+                <h3 className="stripe-ui__panel-title" style={{ margin: 0, fontSize: "1rem" }}>
+                  CAC Table
+                </h3>
+                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                  <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={exportTableCsv}>
+                    Export CSV
+                  </button>
+                  <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => setShowTable(false)}>
+                    Hide table
+                  </button>
+                </div>
+              </div>
+
+              <div className="stripe-ui__table-wrap">
+                <table className="stripe-ui__table" aria-label="CAC table">
+                  <thead>
+                    <tr>
+                      <th>Period</th>
+                      <th className="stripe-ui__num">CAC</th>
+                      <th className="stripe-ui__num">Sales &amp; Marketing Cost</th>
+                      <th className="stripe-ui__num">Total Users</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {points.map((point) => (
+                      <tr key={`cac-row-${point.key}`}>
+                        <td>{point.label}</td>
+                        <td className="stripe-ui__num">{formatMoney(point.cac, currency)}</td>
+                        <td className="stripe-ui__num">{formatMoney(point.salesMarketingCost, currency)}</td>
+                        <td className="stripe-ui__num">{Math.max(0, Math.round(point.newCustomerCount || 0))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 type RetentionRatesChartCardProps = {
   points: RetentionSeriesPoint[];
 };
@@ -1996,15 +2262,7 @@ export default function CombinedBillingOverviewPage() {
               valueFormatter={(v) => formatMoney(v, currency)}
             />
 
-            <LineChartCard
-              title="CAC Over Time"
-              subtitle="CAC = QuickBooks Sales/Marketing cost divided by new customer count (periods with 0 new customers are shown as 0)."
-              points={cacPoints}
-              valueAccessor={(p) => p.cac}
-              valueFormatter={(v) => formatMoney(v, currency)}
-              stroke="#e879f9"
-              includeZero
-            />
+            <CacChartCard points={cacPoints} currency={currency} />
 
             <RetentionRatesChartCard points={retentionPoints} />
           </div>
