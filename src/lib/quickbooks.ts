@@ -166,8 +166,14 @@ function parseCsvListRaw(raw: string) {
     .filter(Boolean);
 }
 
+function normalizeEntityId(value: string) {
+  const text = clean(value);
+  if (!text) return "";
+  return text.replace(/\.0+$/, "");
+}
+
 function normalizeIdList(values: string[]) {
-  return Array.from(new Set(values.map((value) => clean(value)).filter(Boolean)));
+  return Array.from(new Set(values.map((value) => normalizeEntityId(value)).filter(Boolean)));
 }
 
 function normalizedAccountLabel(value: string) {
@@ -239,14 +245,16 @@ function collectSalesMarketingCostsFromRows(params: {
     const type = clean(row.type).toLowerCase();
 
     if (type === "data" && nextInExpenses) {
-      const accountId = clean(row.ColData?.[0]?.id);
+      const accountId = normalizeEntityId(clean(row.ColData?.[0]?.id));
       const accountName = clean(row.ColData?.[0]?.value);
       const accountLower = accountName.toLowerCase();
+      const matchesSelectedId = accountId ? selectedAccountIdSet.has(accountId) : false;
+      const matchesSelectedName = accountLower ? matchesExpenseAccountName(accountLower, exactAccountNames) : false;
       const isMatch =
         accountLower &&
         (
           selectedAccountIdSet.size > 0
-            ? (accountId ? selectedAccountIdSet.has(accountId) : matchesExpenseAccountName(accountLower, exactAccountNames))
+            ? (matchesSelectedId || matchesSelectedName)
             : includeAllExpenseAccounts ||
               (exactAccountNames.length > 0
                 ? matchesExpenseAccountName(accountLower, exactAccountNames)
@@ -666,7 +674,7 @@ export async function fetchQuickBooksExpenseAccounts() {
 export async function fetchQuickBooksSalesMarketingCostsByMonth(
   startDate: string,
   endDate: string,
-  options?: { selectedAccountIds?: string[] },
+  options?: { selectedAccountIds?: string[]; selectedAccountNames?: string[] },
 ) {
   const { start, end } = validateDateRange(startDate, endDate);
   const { connection } = await ensureValidConnection();
@@ -680,18 +688,22 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
   const configuredDepartmentNames = Array.from(
     new Set(parseCsvList(process.env.QUICKBOOKS_CAC_DEPARTMENT_NAMES || "sales,marketing")),
   );
-  const allDepartments = await listQuickBooksDepartments();
-  const matchedDepartments =
-    configuredDepartmentIds.length > 0
-      ? resolveQuickBooksDepartmentsById(allDepartments, configuredDepartmentIds)
-      : resolveQuickBooksDepartmentsByName(allDepartments, configuredDepartmentNames);
-  const departmentIds = Array.from(
-    new Set(
-      (configuredDepartmentIds.length > 0 ? configuredDepartmentIds : matchedDepartments.map((dept) => dept.id))
-        .map((id) => clean(id))
-        .filter(Boolean),
-    ),
-  );
+  let matchedDepartments: QuickBooksDepartment[] = [];
+  let departmentIds: string[] = [];
+  if (!useSelectedAccounts) {
+    const allDepartments = await listQuickBooksDepartments();
+    matchedDepartments =
+      configuredDepartmentIds.length > 0
+        ? resolveQuickBooksDepartmentsById(allDepartments, configuredDepartmentIds)
+        : resolveQuickBooksDepartmentsByName(allDepartments, configuredDepartmentNames);
+    departmentIds = Array.from(
+      new Set(
+        (configuredDepartmentIds.length > 0 ? configuredDepartmentIds : matchedDepartments.map((dept) => dept.id))
+          .map((id) => clean(id))
+          .filter(Boolean),
+      ),
+    );
+  }
   const useDepartmentFilter = !useSelectedAccounts && departmentIds.length > 0;
 
   const configuredAccountNames = parseCsvList(process.env.QUICKBOOKS_CAC_EXPENSE_ACCOUNT_NAMES || "");
@@ -700,21 +712,13 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
     configuredKeywords.length > 0
       ? configuredKeywords
       : ["sales", "marketing", "advertising", "promotion", "promo"];
-  let selectedAccountNames: string[] = [];
-  if (useSelectedAccounts) {
-    const expenseAccounts = await listQuickBooksExpenseAccounts();
-    const byId = new Map(expenseAccounts.map((account) => [account.id, account]));
-    selectedAccountNames = Array.from(
-      new Set(
-        selectedAccountIds
-          .map((id) => byId.get(id))
-          .filter((account): account is QuickBooksExpenseAccount => Boolean(account))
-          .flatMap((account) => [account.name, account.fullyQualifiedName])
-          .map((value) => clean(value).toLowerCase())
-          .filter(Boolean),
-      ),
-    );
-  }
+  const selectedAccountNames = Array.from(
+    new Set(
+      (options?.selectedAccountNames || [])
+        .map((value) => clean(value).toLowerCase())
+        .filter(Boolean),
+    ),
+  );
   const effectiveExactAccountNames = useSelectedAccounts ? selectedAccountNames : configuredAccountNames;
   const effectiveKeywords = useSelectedAccounts ? [] : keywordMatchers;
 

@@ -8,9 +8,21 @@ type RequestBody = {
   startDate?: string;
   endDate?: string;
   accountIds?: string[];
+  accountNames?: string[];
 };
 
 function normalizeIds(values: unknown) {
+  if (!Array.isArray(values)) return [];
+  return Array.from(
+    new Set(
+      values
+        .map((value) => String(value || "").trim().replace(/\.0+$/, ""))
+        .filter(Boolean),
+    ),
+  );
+}
+
+function normalizeNames(values: unknown) {
   if (!Array.isArray(values)) return [];
   return Array.from(
     new Set(
@@ -36,8 +48,10 @@ export async function POST(request: Request) {
     const startDate = String(body.startDate || "");
     const endDate = String(body.endDate || "");
     const accountIds = normalizeIds(body.accountIds);
+    const accountNames = normalizeNames(body.accountNames);
     const payload = await fetchQuickBooksSalesMarketingCostsByMonth(startDate, endDate, {
       selectedAccountIds: accountIds,
+      selectedAccountNames: accountNames,
     });
     return NextResponse.json(payload);
   } catch (error: unknown) {
