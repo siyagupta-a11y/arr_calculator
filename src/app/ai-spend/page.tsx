@@ -56,12 +56,16 @@ type ApiResponse = {
   topProducts: AiSpendGroupRow[];
   topPrices: AiSpendPriceRow[];
   detailRows: AiSpendDetailRow[];
+  reportSource?: string;
+  reportTypeId?: string;
+  reportRunId?: string;
 };
 
 function defaultDateRange() {
   const end = new Date();
-  const start = new Date(end.getFullYear() - 1, end.getMonth(), 1);
-  const toIso = (d: Date) => d.toISOString().slice(0, 10);
+  const start = new Date(end.getFullYear(), end.getMonth(), 1);
+  const toIso = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   return { startDate: toIso(start), endDate: toIso(end) };
 }
 
@@ -177,8 +181,8 @@ export default function AiSpendPage() {
           <div>
             <h1 className="stripe-ui__title">AI spend</h1>
             <p className="stripe-ui__subtitle">
-              Mirrors Stripe&apos;s Revenue from metered usage report using backend-aggregated data from Stripe invoice lines and
-              displays period totals, top contributors, and raw metered line items.
+              Pulls Stripe&apos;s metered usage revenue report for the selected period (default: current month) and displays totals,
+              top contributors, and raw metered line items.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -206,7 +210,7 @@ export default function AiSpendPage() {
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Report controls</h2>
-        <p className="stripe-ui__panel-subtitle">Select range and grain, then load metered usage revenue.</p>
+        <p className="stripe-ui__panel-subtitle">Current month is preselected. Adjust if needed, then load Stripe report data.</p>
 
         <div className="stripe-ui__control-grid">
           <div className="stripe-ui__field">
@@ -319,6 +323,13 @@ export default function AiSpendPage() {
         <>
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
             <h2 className="stripe-ui__panel-title">Summary</h2>
+            {data.reportTypeId || data.reportRunId ? (
+              <p className="stripe-ui__panel-subtitle" style={{ marginTop: "-0.25rem" }}>
+                Source: Stripe Reporting API
+                {data.reportTypeId ? ` | Report type: ${data.reportTypeId}` : ""}
+                {data.reportRunId ? ` | Run: ${data.reportRunId}` : ""}
+              </p>
+            ) : null}
             <div className="stripe-ui__stats" style={{ gridTemplateColumns: "repeat(4, minmax(140px, 1fr))" }}>
               <article className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Total metered revenue</p>

@@ -1,17 +1,13 @@
 import { NextResponse } from "next/server";
 import {
-  queryStripeAiSpendFromBigQuery,
+  getCurrentMonthDateRangeIso,
+  queryStripeAiSpendReport,
   type StripeAiSpendGrain,
   type StripeAiSpendRequest,
-  type StripeBigQueryProfile,
-} from "@/lib/stripeBigquery";
+} from "@/lib/stripeAiSpendReport";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-
-const STRIPE_AI_SPEND_OPTIONS: { profile: StripeBigQueryProfile } = {
-  profile: "stripe_arr_correct",
-};
 
 const ALLOWED_GRAINS = new Set<StripeAiSpendGrain>([
   "daily",
@@ -33,8 +29,9 @@ type ApiBody = {
 };
 
 function parsePayload(raw: Partial<ApiBody>): StripeAiSpendRequest {
-  const startDate = String(raw.startDate || "").trim();
-  const endDate = String(raw.endDate || "").trim();
+  const defaults = getCurrentMonthDateRangeIso();
+  const startDate = String(raw.startDate || defaults.startDate).trim();
+  const endDate = String(raw.endDate || defaults.endDate).trim();
   if (!isIsoDate(startDate) || !isIsoDate(endDate)) {
     throw new Error("Invalid startDate/endDate");
   }
@@ -67,7 +64,7 @@ function parsePayload(raw: Partial<ApiBody>): StripeAiSpendRequest {
 
 async function validateAndRun(body: Partial<ApiBody>) {
   const payload = parsePayload(body);
-  return queryStripeAiSpendFromBigQuery(payload, STRIPE_AI_SPEND_OPTIONS);
+  return queryStripeAiSpendReport(payload);
 }
 
 export async function POST(req: Request) {
@@ -88,8 +85,8 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const body: Partial<ApiBody> = {
-      startDate: searchParams.get("startDate") || "",
-      endDate: searchParams.get("endDate") || "",
+      startDate: searchParams.get("startDate") || undefined,
+      endDate: searchParams.get("endDate") || undefined,
       grain: searchParams.get("grain") || "monthly",
       topLimit: Number(searchParams.get("topLimit") || 25),
       detailLimit: Number(searchParams.get("detailLimit") || 300),
