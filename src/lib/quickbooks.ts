@@ -58,6 +58,7 @@ type QuickBooksExpenseAccount = {
 };
 
 type QuickBooksProfitAndLossCol = {
+  id?: string;
   value?: string;
 };
 
@@ -169,6 +170,12 @@ function normalizeIdList(values: string[]) {
   return Array.from(new Set(values.map((value) => clean(value)).filter(Boolean)));
 }
 
+function normalizedAccountLabel(value: string) {
+  const text = clean(value).toLowerCase().replace(/\s+/g, " ");
+  const withoutPrefix = text.replace(/^\d+[\s:-]+/, "");
+  return withoutPrefix.trim();
+}
+
 function normalizeQuickBooksMoney(value: unknown) {
   const text = String(value ?? "").trim();
   if (!text) return null;
@@ -189,10 +196,10 @@ function amountFromColData(cols: QuickBooksProfitAndLossCol[] | undefined) {
 }
 
 function matchesExpenseAccountName(accountLower: string, exactAccountNames: string[]) {
-  const account = clean(accountLower).toLowerCase();
+  const account = normalizedAccountLabel(accountLower);
   if (!account) return false;
   for (const candidate of exactAccountNames) {
-    const target = clean(candidate).toLowerCase();
+    const target = normalizedAccountLabel(candidate);
     if (!target) continue;
     if (account === target) return true;
     if (account.endsWith(`:${target}`)) return true;
@@ -205,6 +212,7 @@ function collectSalesMarketingCostsFromRows(params: {
   rows: QuickBooksProfitAndLossRow[];
   inExpensesSection: boolean;
   includeAllExpenseAccounts: boolean;
+  selectedAccountIdSet: Set<string>;
   exactAccountNames: string[];
   keywordMatchers: string[];
   matchedAccounts: Set<string>;
@@ -213,6 +221,7 @@ function collectSalesMarketingCostsFromRows(params: {
     rows,
     inExpensesSection,
     includeAllExpenseAccounts,
+    selectedAccountIdSet,
     exactAccountNames,
     keywordMatchers,
     matchedAccounts,
@@ -230,14 +239,20 @@ function collectSalesMarketingCostsFromRows(params: {
     const type = clean(row.type).toLowerCase();
 
     if (type === "data" && nextInExpenses) {
+      const accountId = clean(row.ColData?.[0]?.id);
       const accountName = clean(row.ColData?.[0]?.value);
       const accountLower = accountName.toLowerCase();
       const isMatch =
         accountLower &&
-        (includeAllExpenseAccounts ||
-          (exactAccountNames.length > 0
-            ? matchesExpenseAccountName(accountLower, exactAccountNames)
-            : keywordMatchers.some((keyword) => accountLower.includes(keyword))));
+        (
+          selectedAccountIdSet.size > 0
+            ? (accountId ? selectedAccountIdSet.has(accountId) : matchesExpenseAccountName(accountLower, exactAccountNames))
+            : includeAllExpenseAccounts ||
+              (exactAccountNames.length > 0
+                ? matchesExpenseAccountName(accountLower, exactAccountNames)
+                : keywordMatchers.some((keyword) => accountLower.includes(keyword))
+              )
+        );
       if (isMatch) {
         const amount = amountFromColData(row.ColData);
         if (amount != null) {
@@ -253,6 +268,7 @@ function collectSalesMarketingCostsFromRows(params: {
         rows: childRows,
         inExpensesSection: nextInExpenses,
         includeAllExpenseAccounts,
+        selectedAccountIdSet,
         exactAccountNames,
         keywordMatchers,
         matchedAccounts,
@@ -266,16 +282,19 @@ function collectSalesMarketingCostsFromRows(params: {
 function parseSalesMarketingCostsFromProfitAndLoss(
   payload: unknown,
   includeAllExpenseAccounts: boolean,
+  selectedAccountIds: string[],
   exactAccountNames: string[],
   keywordMatchers: string[],
 ) {
   const rows = ((payload as { Rows?: { Row?: QuickBooksProfitAndLossRow[] } } | null)?.Rows?.Row || [])
     .filter(Boolean);
   const matchedAccounts = new Set<string>();
+  const selectedAccountIdSet = new Set(normalizeIdList(selectedAccountIds));
   const total = collectSalesMarketingCostsFromRows({
     rows,
     inExpensesSection: false,
     includeAllExpenseAccounts,
+    selectedAccountIdSet,
     exactAccountNames,
     keywordMatchers,
     matchedAccounts,
@@ -734,6 +753,7 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
     const parsed = parseSalesMarketingCostsFromProfitAndLoss(
       reportPayload,
       useDepartmentFilter,
+      selectedAccountIds,
       effectiveExactAccountNames,
       effectiveKeywords,
     );
