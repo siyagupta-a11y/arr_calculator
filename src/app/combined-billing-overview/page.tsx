@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { downloadSvgAsPng } from "@/lib/chartDownload";
 import type { ReportResponse, ReportRow } from "@/lib/types";
 
@@ -76,7 +76,8 @@ type QuickBooksSalesMarketingCostPoint = {
 
 type QuickBooksSalesMarketingCostResponse = {
   realmId: string;
-  accountMatchMode: "department" | "exact_names" | "keywords";
+  accountMatchMode: "selected_accounts" | "department" | "exact_names" | "keywords";
+  selectedAccountIds?: string[];
   departmentIds?: string[];
   departmentNames?: string[];
   matchedDepartments?: Array<{ id: string; name: string }>;
@@ -86,6 +87,26 @@ type QuickBooksSalesMarketingCostResponse = {
   currency: string;
   points: QuickBooksSalesMarketingCostPoint[];
   matchedAccounts: string[];
+};
+
+type QuickBooksExpenseAccount = {
+  id: string;
+  name: string;
+  fullyQualifiedName: string;
+  accountType: string;
+  subAccount: boolean;
+  active: boolean;
+};
+
+type QuickBooksExpenseAccountsResponse = {
+  realmId: string;
+  accounts: QuickBooksExpenseAccount[];
+};
+
+type QuickBooksCacAccountDefaultResponse = {
+  storage: "vercel_blob" | "local_tmp";
+  selectedAccountIds: string[];
+  updatedAt: number;
 };
 
 type CacPoint = {
@@ -650,9 +671,38 @@ function LineChartCard<TPoint extends LineChartPointBase>({
 type CacChartCardProps = {
   points: CacPoint[];
   currency: string;
+  expenseAccounts: QuickBooksExpenseAccount[];
+  selectedAccountIds: string[];
+  accountMenuOpen: boolean;
+  accountsLoading: boolean;
+  accountsError: string;
+  savingDefaultSelection: boolean;
+  defaultSaveStatus: string;
+  onToggleAccountMenu: () => void;
+  onRefreshAccounts: () => void;
+  onToggleAccountSelection: (accountId: string) => void;
+  onSelectAllAccounts: () => void;
+  onClearAccounts: () => void;
+  onSaveDefaultSelection: () => void;
 };
 
-function CacChartCard({ points, currency }: CacChartCardProps) {
+function CacChartCard({
+  points,
+  currency,
+  expenseAccounts,
+  selectedAccountIds,
+  accountMenuOpen,
+  accountsLoading,
+  accountsError,
+  savingDefaultSelection,
+  defaultSaveStatus,
+  onToggleAccountMenu,
+  onRefreshAccounts,
+  onToggleAccountSelection,
+  onSelectAllAccounts,
+  onClearAccounts,
+  onSaveDefaultSelection,
+}: CacChartCardProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [showTable, setShowTable] = useState(false);
   const chartRef = useRef<SVGSVGElement | null>(null);
@@ -699,6 +749,7 @@ function CacChartCard({ points, currency }: CacChartCardProps) {
     Math.min(paddingLeft + plotWidth - tooltipWidth, hoveredX - tooltipWidth / 2),
   );
   const tooltipY = Math.max(paddingTop + 4, hoveredY - tooltipHeight - 10);
+  const selectedCount = selectedAccountIds.length;
 
   const downloadChart = useCallback(async () => {
     if (!chartRef.current || downloading) return;
@@ -733,7 +784,26 @@ function CacChartCard({ points, currency }: CacChartCardProps) {
             CAC = Sales & Marketing Cost / Total Users. Click the chart to open the data table.
           </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.6rem",
+            flexWrap: "wrap",
+            justifyContent: "flex-end",
+            position: "relative",
+          }}
+        >
+          <button
+            className="stripe-ui__btn stripe-ui__btn--ghost"
+            onClick={onToggleAccountMenu}
+            aria-haspopup="menu"
+            aria-expanded={accountMenuOpen}
+            title="Configure CAC expense accounts"
+            style={{ minWidth: "2.2rem", paddingInline: "0.55rem" }}
+          >
+            ...
+          </button>
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
             {downloading ? "Downloading..." : "Download chart"}
           </button>
@@ -742,6 +812,96 @@ function CacChartCard({ points, currency }: CacChartCardProps) {
               ? `${hoveredPoint.label}: CAC ${formatMoney(hoveredPoint.cac, currency)}`
               : "Hover on chart for values"}
           </div>
+
+          {accountMenuOpen && (
+            <div
+              className="stripe-ui__panel"
+              style={{
+                position: "absolute",
+                right: 0,
+                top: "2.6rem",
+                zIndex: 30,
+                width: "min(460px, 92vw)",
+                padding: "0.85rem",
+                borderColor: "#3e5e89",
+              }}
+              role="menu"
+            >
+              <div className="stripe-ui__hint" style={{ marginBottom: "0.55rem" }}>
+                Select expense accounts used for CAC Sales &amp; Marketing cost.
+              </div>
+
+              <div style={{ display: "flex", gap: "0.45rem", flexWrap: "wrap", marginBottom: "0.55rem" }}>
+                <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={onSelectAllAccounts} disabled={accountsLoading}>
+                  Select all
+                </button>
+                <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={onClearAccounts} disabled={accountsLoading}>
+                  Clear
+                </button>
+                <button
+                  className="stripe-ui__btn stripe-ui__btn--primary"
+                  onClick={onSaveDefaultSelection}
+                  disabled={savingDefaultSelection}
+                >
+                  {savingDefaultSelection ? "Saving..." : "Save as default"}
+                </button>
+                <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={onRefreshAccounts} disabled={accountsLoading}>
+                  Refresh
+                </button>
+              </div>
+
+              {defaultSaveStatus ? (
+                <div className="stripe-ui__hint" style={{ marginBottom: "0.55rem" }}>
+                  {defaultSaveStatus}
+                </div>
+              ) : null}
+
+              {accountsError ? (
+                <div className="stripe-ui__hint" style={{ color: "#f4a4b7", marginBottom: "0.55rem" }}>
+                  {accountsError}
+                </div>
+              ) : null}
+
+              {accountsLoading ? (
+                <div className="stripe-ui__hint">Loading expense accounts...</div>
+              ) : expenseAccounts.length === 0 ? (
+                <div className="stripe-ui__hint">No expense accounts found or QuickBooks is not connected.</div>
+              ) : (
+                <div
+                  className="stripe-ui__table-wrap"
+                  style={{ maxHeight: "240px", overflow: "auto", padding: "0.45rem", marginBottom: "0.45rem" }}
+                >
+                  <div style={{ display: "grid", gap: "0.35rem" }}>
+                    {expenseAccounts.map((account) => {
+                      const checked = selectedAccountIds.includes(account.id);
+                      return (
+                        <label
+                          key={`cac-account-${account.id}`}
+                          style={{ display: "flex", alignItems: "flex-start", gap: "0.45rem", cursor: "pointer" }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => onToggleAccountSelection(account.id)}
+                            style={{ marginTop: "0.2rem" }}
+                          />
+                          <span className="stripe-ui__hint">
+                            {account.fullyQualifiedName || account.name}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div className="stripe-ui__hint">
+                {selectedCount > 0
+                  ? `${selectedCount} selected account${selectedCount === 1 ? "" : "s"} will be used for CAC cost.`
+                  : "No accounts selected. CAC cost falls back to automatic Sales/Marketing matching."}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1680,6 +1840,148 @@ export default function CombinedBillingOverviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<CombinedOverviewData | null>(null);
   const [cacNotice, setCacNotice] = useState<string | null>(null);
+  const [selectedCacAccountIds, setSelectedCacAccountIds] = useState<string[]>([]);
+  const [cacAccountMenuOpen, setCacAccountMenuOpen] = useState(false);
+  const [cacExpenseAccounts, setCacExpenseAccounts] = useState<QuickBooksExpenseAccount[]>([]);
+  const [cacExpenseAccountsLoaded, setCacExpenseAccountsLoaded] = useState(false);
+  const [cacExpenseAccountsLoading, setCacExpenseAccountsLoading] = useState(false);
+  const [cacExpenseAccountsError, setCacExpenseAccountsError] = useState("");
+  const [savingCacDefaultSelection, setSavingCacDefaultSelection] = useState(false);
+  const [cacDefaultSaveStatus, setCacDefaultSaveStatus] = useState("");
+
+  const fetchApiGetJson = useCallback(async <T,>(url: string): Promise<T> => {
+    const res = await fetch(url, { method: "GET", cache: "no-store" });
+    const text = await res.text();
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    if (!res.ok) {
+      if (json && typeof json === "object" && "error" in json) {
+        throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+      }
+      throw new Error(text || `HTTP ${res.status}`);
+    }
+    if (!json || typeof json !== "object") throw new Error("Invalid API response");
+    return json as T;
+  }, []);
+
+  const loadCacDefaultSelection = useCallback(async () => {
+    try {
+      const payload = await fetchApiGetJson<QuickBooksCacAccountDefaultResponse>(
+        "/api/quickbooks/cac-account-default",
+      );
+      const ids = Array.isArray(payload.selectedAccountIds)
+        ? Array.from(new Set(payload.selectedAccountIds.map((id) => String(id || "").trim()).filter(Boolean)))
+        : [];
+      setSelectedCacAccountIds(ids);
+    } catch {
+      setSelectedCacAccountIds([]);
+    }
+  }, [fetchApiGetJson]);
+
+  const loadCacExpenseAccounts = useCallback(async () => {
+    setCacExpenseAccountsLoading(true);
+    setCacExpenseAccountsError("");
+    try {
+      const payload = await fetchApiGetJson<QuickBooksExpenseAccountsResponse>(
+        "/api/quickbooks/expense-accounts",
+      );
+      const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+      const accountIdSet = new Set(accounts.map((account) => String(account.id || "").trim()).filter(Boolean));
+      setCacExpenseAccounts(accounts);
+      setSelectedCacAccountIds((prev) => prev.filter((id) => accountIdSet.has(id)));
+      setCacExpenseAccountsLoaded(true);
+    } catch (e: unknown) {
+      setCacExpenseAccountsError(conciseErrorMessage(e, "Failed to load expense accounts."));
+    } finally {
+      setCacExpenseAccountsLoading(false);
+    }
+  }, [fetchApiGetJson]);
+
+  useEffect(() => {
+    void loadCacDefaultSelection();
+  }, [loadCacDefaultSelection]);
+
+  const toggleCacAccountMenu = useCallback(() => {
+    setCacAccountMenuOpen((prev) => {
+      const next = !prev;
+      if (next && !cacExpenseAccountsLoaded && !cacExpenseAccountsLoading) {
+        void loadCacExpenseAccounts();
+      }
+      return next;
+    });
+    setCacDefaultSaveStatus("");
+  }, [cacExpenseAccountsLoaded, cacExpenseAccountsLoading, loadCacExpenseAccounts]);
+
+  const toggleCacAccountSelection = useCallback((accountId: string) => {
+    const id = String(accountId || "").trim();
+    if (!id) return;
+    setSelectedCacAccountIds((prev) => {
+      if (prev.includes(id)) return prev.filter((value) => value !== id);
+      return [...prev, id];
+    });
+    setCacDefaultSaveStatus("");
+  }, []);
+
+  const selectAllCacAccounts = useCallback(() => {
+    const ids = Array.from(
+      new Set(
+        cacExpenseAccounts
+          .map((account) => String(account.id || "").trim())
+          .filter(Boolean),
+      ),
+    );
+    setSelectedCacAccountIds(ids);
+    setCacDefaultSaveStatus("");
+  }, [cacExpenseAccounts]);
+
+  const clearCacAccounts = useCallback(() => {
+    setSelectedCacAccountIds([]);
+    setCacDefaultSaveStatus("");
+  }, []);
+
+  const saveCacDefaultSelection = useCallback(async () => {
+    setSavingCacDefaultSelection(true);
+    setCacExpenseAccountsError("");
+    setCacDefaultSaveStatus("");
+    try {
+      const res = await fetch("/api/quickbooks/cac-account-default", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountIds: selectedCacAccountIds }),
+      });
+      const text = await res.text();
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+      if (!res.ok) {
+        if (json && typeof json === "object" && "error" in json) {
+          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+        }
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const payload = (json || {}) as Partial<QuickBooksCacAccountDefaultResponse>;
+      const ids = Array.isArray(payload.selectedAccountIds)
+        ? Array.from(new Set(payload.selectedAccountIds.map((id) => String(id || "").trim()).filter(Boolean)))
+        : [];
+      setSelectedCacAccountIds(ids);
+      setCacDefaultSaveStatus(
+        ids.length > 0
+          ? `Saved default selection (${ids.length} account${ids.length === 1 ? "" : "s"}).`
+          : "Saved default selection (automatic matching mode).",
+      );
+    } catch (e: unknown) {
+      setCacExpenseAccountsError(conciseErrorMessage(e, "Failed to save default selection."));
+    } finally {
+      setSavingCacDefaultSelection(false);
+    }
+  }, [selectedCacAccountIds]);
 
   async function run() {
     setHasRunOnce(true);
@@ -1988,7 +2290,7 @@ export default function CombinedBillingOverviewPage() {
         try {
           const qbCosts = await fetchJson<QuickBooksSalesMarketingCostResponse>(
             "/api/quickbooks/sales-marketing-costs",
-            { startDate, endDate },
+            { startDate, endDate, accountIds: selectedCacAccountIds },
           );
           const costByMonth = new Map<string, number>();
           for (const point of qbCosts.points || []) {
@@ -2016,7 +2318,10 @@ export default function CombinedBillingOverviewPage() {
           });
 
           const matchedDepartmentCount = qbCosts.matchedDepartments?.length || 0;
-          if (qbCosts.accountMatchMode === "department" && matchedDepartmentCount === 0) {
+          if (qbCosts.accountMatchMode === "selected_accounts" && selectedCacAccountIds.length > 0 && qbCosts.matchedAccounts.length === 0) {
+            nextCacNotice =
+              "Selected CAC expense accounts returned no matching costs for this range. Update your account selection from the ... menu on the CAC chart.";
+          } else if (qbCosts.accountMatchMode === "department" && matchedDepartmentCount === 0) {
             nextCacNotice =
               "QuickBooks is connected, but no Sales/Marketing departments matched. Set QUICKBOOKS_CAC_DEPARTMENT_IDS or QUICKBOOKS_CAC_DEPARTMENT_NAMES.";
           } else if (qbCosts.accountMatchMode !== "department" && qbCosts.matchedAccounts.length === 0) {
@@ -2269,7 +2574,23 @@ export default function CombinedBillingOverviewPage() {
               valueFormatter={(v) => formatMoney(v, currency)}
             />
 
-            <CacChartCard points={cacPoints} currency={currency} />
+            <CacChartCard
+              points={cacPoints}
+              currency={currency}
+              expenseAccounts={cacExpenseAccounts}
+              selectedAccountIds={selectedCacAccountIds}
+              accountMenuOpen={cacAccountMenuOpen}
+              accountsLoading={cacExpenseAccountsLoading}
+              accountsError={cacExpenseAccountsError}
+              savingDefaultSelection={savingCacDefaultSelection}
+              defaultSaveStatus={cacDefaultSaveStatus}
+              onToggleAccountMenu={toggleCacAccountMenu}
+              onRefreshAccounts={() => void loadCacExpenseAccounts()}
+              onToggleAccountSelection={toggleCacAccountSelection}
+              onSelectAllAccounts={selectAllCacAccounts}
+              onClearAccounts={clearCacAccounts}
+              onSaveDefaultSelection={() => void saveCacDefaultSelection()}
+            />
 
             <RetentionRatesChartCard points={retentionPoints} />
           </div>

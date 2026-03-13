@@ -48,6 +48,15 @@ type QuickBooksDepartment = {
   name: string;
 };
 
+type QuickBooksExpenseAccount = {
+  id: string;
+  name: string;
+  fullyQualifiedName: string;
+  accountType: string;
+  subAccount: boolean;
+  active: boolean;
+};
+
 type QuickBooksProfitAndLossCol = {
   value?: string;
 };
@@ -64,6 +73,15 @@ type QuickBooksQueryDepartment = {
   Id?: unknown;
   Name?: unknown;
   FullyQualifiedName?: unknown;
+  Active?: unknown;
+};
+
+type QuickBooksQueryAccount = {
+  Id?: unknown;
+  Name?: unknown;
+  FullyQualifiedName?: unknown;
+  AccountType?: unknown;
+  SubAccount?: unknown;
   Active?: unknown;
 };
 
@@ -145,6 +163,10 @@ function parseCsvListRaw(raw: string) {
     .split(/[,\n]/)
     .map((token) => clean(token))
     .filter(Boolean);
+}
+
+function normalizeIdList(values: string[]) {
+  return Array.from(new Set(values.map((value) => clean(value)).filter(Boolean)));
 }
 
 function normalizeQuickBooksMoney(value: unknown) {
@@ -294,6 +316,50 @@ function resolveQuickBooksDepartmentsById(
   const targets = new Set(targetDepartmentIds.map((id) => clean(id)).filter(Boolean));
   if (targets.size === 0) return [];
   return departments.filter((dept) => targets.has(dept.id));
+}
+
+async function listQuickBooksExpenseAccounts(): Promise<QuickBooksExpenseAccount[]> {
+  const response = await runQuickBooksQuery(
+    "SELECT Id, Name, FullyQualifiedName, AccountType, SubAccount, Active FROM Account WHERE AccountType = 'Expense' MAXRESULTS 1000",
+  );
+  const queryResponse = response.queryResponse as { Account?: unknown[] } | null;
+  const rows = Array.isArray(queryResponse?.Account) ? queryResponse?.Account || [] : [];
+  const mapped: QuickBooksExpenseAccount[] = [];
+
+  for (const row of rows) {
+    const account = (row || {}) as QuickBooksQueryAccount;
+    const id = clean(typeof account.Id === "string" || typeof account.Id === "number" ? String(account.Id) : "");
+    const name = clean(typeof account.Name === "string" ? account.Name : "");
+    const fullyQualifiedName = clean(
+      typeof account.FullyQualifiedName === "string" ? account.FullyQualifiedName : "",
+    );
+    const accountType = clean(typeof account.AccountType === "string" ? account.AccountType : "");
+    const subAccount =
+      typeof account.SubAccount === "boolean"
+        ? account.SubAccount
+        : String(account.SubAccount || "").trim().toLowerCase() === "true";
+    const active =
+      typeof account.Active === "boolean"
+        ? account.Active
+        : String(account.Active || "").trim().toLowerCase() !== "false";
+
+    if (!id || !name || !active) continue;
+    mapped.push({
+      id,
+      name,
+      fullyQualifiedName: fullyQualifiedName || name,
+      accountType: accountType || "Expense",
+      subAccount,
+      active,
+    });
+  }
+
+  mapped.sort((a, b) => {
+    const aLabel = (a.fullyQualifiedName || a.name).toLowerCase();
+    const bLabel = (b.fullyQualifiedName || b.name).toLowerCase();
+    return aLabel.localeCompare(bLabel);
+  });
+  return mapped;
 }
 
 function validateDateRange(startDate: string, endDate: string) {
@@ -556,10 +622,25 @@ export async function fetchQuickBooksCompanyInfo() {
   };
 }
 
-export async function fetchQuickBooksSalesMarketingCostsByMonth(startDate: string, endDate: string) {
+export async function fetchQuickBooksExpenseAccounts() {
+  const { connection } = await ensureValidConnection();
+  const accounts = await listQuickBooksExpenseAccounts();
+  return {
+    realmId: connection.realmId,
+    accounts,
+  };
+}
+
+export async function fetchQuickBooksSalesMarketingCostsByMonth(
+  startDate: string,
+  endDate: string,
+  options?: { selectedAccountIds?: string[] },
+) {
   const { start, end } = validateDateRange(startDate, endDate);
   const { connection } = await ensureValidConnection();
   const { minorVersion } = getQuickBooksConfig();
+  const selectedAccountIds = normalizeIdList(options?.selectedAccountIds || []);
+  const useSelectedAccounts = selectedAccountIds.length > 0;
 
   const configuredDepartmentIds = Array.from(
     new Set(parseCsvListRaw(process.env.QUICKBOOKS_CAC_DEPARTMENT_IDS || "")),
@@ -579,7 +660,7 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(startDate: strin
         .filter(Boolean),
     ),
   );
-  const useDepartmentFilter = departmentIds.length > 0;
+  const useDepartmentFilter = !useSelectedAccounts && departmentIds.length > 0;
 
   const configuredAccountNames = parseCsvList(process.env.QUICKBOOKS_CAC_EXPENSE_ACCOUNT_NAMES || "");
   const configuredKeywords = parseCsvList(process.env.QUICKBOOKS_CAC_EXPENSE_KEYWORDS || "");
@@ -605,7 +686,9 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(startDate: strin
       accounting_method: accountingMethod,
       minorversion: minorVersion,
     });
-    if (useDepartmentFilter) {
+    if (useSelectedAccounts) {
+      qs.set("account", selectedAccountIds.join(","));
+    } else if (useDepartmentFilter) {
       qs.set("department", departmentIds.join(","));
     }
     const reportPayload = await quickBooksGetJson(
@@ -622,7 +705,7 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(startDate: strin
     }
     const parsed = parseSalesMarketingCostsFromProfitAndLoss(
       reportPayload,
-      useDepartmentFilter,
+      useSelectedAccounts || useDepartmentFilter,
       configuredAccountNames,
       keywordMatchers,
     );
@@ -642,11 +725,14 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(startDate: strin
 
   return {
     realmId: connection.realmId,
-    accountMatchMode: useDepartmentFilter
-      ? "department"
-      : configuredAccountNames.length > 0
-        ? "exact_names"
-        : "keywords",
+    accountMatchMode: useSelectedAccounts
+      ? "selected_accounts"
+      : useDepartmentFilter
+        ? "department"
+        : configuredAccountNames.length > 0
+          ? "exact_names"
+          : "keywords",
+    selectedAccountIds,
     departmentIds,
     departmentNames: configuredDepartmentNames,
     matchedDepartments: matchedDepartments.length

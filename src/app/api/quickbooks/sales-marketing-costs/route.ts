@@ -7,7 +7,19 @@ export const maxDuration = 300;
 type RequestBody = {
   startDate?: string;
   endDate?: string;
+  accountIds?: string[];
 };
+
+function normalizeIds(values: unknown) {
+  if (!Array.isArray(values)) return [];
+  return Array.from(
+    new Set(
+      values
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+}
 
 function statusCodeFromMessage(message: string) {
   const lower = message.toLowerCase();
@@ -23,7 +35,10 @@ export async function POST(request: Request) {
     const body = (raw ? JSON.parse(raw) : {}) as RequestBody;
     const startDate = String(body.startDate || "");
     const endDate = String(body.endDate || "");
-    const payload = await fetchQuickBooksSalesMarketingCostsByMonth(startDate, endDate);
+    const accountIds = normalizeIds(body.accountIds);
+    const payload = await fetchQuickBooksSalesMarketingCostsByMonth(startDate, endDate, {
+      selectedAccountIds: accountIds,
+    });
     return NextResponse.json(payload);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
