@@ -20,6 +20,52 @@ function svgDimensions(svg: SVGSVGElement) {
   return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
 }
 
+function resolveChartBackground(svg: SVGSVGElement) {
+  let current: HTMLElement | null = svg;
+  while (current) {
+    const bg = window.getComputedStyle(current).backgroundColor;
+    if (bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)") {
+      return bg;
+    }
+    current = current.parentElement;
+  }
+  return "#0e203b";
+}
+
+function ensureRootMetadata(clone: SVGSVGElement, width: number, height: number) {
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+  clone.setAttribute("width", String(width));
+  clone.setAttribute("height", String(height));
+  if (!clone.getAttribute("viewBox")) {
+    clone.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  }
+}
+
+function prependBackgroundRect(clone: SVGSVGElement, width: number, height: number, fill: string) {
+  const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  bgRect.setAttribute("x", "0");
+  bgRect.setAttribute("y", "0");
+  bgRect.setAttribute("width", String(width));
+  bgRect.setAttribute("height", String(height));
+  bgRect.setAttribute("fill", fill);
+  bgRect.setAttribute("pointer-events", "none");
+  clone.insertBefore(bgRect, clone.firstChild);
+}
+
+function applyNativeTooltips(clone: SVGSVGElement) {
+  const elements = clone.querySelectorAll<SVGElement>("[data-tooltip]");
+  for (const element of elements) {
+    const raw = element.getAttribute("data-tooltip");
+    const tooltip = String(raw || "").trim();
+    if (!tooltip) continue;
+    if (element.querySelector("title")) continue;
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = tooltip;
+    element.prepend(title);
+  }
+}
+
 function triggerDownload(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -34,46 +80,11 @@ function triggerDownload(filename: string, blob: Blob) {
 export async function downloadSvgAsPng(svg: SVGSVGElement, filenamePrefix: string) {
   const { width, height } = svgDimensions(svg);
   const clone = svg.cloneNode(true) as SVGSVGElement;
-  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-  clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
-  if (!clone.getAttribute("viewBox")) {
-    clone.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  }
+  ensureRootMetadata(clone, width, height);
+  prependBackgroundRect(clone, width, height, resolveChartBackground(svg));
+  applyNativeTooltips(clone);
 
   const serialized = new XMLSerializer().serializeToString(clone);
   const svgBlob = new Blob([serialized], { type: "image/svg+xml;charset=utf-8" });
-  const svgUrl = URL.createObjectURL(svgBlob);
-
-  try {
-    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error("Unable to render chart image"));
-      img.src = svgUrl;
-    });
-
-    const scale = 2;
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(width * scale));
-    canvas.height = Math.max(1, Math.round(height * scale));
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Unable to initialize image canvas");
-
-    ctx.scale(scale, scale);
-    ctx.drawImage(image, 0, 0, width, height);
-
-    const pngBlob = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob((blob) => {
-        if (!blob) {
-          reject(new Error("Unable to create PNG file"));
-          return;
-        }
-        resolve(blob);
-      }, "image/png");
-    });
-
-    triggerDownload(`${sanitizeFilename(filenamePrefix)}-${timestamp()}.png`, pngBlob);
-  } finally {
-    URL.revokeObjectURL(svgUrl);
-  }
+  triggerDownload(`${sanitizeFilename(filenamePrefix)}-${timestamp()}.svg`, svgBlob);
 }

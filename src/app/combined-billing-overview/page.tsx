@@ -168,6 +168,14 @@ function round2(n: number) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
+function normalizeEntityId(value: string) {
+  return String(value || "").trim().replace(/\.0+$/, "");
+}
+
+function normalizeIdList(values: string[]) {
+  return Array.from(new Set(values.map((value) => normalizeEntityId(value)).filter(Boolean)));
+}
+
 function isCloudDeploymentType(value: string) {
   return String(value || "").trim().toLowerCase() === "cloud";
 }
@@ -547,7 +555,7 @@ function LineChartCard<TPoint extends LineChartPointBase>({
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
-            {downloading ? "Downloading..." : "Download chart"}
+            {downloading ? "Downloading..." : "Download SVG"}
           </button>
           <div className="stripe-ui__hint" aria-live="polite">
             {hoveredPoint
@@ -638,6 +646,7 @@ function LineChartCard<TPoint extends LineChartPointBase>({
                 cy={yAt(valueAccessor(point))}
                 r={hoverIndex === idx ? 4.6 : 3.2}
                 fill={stroke}
+                data-tooltip={`${point.label}: ${valueFormatter(valueAccessor(point))}`}
                 onMouseEnter={() => setHoverIndex(idx)}
               />
             ))}
@@ -673,6 +682,7 @@ type CacChartCardProps = {
   currency: string;
   expenseAccounts: QuickBooksExpenseAccount[];
   selectedAccountIds: string[];
+  runLoading: boolean;
   accountMenuOpen: boolean;
   accountsLoading: boolean;
   accountsError: string;
@@ -692,6 +702,7 @@ function CacChartCard({
   currency,
   expenseAccounts,
   selectedAccountIds,
+  runLoading,
   accountMenuOpen,
   accountsLoading,
   accountsError,
@@ -752,6 +763,10 @@ function CacChartCard({
   );
   const tooltipY = Math.max(paddingTop + 4, hoveredY - tooltipHeight - 10);
   const selectedCount = selectedAccountIds.length;
+  const selectedAccountIdSet = useMemo(
+    () => new Set(normalizeIdList(selectedAccountIds)),
+    [selectedAccountIds],
+  );
 
   const downloadChart = useCallback(async () => {
     if (!chartRef.current || downloading) return;
@@ -807,7 +822,7 @@ function CacChartCard({
             ...
           </button>
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
-            {downloading ? "Downloading..." : "Download chart"}
+            {downloading ? "Downloading..." : "Download SVG"}
           </button>
           <div className="stripe-ui__hint" aria-live="polite">
             {hoveredPoint
@@ -840,7 +855,7 @@ function CacChartCard({
                 <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={onClearAccounts} disabled={accountsLoading}>
                   Clear
                 </button>
-                <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={onApplySelection}>
+                <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={onApplySelection} disabled={runLoading}>
                   Apply selection
                 </button>
                 <button
@@ -878,7 +893,7 @@ function CacChartCard({
                 >
                   <div style={{ display: "grid", gap: "0.35rem" }}>
                     {expenseAccounts.map((account) => {
-                      const checked = selectedAccountIds.includes(account.id);
+                      const checked = selectedAccountIdSet.has(normalizeEntityId(String(account.id || "")));
                       return (
                         <label
                           key={`cac-account-${account.id}`}
@@ -1006,6 +1021,7 @@ function CacChartCard({
                   cy={yAt(point.cac)}
                   r={hoverIndex === idx ? 4.6 : 3.2}
                   fill="#e879f9"
+                  data-tooltip={`${point.label}: CAC ${formatMoney(point.cac, currency)} | S&M ${formatMoney(point.salesMarketingCost, currency)} | Users ${Math.max(0, Math.round(point.newCustomerCount || 0))}`}
                   onMouseEnter={() => setHoverIndex(idx)}
                 />
               ))}
@@ -1197,7 +1213,7 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
-            {downloading ? "Downloading..." : "Download chart"}
+            {downloading ? "Downloading..." : "Download SVG"}
           </button>
           <div className="stripe-ui__hint" aria-live="polite">
             {hoveredPoint
@@ -1327,6 +1343,7 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
                     cy={yAt(ndrFor(point))}
                     r={hoverIndex === idx ? 4.6 : 3.2}
                     fill="#4f8df9"
+                    data-tooltip={`${point.label}: NDR ${formatPercent(ndrFor(point))}`}
                     onMouseEnter={() => setHoverIndex(idx)}
                   />
                   <circle
@@ -1334,6 +1351,7 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
                     cy={yAt(gdrFor(point))}
                     r={hoverIndex === idx ? 4.6 : 3.2}
                     fill="#ef4444"
+                    data-tooltip={`${point.label}: GDR ${formatPercent(gdrFor(point))}`}
                     onMouseEnter={() => setHoverIndex(idx)}
                   />
                 </g>
@@ -1527,7 +1545,7 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
-            {downloading ? "Downloading..." : "Download chart"}
+            {downloading ? "Downloading..." : "Download SVG"}
           </button>
           <div className="stripe-ui__hint" aria-live="polite">
             {hovered
@@ -1610,6 +1628,7 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
                           height={h}
                           fill={component.color}
                           rx={1.2}
+                          data-tooltip={`${bar.point.label}: ${component.label}: ${formatMoney(value, currency)}`}
                           onMouseEnter={() => setHoverIndex(idx)}
                         />
                       );
@@ -1628,6 +1647,7 @@ function GrowthBreakdownChart({ points, currency }: GrowthBreakdownChartProps) {
                         height={h}
                         fill={component.color}
                         rx={1.2}
+                        data-tooltip={`${bar.point.label}: ${component.label}: ${formatMoney(value, currency)}`}
                         onMouseEnter={() => setHoverIndex(idx)}
                       />
                     );
@@ -1740,7 +1760,7 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
-            {downloading ? "Downloading..." : "Download chart"}
+            {downloading ? "Downloading..." : "Download SVG"}
           </button>
           <div className="stripe-ui__hint" aria-live="polite">
             {hovered
@@ -1801,6 +1821,7 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
                     height={h}
                     fill={fill}
                     rx={1.2}
+                    data-tooltip={`${point.label}: ${valueFormatter(value)}`}
                     onMouseEnter={() => setHoverIndex(idx)}
                   />
                 </g>
@@ -1853,6 +1874,7 @@ export default function CombinedBillingOverviewPage() {
   const [cacExpenseAccountsError, setCacExpenseAccountsError] = useState("");
   const [savingCacDefaultSelection, setSavingCacDefaultSelection] = useState(false);
   const [cacDefaultSaveStatus, setCacDefaultSaveStatus] = useState("");
+  const runRequestRef = useRef(0);
 
   const fetchApiGetJson = useCallback(async <T,>(url: string): Promise<T> => {
     const res = await fetch(url, { method: "GET", cache: "no-store" });
@@ -1879,7 +1901,7 @@ export default function CombinedBillingOverviewPage() {
         "/api/quickbooks/cac-account-default",
       );
       const ids = Array.isArray(payload.selectedAccountIds)
-        ? Array.from(new Set(payload.selectedAccountIds.map((id) => String(id || "").trim()).filter(Boolean)))
+        ? normalizeIdList(payload.selectedAccountIds.map((id) => String(id || "")))
         : [];
       setSelectedCacAccountIds(ids);
     } catch {
@@ -1895,9 +1917,13 @@ export default function CombinedBillingOverviewPage() {
         "/api/quickbooks/expense-accounts",
       );
       const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
-      const accountIdSet = new Set(accounts.map((account) => String(account.id || "").trim()).filter(Boolean));
+      const accountIdSet = new Set(
+        accounts
+          .map((account) => normalizeEntityId(String(account.id || "")))
+          .filter(Boolean),
+      );
       setCacExpenseAccounts(accounts);
-      setSelectedCacAccountIds((prev) => prev.filter((id) => accountIdSet.has(id)));
+      setSelectedCacAccountIds((prev) => normalizeIdList(prev).filter((id) => accountIdSet.has(id)));
       setCacExpenseAccountsLoaded(true);
     } catch (e: unknown) {
       setCacExpenseAccountsError(conciseErrorMessage(e, "Failed to load expense accounts."));
@@ -1922,22 +1948,21 @@ export default function CombinedBillingOverviewPage() {
   }, [cacExpenseAccountsLoaded, cacExpenseAccountsLoading, loadCacExpenseAccounts]);
 
   const toggleCacAccountSelection = useCallback((accountId: string) => {
-    const id = String(accountId || "").trim();
+    const id = normalizeEntityId(String(accountId || ""));
     if (!id) return;
     setSelectedCacAccountIds((prev) => {
-      if (prev.includes(id)) return prev.filter((value) => value !== id);
-      return [...prev, id];
+      const normalizedPrev = normalizeIdList(prev);
+      if (normalizedPrev.includes(id)) return normalizedPrev.filter((value) => value !== id);
+      return [...normalizedPrev, id];
     });
     setCacDefaultSaveStatus("");
   }, []);
 
   const selectAllCacAccounts = useCallback(() => {
-    const ids = Array.from(
-      new Set(
-        cacExpenseAccounts
-          .map((account) => String(account.id || "").trim())
-          .filter(Boolean),
-      ),
+    const ids = normalizeIdList(
+      cacExpenseAccounts
+        .map((account) => String(account.id || ""))
+        .filter(Boolean),
     );
     setSelectedCacAccountIds(ids);
     setCacDefaultSaveStatus("");
@@ -1956,7 +1981,7 @@ export default function CombinedBillingOverviewPage() {
       const res = await fetch("/api/quickbooks/cac-account-default", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountIds: selectedCacAccountIds }),
+        body: JSON.stringify({ accountIds: normalizeIdList(selectedCacAccountIds) }),
       });
       const text = await res.text();
       let json: unknown = null;
@@ -1973,7 +1998,7 @@ export default function CombinedBillingOverviewPage() {
       }
       const payload = (json || {}) as Partial<QuickBooksCacAccountDefaultResponse>;
       const ids = Array.isArray(payload.selectedAccountIds)
-        ? Array.from(new Set(payload.selectedAccountIds.map((id) => String(id || "").trim()).filter(Boolean)))
+        ? normalizeIdList(payload.selectedAccountIds.map((id) => String(id || "")))
         : [];
       setSelectedCacAccountIds(ids);
       setCacDefaultSaveStatus(
@@ -1989,6 +2014,10 @@ export default function CombinedBillingOverviewPage() {
   }, [selectedCacAccountIds]);
 
   async function run() {
+    const requestId = runRequestRef.current + 1;
+    runRequestRef.current = requestId;
+    const isStale = () => runRequestRef.current !== requestId;
+
     setHasRunOnce(true);
     setLoading(true);
     setError(null);
@@ -2042,6 +2071,7 @@ export default function CombinedBillingOverviewPage() {
         fetchJson<StripeOverviewResponse>("/api/stripe-billing-overview-report", stripePayload),
         fetchJson<CombinedLiveArrResponse>("/api/combined-live-arr", {}),
       ]);
+      if (isStale()) return;
 
       let stripeBaseline: StripeOverviewResponse | null = null;
       try {
@@ -2049,6 +2079,7 @@ export default function CombinedBillingOverviewPage() {
       } catch {
         stripeBaseline = null;
       }
+      if (isStale()) return;
 
       const periodOrder: PeriodRef[] = (hubspotMain.periods || []).map((period) => ({
         key: String(period.key || ""),
@@ -2289,14 +2320,30 @@ export default function CombinedBillingOverviewPage() {
 
       let cacPoints: CacPoint[] = [];
       let nextCacNotice: string | null = null;
+      const normalizedSelectedCacAccountIds = normalizeIdList(selectedCacAccountIds);
+      const selectedCacAccountIdSet = new Set(normalizedSelectedCacAccountIds);
+      const selectedCacAccountNames = Array.from(
+        new Set(
+          cacExpenseAccounts
+            .filter((account) => selectedCacAccountIdSet.has(normalizeEntityId(String(account.id || ""))))
+            .map((account) => String(account.fullyQualifiedName || account.name || "").trim())
+            .filter(Boolean),
+        ),
+      );
       if (grain !== "monthly") {
         nextCacNotice = "CAC currently supports monthly grain. Switch Time grain to Monthly to load CAC over time.";
       } else {
         try {
           const qbCosts = await fetchJson<QuickBooksSalesMarketingCostResponse>(
             "/api/quickbooks/sales-marketing-costs",
-            { startDate, endDate, accountIds: selectedCacAccountIds },
+            {
+              startDate,
+              endDate,
+              accountIds: normalizedSelectedCacAccountIds,
+              accountNames: selectedCacAccountNames,
+            },
           );
+          if (isStale()) return;
           const costByMonth = new Map<string, number>();
           for (const point of qbCosts.points || []) {
             const key = String(point.key || point.periodStart || "").trim().slice(0, 7);
@@ -2323,7 +2370,11 @@ export default function CombinedBillingOverviewPage() {
           });
 
           const matchedDepartmentCount = qbCosts.matchedDepartments?.length || 0;
-          if (qbCosts.accountMatchMode === "selected_accounts" && selectedCacAccountIds.length > 0 && qbCosts.matchedAccounts.length === 0) {
+          if (
+            qbCosts.accountMatchMode === "selected_accounts" &&
+            normalizedSelectedCacAccountIds.length > 0 &&
+            qbCosts.matchedAccounts.length === 0
+          ) {
             nextCacNotice =
               "Selected CAC expense accounts returned no matching costs for this range. Update your account selection from the ... menu on the CAC chart.";
           } else if (qbCosts.accountMatchMode === "department" && matchedDepartmentCount === 0) {
@@ -2350,6 +2401,7 @@ export default function CombinedBillingOverviewPage() {
           });
         }
       }
+      if (isStale()) return;
 
       setCacNotice(nextCacNotice);
 
@@ -2368,9 +2420,12 @@ export default function CombinedBillingOverviewPage() {
         cacPoints,
       });
     } catch (e: unknown) {
+      if (isStale()) return;
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
-      setLoading(false);
+      if (!isStale()) {
+        setLoading(false);
+      }
     }
   }
 
@@ -2584,6 +2639,7 @@ export default function CombinedBillingOverviewPage() {
               currency={currency}
               expenseAccounts={cacExpenseAccounts}
               selectedAccountIds={selectedCacAccountIds}
+              runLoading={loading}
               accountMenuOpen={cacAccountMenuOpen}
               accountsLoading={cacExpenseAccountsLoading}
               accountsError={cacExpenseAccountsError}

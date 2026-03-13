@@ -355,7 +355,7 @@ function LineChartCard({
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
-            {downloading ? "Downloading..." : "Download chart"}
+            {downloading ? "Downloading..." : "Download SVG"}
           </button>
           {headerControl}
           <div className="stripe-ui__hint" aria-live="polite">
@@ -448,6 +448,7 @@ function LineChartCard({
                 cy={yAt(valueAccessor(point))}
                 r={hoverIndex === idx ? 4.6 : 3.2}
                 fill={stroke}
+                data-tooltip={`${point.label}: ${valueFormatter(valueAccessor(point))}`}
                 onMouseEnter={() => setHoverIndex(idx)}
               />
             ))}
@@ -557,7 +558,7 @@ function MultiLineChartCard({
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
-            {downloading ? "Downloading..." : "Download chart"}
+            {downloading ? "Downloading..." : "Download SVG"}
           </button>
           {headerControl}
           <div className="stripe-ui__hint" aria-live="polite">
@@ -660,6 +661,7 @@ function MultiLineChartCard({
                     cy={yAt(valueAccessor(point))}
                     r={hoverIndex === idx ? 3.8 : 2.6}
                     fill={group.color}
+                    data-tooltip={`${periods[idx]?.label || point.label}: ${group.label}: ${valueFormatter(valueAccessor(point))}`}
                     onMouseEnter={() => setHoverIndex(idx)}
                   />
                 )),
@@ -812,7 +814,7 @@ function GrowthBreakdownChart({
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
-            {downloading ? "Downloading..." : "Download chart"}
+            {downloading ? "Downloading..." : "Download SVG"}
           </button>
           <div className="stripe-ui__hint" aria-live="polite">
             {hovered
@@ -896,6 +898,7 @@ function GrowthBreakdownChart({
                           height={h}
                           fill={component.color}
                           rx={1.2}
+                          data-tooltip={`${bar.point.label}: ${component.label}: ${formatMoney(value, currency)}`}
                           onMouseEnter={() => setHoverIndex(idx)}
                         />
                       );
@@ -914,6 +917,7 @@ function GrowthBreakdownChart({
                         height={h}
                         fill={component.color}
                         rx={1.2}
+                        data-tooltip={`${bar.point.label}: ${component.label}: ${formatMoney(value, currency)}`}
                         onMouseEnter={() => setHoverIndex(idx)}
                       />
                     );
@@ -1029,7 +1033,7 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
-            {downloading ? "Downloading..." : "Download chart"}
+            {downloading ? "Downloading..." : "Download SVG"}
           </button>
           <div className="stripe-ui__hint" aria-live="polite">
             {hovered
@@ -1090,6 +1094,7 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
                     height={h}
                     fill={fill}
                     rx={1.2}
+                    data-tooltip={`${point.label}: ${valueFormatter(value)}`}
                     onMouseEnter={() => setHoverIndex(idx)}
                   />
                 </g>
