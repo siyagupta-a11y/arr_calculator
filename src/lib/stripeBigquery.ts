@@ -274,6 +274,20 @@ export type StripeAiSpendResult = {
   detailRows: StripeAiSpendDetailRow[];
 };
 
+export type StripeUpcomingCurrentMonthRequest = {
+  monthStartDate: string;
+  nextMonthStartDate: string;
+  targetCurrency: string;
+};
+
+export type StripeUpcomingCurrentMonthResult = {
+  snapshotDate: string;
+  lineCount: number;
+  amountMinorSum: number;
+  amountMajorSum: number;
+  targetCurrency: string;
+};
+
 type BigQueryNamedParameter = {
   name: string;
   type: "INT64" | "STRING";
@@ -291,6 +305,8 @@ const STRIPE_ARR_CORRECT_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.i
 const STRIPE_ARR_CORRECT_MRR_CHANGE_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta";
 const STRIPE_PRODUCTS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.products";
+const STRIPE_UPCOMING_SNAPSHOTS_DEFAULT_TABLE =
+  "botpress-stripe-data-pipeline.stripe.latest_upcoming_invoice_line_snapshots";
 const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   GOOGLE_SERVICE_ACCOUNT_JSON: "GOOGLE_SERVICE_ACCOUNT_JSON_STRIPE_ARR_CORRECT",
   GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64_STRIPE_ARR_CORRECT",
@@ -645,6 +661,15 @@ function getStripeProductsTable(profile: StripeBigQueryProfile = "default") {
       : "BIGQUERY_STRIPE_PRODUCTS_TABLE";
   const configured = String(process.env[envName] || "").trim();
   return configured || STRIPE_PRODUCTS_DEFAULT_TABLE;
+}
+
+function getStripeUpcomingSnapshotsTable(profile: StripeBigQueryProfile = "default") {
+  const envName =
+    profile === "stripe_arr_correct"
+      ? "BIGQUERY_STRIPE_ARR_CORRECT_UPCOMING_SNAPSHOTS_TABLE"
+      : "BIGQUERY_STRIPE_UPCOMING_SNAPSHOTS_TABLE";
+  const configured = String(process.env[envName] || "").trim();
+  return configured || STRIPE_UPCOMING_SNAPSHOTS_DEFAULT_TABLE;
 }
 
 function toQueryTimestamp(tsMs: number, sourceConfig: BigQuerySourceConfig) {
@@ -3640,6 +3665,64 @@ LIMIT @detail_limit
     topProducts,
     topPrices,
     detailRows,
+  };
+}
+
+export async function queryStripeUpcomingCurrentMonthFromBigQuery(
+  request: StripeUpcomingCurrentMonthRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeUpcomingCurrentMonthResult> {
+  const monthStart = parseIsoDateUtc(request.monthStartDate);
+  const nextMonthStart = parseIsoDateUtc(request.nextMonthStartDate);
+  if (!monthStart || !nextMonthStart) {
+    throw new Error("Invalid monthStartDate/nextMonthStartDate");
+  }
+  if (nextMonthStart.getTime() <= monthStart.getTime()) {
+    throw new Error("nextMonthStartDate must be > monthStartDate");
+  }
+
+  const monthStartIso = monthStart.toISOString().slice(0, 10);
+  const nextMonthStartIso = nextMonthStart.toISOString().slice(0, 10);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const profile = normalizeProfile(options?.profile);
+  const table = getStripeUpcomingSnapshotsTable(profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+
+  const query = `
+WITH latest_snapshot AS (
+  SELECT MAX(snapshot_date) AS snapshot_date
+  FROM \`${table}\`
+)
+SELECT
+  CAST(ls.snapshot_date AS STRING) AS snapshot_date,
+  COUNT(1) AS line_count,
+  COALESCE(SUM(CAST(t.amount_minor AS FLOAT64)), 0.0) AS amount_minor_sum
+FROM latest_snapshot ls
+LEFT JOIN \`${table}\` t
+  ON t.snapshot_date = ls.snapshot_date
+  AND t.period_start >= TIMESTAMP(@month_start_date)
+  AND t.period_start < TIMESTAMP(@next_month_start_date)
+  AND LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+`;
+  const params: BigQueryNamedParameter[] = [
+    { name: "month_start_date", type: "STRING", value: monthStartIso },
+    { name: "next_month_start_date", type: "STRING", value: nextMonthStartIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+  ];
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+  const first = rows[0] || {};
+  const amountMinorSum = asNumber(first.amount_minor_sum);
+
+  return {
+    snapshotDate: asString(first.snapshot_date),
+    lineCount: asInt(first.line_count),
+    amountMinorSum,
+    amountMajorSum: round2(amountMinorSum / 100),
+    targetCurrency: targetCurrency.toUpperCase(),
   };
 }
 

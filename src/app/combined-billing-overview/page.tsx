@@ -55,6 +55,11 @@ type StripeOverviewResponse = {
   stripeExactPoints?: StripeOverviewPoint[];
 };
 
+type CombinedLiveArrResponse = {
+  generatedAtUtc: string;
+  liveArr: number;
+};
+
 type HubspotChartRow = {
   accountId: string;
   deploymentType: string;
@@ -86,6 +91,8 @@ type CombinedOverviewData = {
   targetCurrency: string;
   currentMrr: number;
   currentArr: number;
+  liveArr: number;
+  liveArrAsOfUtc: string;
   points: CombinedPoint[];
   retentionPoints: RetentionSeriesPoint[];
 };
@@ -1375,10 +1382,11 @@ export default function CombinedBillingOverviewPage() {
       };
       const stripePayload = { startDate, endDate, grain };
 
-      const [hubspotMain, hubspotBaseline, stripe] = await Promise.all([
+      const [hubspotMain, hubspotBaseline, stripe, liveArrData] = await Promise.all([
         fetchJson<ReportResponse>("/api/report", hubspotPayload),
         fetchJson<ReportResponse>("/api/report", hubspotBaselinePayload),
         fetchJson<StripeOverviewResponse>("/api/stripe-billing-overview-report", stripePayload),
+        fetchJson<CombinedLiveArrResponse>("/api/combined-live-arr", {}),
       ]);
 
       const periodOrder: PeriodRef[] = (hubspotMain.periods || []).map((period) => ({
@@ -1556,6 +1564,8 @@ export default function CombinedBillingOverviewPage() {
         targetCurrency: String(stripe.targetCurrency || "USD").toUpperCase(),
         currentMrr,
         currentArr: round2(currentMrr * 12),
+        liveArr: round2(liveArrData.liveArr || 0),
+        liveArrAsOfUtc: String(liveArrData.generatedAtUtc || ""),
         points: combinedPoints,
         retentionPoints,
       });
@@ -1700,6 +1710,10 @@ export default function CombinedBillingOverviewPage() {
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Current ARR</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.currentArr, currency)}</p>
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Live ARR</p>
+                <p className="stripe-ui__stat-value">{formatMoney(data.liveArr, currency)}</p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Points</p>
