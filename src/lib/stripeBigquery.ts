@@ -3698,8 +3698,8 @@ WITH latest_snapshot AS (
   FROM \`${table}\`
 )
 SELECT
-  CAST(ls.snapshot_date AS STRING) AS snapshot_date,
-  COUNT(1) AS line_count,
+  CAST(MAX(ls.snapshot_date) AS STRING) AS snapshot_date,
+  COUNTIF(t.snapshot_date IS NOT NULL) AS line_count,
   COALESCE(SUM(CAST(t.amount_minor AS FLOAT64)), 0.0) AS amount_minor_sum
 FROM latest_snapshot ls
 LEFT JOIN \`${table}\` t
