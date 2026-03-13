@@ -288,6 +288,20 @@ export type StripeUpcomingCurrentMonthResult = {
   targetCurrency: string;
 };
 
+export type StripeUpcomingProjectedArrRequest = {
+  monthStartDate: string;
+  nextMonthStartDate: string;
+  targetCurrency: string;
+};
+
+export type StripeUpcomingProjectedArrResult = {
+  snapshotDate: string;
+  lineCount: number;
+  amountMajorSum: number;
+  projectedArr: number;
+  targetCurrency: string;
+};
+
 type BigQueryNamedParameter = {
   name: string;
   type: "INT64" | "STRING";
@@ -744,6 +758,75 @@ function asInt(v: unknown) {
 
 function round2(v: number) {
   return Math.round((Number(v) || 0) * 100) / 100;
+}
+
+function normalizeAnnualizationDescription(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function shouldForceTwelveByDescription(
+  description: string,
+  profile: StripeBigQueryProfile,
+) {
+  const normalized = normalizeAnnualizationDescription(description);
+  if (!normalized) return false;
+  if (profile === "stripe_arr_correct") {
+    return normalized === "web search and crawl" || normalized.includes("ai tokens");
+  }
+  return normalized === "web search and crawl" || normalized === "ai tokens";
+}
+
+function annualizationMultiplierForUpcomingLine(
+  periodStartTs: number,
+  periodEndTs: number,
+  description: string,
+  profile: StripeBigQueryProfile,
+) {
+  const startMs = Math.floor(periodStartTs || 0);
+  const endMs = Math.floor(periodEndTs || 0);
+  const durationMs = endMs - startMs;
+  if (durationMs <= 0) return 0;
+
+  const startUtc = new Date(startMs);
+  const oneYearAfterStartUtc = new Date(startMs);
+  oneYearAfterStartUtc.setUTCFullYear(oneYearAfterStartUtc.getUTCFullYear() + 1);
+  if (oneYearAfterStartUtc.getTime() === endMs) {
+    return 1;
+  }
+
+  if (shouldForceTwelveByDescription(description, profile)) {
+    return 12;
+  }
+
+  const oneMonthAfterStartUtc = new Date(startMs);
+  oneMonthAfterStartUtc.setUTCMonth(oneMonthAfterStartUtc.getUTCMonth() + 1);
+  if (oneMonthAfterStartUtc.getTime() === endMs) {
+    return 12;
+  }
+
+  const monthStartMs = Date.UTC(
+    startUtc.getUTCFullYear(),
+    startUtc.getUTCMonth(),
+    1,
+    0,
+    0,
+    0,
+    0,
+  );
+  const nextMonthStartMs = Date.UTC(
+    startUtc.getUTCFullYear(),
+    startUtc.getUTCMonth() + 1,
+    1,
+    0,
+    0,
+    0,
+    0,
+  );
+  const monthMs = Math.max(nextMonthStartMs - monthStartMs, 1);
+  return 12 * (monthMs / Math.max(durationMs, 1));
 }
 
 function parseIsoDateUtc(dateText: string) {
@@ -3722,6 +3805,94 @@ LEFT JOIN \`${table}\` t
     lineCount: asInt(first.line_count),
     amountMinorSum,
     amountMajorSum: round2(amountMinorSum / 100),
+    targetCurrency: targetCurrency.toUpperCase(),
+  };
+}
+
+export async function queryStripeUpcomingProjectedArrFromBigQuery(
+  request: StripeUpcomingProjectedArrRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeUpcomingProjectedArrResult> {
+  const monthStart = parseIsoDateUtc(request.monthStartDate);
+  const nextMonthStart = parseIsoDateUtc(request.nextMonthStartDate);
+  if (!monthStart || !nextMonthStart) {
+    throw new Error("Invalid monthStartDate/nextMonthStartDate");
+  }
+  if (nextMonthStart.getTime() <= monthStart.getTime()) {
+    throw new Error("nextMonthStartDate must be > monthStartDate");
+  }
+
+  const monthStartIso = monthStart.toISOString().slice(0, 10);
+  const nextMonthStartIso = nextMonthStart.toISOString().slice(0, 10);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const profile = normalizeProfile(options?.profile);
+  const table = getStripeUpcomingSnapshotsTable(profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+
+  const latestSnapshotRows = await runBigQueryQueryRows(
+    accessToken,
+    projectId,
+    location,
+    `SELECT CAST(MAX(snapshot_date) AS STRING) AS snapshot_date FROM \`${table}\``,
+    [],
+  );
+  const snapshotDate = asString(latestSnapshotRows[0]?.snapshot_date);
+  if (!snapshotDate) {
+    return {
+      snapshotDate: "",
+      lineCount: 0,
+      amountMajorSum: 0,
+      projectedArr: 0,
+      targetCurrency: targetCurrency.toUpperCase(),
+    };
+  }
+
+  const lineQuery = `
+SELECT
+  CAST(amount_minor AS FLOAT64) AS amount_minor,
+  CAST(description AS STRING) AS description,
+  CAST(UNIX_MILLIS(period_start) AS INT64) AS period_start_ts,
+  CAST(UNIX_MILLIS(period_end) AS INT64) AS period_end_ts
+FROM \`${table}\`
+WHERE
+  snapshot_date = @snapshot_date
+  AND period_start >= TIMESTAMP(@month_start_date)
+  AND period_start < TIMESTAMP(@next_month_start_date)
+  AND LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+`;
+  const params: BigQueryNamedParameter[] = [
+    { name: "snapshot_date", type: "STRING", value: snapshotDate },
+    { name: "month_start_date", type: "STRING", value: monthStartIso },
+    { name: "next_month_start_date", type: "STRING", value: nextMonthStartIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+  ];
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, lineQuery, params);
+
+  let amountMajorSum = 0;
+  let projectedArr = 0;
+  for (const row of rows) {
+    const amountMajor = asNumber(row.amount_minor) / 100;
+    const periodStartTs = asNumber(row.period_start_ts);
+    const periodEndTs = asNumber(row.period_end_ts);
+    const multiplier = annualizationMultiplierForUpcomingLine(
+      periodStartTs,
+      periodEndTs,
+      asString(row.description),
+      profile,
+    );
+    amountMajorSum += amountMajor;
+    projectedArr += amountMajor * multiplier;
+  }
+
+  return {
+    snapshotDate,
+    lineCount: rows.length,
+    amountMajorSum: round2(amountMajorSum),
+    projectedArr: round2(projectedArr),
     targetCurrency: targetCurrency.toUpperCase(),
   };
 }

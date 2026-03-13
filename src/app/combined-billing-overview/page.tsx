@@ -58,6 +58,7 @@ type StripeOverviewResponse = {
 type CombinedLiveArrResponse = {
   generatedAtUtc: string;
   liveArr: number;
+  projectedArr: number;
 };
 
 type HubspotChartRow = {
@@ -93,6 +94,7 @@ type CombinedOverviewData = {
   currentArr: number;
   liveArr: number;
   liveArrAsOfUtc: string;
+  projectedArr: number;
   points: CombinedPoint[];
   retentionPoints: RetentionSeriesPoint[];
 };
@@ -1566,6 +1568,7 @@ export default function CombinedBillingOverviewPage() {
         currentArr: round2(currentMrr * 12),
         liveArr: round2(liveArrData.liveArr || 0),
         liveArrAsOfUtc: String(liveArrData.generatedAtUtc || ""),
+        projectedArr: round2(liveArrData.projectedArr || 0),
         points: combinedPoints,
         retentionPoints,
       });
@@ -1714,6 +1717,10 @@ export default function CombinedBillingOverviewPage() {
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Live ARR</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.liveArr, currency)}</p>
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Projected ARR</p>
+                <p className="stripe-ui__stat-value">{formatMoney(data.projectedArr, currency)}</p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Points</p>

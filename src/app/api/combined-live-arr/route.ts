@@ -3,6 +3,7 @@ import { generateReport } from "@/lib/report";
 import {
   queryStripeBillingOverviewFromBigQuery,
   queryStripeUpcomingCurrentMonthFromBigQuery,
+  queryStripeUpcomingProjectedArrFromBigQuery,
   type StripeBillingOverviewResult,
 } from "@/lib/stripeBigquery";
 import type { ReportResponse, ReportRow } from "@/lib/types";
@@ -89,6 +90,9 @@ async function buildLiveArrPayload() {
   const nextMonthStartUtc = new Date(
     Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1, 1, 0, 0, 0, 0),
   );
+  const secondNextMonthStartUtc = new Date(
+    Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 2, 1, 0, 0, 0, 0),
+  );
   const monthEndUtc = new Date(
     Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1, 0, 0, 0, 0, 0),
   );
@@ -96,9 +100,10 @@ async function buildLiveArrPayload() {
   const monthStartDate = toIsoDateOnlyUtc(monthStartUtc);
   const monthEndDate = toIsoDateOnlyUtc(monthEndUtc);
   const nextMonthStartDate = toIsoDateOnlyUtc(nextMonthStartUtc);
+  const secondNextMonthStartDate = toIsoDateOnlyUtc(secondNextMonthStartUtc);
   const targetCurrency = pickTargetCurrency();
 
-  const [hubspotReport, stripeReport, upcoming] = await Promise.all([
+  const [hubspotReport, stripeReport, upcoming, projectedUpcoming] = await Promise.all([
     generateReport({
       startDate: monthStartDate,
       endDate: monthEndDate,
@@ -123,6 +128,14 @@ async function buildLiveArrPayload() {
       },
       { profile: "stripe_arr_correct" },
     ),
+    queryStripeUpcomingProjectedArrFromBigQuery(
+      {
+        monthStartDate: nextMonthStartDate,
+        nextMonthStartDate: secondNextMonthStartDate,
+        targetCurrency,
+      },
+      { profile: "stripe_arr_correct" },
+    ),
   ]);
 
   const hubspotCurrentArr = computeHubspotCurrentArr(hubspotReport);
@@ -136,6 +149,7 @@ async function buildLiveArrPayload() {
 
   const upcomingMonthlyAmount = round2(upcoming.amountMajorSum);
   const upcomingAnnualizedProjection = round2(upcomingMonthlyAmount * 12 * timeScale);
+  const projectedArr = round2(projectedUpcoming.projectedArr);
   const liveArr = round2(currentMonthArr + upcomingAnnualizedProjection);
 
   return {
@@ -154,6 +168,9 @@ async function buildLiveArrPayload() {
     elapsedDays: elapsedMs / 86_400_000,
     timestampScaleFactor: timeScale,
     upcomingAnnualizedProjection,
+    projectedSnapshotDate: projectedUpcoming.snapshotDate,
+    projectedLineCount: projectedUpcoming.lineCount,
+    projectedArr,
     liveArr,
   };
 }
