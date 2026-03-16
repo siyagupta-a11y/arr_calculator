@@ -1623,7 +1623,7 @@ const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
   email: {
     keyExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
     labelExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
-    customerIdExpr: "ARRAY_AGG(customer_id ORDER BY customer_created ASC NULLS LAST LIMIT 1)[OFFSET(0)]",
+    customerIdExpr: "ARRAY_AGG(customer_id ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)]",
   },
 };
 
