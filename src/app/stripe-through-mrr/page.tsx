@@ -379,18 +379,31 @@ export default function StripeThroughMrrPage() {
     downloadCsv("stripe-through-mrr-monthly.csv", headers, rows);
   }
 
+  async function fetchAllDetailRows(): Promise<ApiResponse["detailRows"]> {
+    if (!data) return [];
+    const { totalPages } = data.pagination;
+    // Page 1 is already in memory — only fetch the rest, all in parallel
+    if (totalPages <= 1) return data.detailRows;
+    const extraPages = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+    const results = await Promise.all(
+      extraPages.map((p) =>
+        fetch("/api/stripe-through-mrr-report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ startDate, endDate, detailStartMonth, detailEndMonth, groupBy, page: p, pageSize: PAGE_SIZE }),
+        }).then((r) => r.json() as Promise<ApiResponse>),
+      ),
+    );
+    return [...data.detailRows, ...results.flatMap((r) => r.detailRows)];
+  }
+
   async function exportRawDetailCsv() {
     setExportingCsv(true);
     try {
-      const res = await fetch("/api/stripe-through-mrr-report", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startDate, endDate, detailStartMonth, detailEndMonth, groupBy, page: 1, pageSize: 100000 }),
-      });
-      const allData = (await res.json()) as ApiResponse;
+      const allRows = await fetchAllDetailRows();
       const customerNeedle = filterCustomerId.trim().toLowerCase();
       const productNeedle = filterProductSearch.trim().toLowerCase();
-      const filtered = (allData.detailRows as RawDetailRow[]).filter((r) => {
+      const filtered = (allRows as RawDetailRow[]).filter((r) => {
         if (filterEventType !== "all" && r.eventType !== filterEventType) return false;
         if (customerNeedle && !String(r.customerId || "").toLowerCase().includes(customerNeedle)) return false;
         if (productNeedle) {
@@ -423,13 +436,8 @@ export default function StripeThroughMrrPage() {
   async function exportGroupedDetailCsv() {
     setExportingCsv(true);
     try {
-      const res = await fetch("/api/stripe-through-mrr-report", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startDate, endDate, detailStartMonth, detailEndMonth, groupBy, page: 1, pageSize: 100000 }),
-      });
-      const allData = (await res.json()) as ApiResponse;
-      const allMatrix = buildGroupMatrix(allData.detailRows.filter(isGroupedRow));
+      const allRows = await fetchAllDetailRows();
+      const allMatrix = buildGroupMatrix(allRows.filter(isGroupedRow));
       const needle = filterGroupSearch.trim().toLowerCase();
       const filtered = needle
         ? allMatrix.filter(
