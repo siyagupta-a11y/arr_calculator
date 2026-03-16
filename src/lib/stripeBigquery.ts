@@ -323,6 +323,7 @@ const STRIPE_ARR_CORRECT_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.i
 const STRIPE_ARR_CORRECT_MRR_CHANGE_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta";
 const STRIPE_PRODUCTS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.products";
+const STRIPE_CUSTOMERS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.customers";
 const STRIPE_UPCOMING_SNAPSHOTS_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.latest_upcoming_invoice_line_snapshots";
 const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
@@ -665,6 +666,11 @@ function getBigQuerySourceConfig(profile: StripeBigQueryProfile = "default"): Bi
     : (readEnv("BIGQUERY_TS_UNIT", profile) || "milliseconds").toLowerCase();
   const tsMultiplier = schemaMode === "timestamp" ? 1 : tsUnit === "seconds" ? 1000 : 1;
   return { table, servingTable, servingSchemaMode, schemaMode, tsUnit, tsMultiplier };
+}
+
+function getStripeCustomersTable() {
+  const configured = String(process.env.BIGQUERY_STRIPE_CUSTOMERS_TABLE || "").trim();
+  return configured || STRIPE_CUSTOMERS_DEFAULT_TABLE;
 }
 
 function getStripeArrCorrectMrrChangeTable() {
@@ -1687,7 +1693,7 @@ function stripeBillingOverviewGroupSql(groupBy: StripeBillingOverviewGroupBy): {
   return STRIPE_BILLING_OVERVIEW_GROUP_BY_SQL[groupBy];
 }
 
-function buildStripeThroughMrrDetailBaseCte(table: string, productsTable: string) {
+function buildStripeThroughMrrDetailBaseCte(table: string, productsTable: string, customersTable: string) {
   return `
 WITH source AS (
   SELECT
@@ -1707,7 +1713,6 @@ parsed AS (
     event_type,
     mrr_change_major,
     COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_id')), ''), '(blank)') AS customer_id,
-    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_email')), ''), '') AS customer_email,
     COALESCE(
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_id')), ''),
       '(blank)'
@@ -1760,13 +1765,19 @@ products_lookup AS (
     ) AS product_description_table
   FROM \`${productsTable}\`
 ) ,
+customers_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS customer_id,
+    COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '') AS customer_email
+  FROM \`${customersTable}\`
+) ,
 enriched AS (
   SELECT
     p.event_timestamp,
     p.event_type,
     p.mrr_change_major,
     p.customer_id,
-    p.customer_email,
+    COALESCE(cl.customer_email, '') AS customer_email,
     p.subscription_id,
     p.subscription_item_id,
     p.price_id,
@@ -1780,6 +1791,8 @@ enriched AS (
   FROM parsed p
   LEFT JOIN products_lookup pl
     ON pl.product_id = p.product_id
+  LEFT JOIN customers_lookup cl
+    ON cl.customer_id = p.customer_id
 )`;
 }
 
@@ -1841,6 +1854,7 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const accessToken = await getAccessToken(sa);
   const table = getStripeArrCorrectMrrChangeTable();
   const productsTable = getStripeProductsTable(profile);
+  const customersTable = getStripeCustomersTable();
 
   const monthlySummaryQuery = `
 WITH bounds AS (
@@ -1950,7 +1964,7 @@ WHERE
   }));
   const totalMrr = asNumber((totalMrrRows[0] || {}).total_mrr);
 
-  const detailBaseCte = buildStripeThroughMrrDetailBaseCte(table, productsTable);
+  const detailBaseCte = buildStripeThroughMrrDetailBaseCte(table, productsTable, customersTable);
   const detailBaseParams: BigQueryNamedParameter[] = [
     { name: "target_currency", type: "STRING", value: targetCurrency },
     { name: "detail_range_start_date", type: "STRING", value: detailRangeStartDateIso },
