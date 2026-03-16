@@ -1623,7 +1623,7 @@ const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
   email: {
     keyExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
     labelExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
-    customerIdExpr: "ARRAY_AGG(customer_id ORDER BY customer_created ASC LIMIT 1)[OFFSET(0)]",
+    customerIdExpr: "ARRAY_AGG(customer_id ORDER BY customer_created ASC NULLS LAST LIMIT 1)[OFFSET(0)]",
   },
 };
 
@@ -1770,7 +1770,7 @@ customers_lookup AS (
   SELECT
     COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS customer_id,
     COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '') AS customer_email,
-    COALESCE(CAST(created AS INT64), 0) AS customer_created
+    created AS customer_created
   FROM \`${customersTable}\`
 ) ,
 enriched AS (
@@ -1780,7 +1780,7 @@ enriched AS (
     p.mrr_change_major,
     p.customer_id,
     COALESCE(cl.customer_email, '') AS customer_email,
-    COALESCE(cl.customer_created, 0) AS customer_created,
+    cl.customer_created AS customer_created,
     p.subscription_id,
     p.subscription_item_id,
     p.price_id,
@@ -2158,7 +2158,7 @@ history_enriched AS (
   SELECT
     hs.*,
     COALESCE(cl.customer_email, '') AS customer_email,
-    COALESCE(cl.customer_created, 0) AS customer_created
+    cl.customer_created AS customer_created
   FROM history_source hs
   LEFT JOIN customers_lookup cl ON cl.customer_id = hs.customer_id
 ),
