@@ -1,4 +1,4 @@
-import { fetchDealsInStage, fetchLineItemIdsForDeals, batchReadCompanies, batchReadLineItems } from "@/lib/hubspot";
+import { fetchDealsInStage, fetchLineItemIdsForDeals, batchReadCompanies, batchReadLineItems, fetchPrimaryContactEmailsByCompanyId } from "@/lib/hubspot";
 import { getMonthlyAverageFxRateForCloseMonth } from "@/lib/fx";
 import {
   LI_PROPS,
@@ -168,7 +168,6 @@ export async function generateReport(
   const INDUSTRY_PROP = process.env.DEAL_INDUSTRY_PROP || "industry";
   const COMPANY_COUNTRY_PROP = process.env.COMPANY_COUNTRY_PROP || "country";
   const COMPANY_NAME_PROP = process.env.COMPANY_NAME_PROP || "name";
-  const COMPANY_EMAIL_PROP = process.env.COMPANY_EMAIL_PROP || "email";
   const dealCountryProps = Array.from(new Set([COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]));
   const companyCountryProps = Array.from(
     new Set([COMPANY_COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]),
@@ -228,14 +227,23 @@ export async function generateReport(
     ),
   );
   let companiesById: Map<string, HubspotCompany> = new Map<string, HubspotCompany>();
-  const companyEmailProps = Array.from(new Set([COMPANY_EMAIL_PROP, "email"]));
 
   if (companyIds.length) {
     try {
-      companiesById = await batchReadCompanies(companyIds, Array.from(new Set([...companyCountryProps, ...companyNameProps, ...companyEmailProps])));
+      companiesById = await batchReadCompanies(companyIds, Array.from(new Set([...companyCountryProps, ...companyNameProps])));
     } catch (err) {
       if (!isCompanyScopesError(err)) throw err;
       console.warn("Skipping company-country enrichment: missing HubSpot company read scopes.");
+    }
+  }
+
+  // Fetch primary contact email for each company (email lives on contacts, not companies)
+  let emailsByCompanyId = new Map<string, string>();
+  if (companyIds.length) {
+    try {
+      emailsByCompanyId = await fetchPrimaryContactEmailsByCompanyId(companyIds);
+    } catch {
+      console.warn("Skipping contact email enrichment: HubSpot contact/association fetch failed.");
     }
   }
 
@@ -246,9 +254,9 @@ export async function generateReport(
     const companyProps = (company?.properties || {}) as Record<string, unknown>;
     const companyName = firstNonEmptyProp(companyProps, companyNameProps);
     const companyCountry = firstNonEmptyProp(companyProps, companyCountryProps);
-    const companyEmail = firstNonEmptyProp(companyProps, companyEmailProps);
+    const contactEmail = emailsByCompanyId.get(companyId) || "";
     if (companyName) meta.accountName = companyName;
-    if (companyEmail) meta.accountEmail = companyEmail;
+    if (contactEmail) meta.accountEmail = contactEmail;
     if (!companyCountry) continue;
     meta.companyCountry = companyCountry;
     if (!meta.country) meta.country = companyCountry;
