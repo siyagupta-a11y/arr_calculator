@@ -161,6 +161,18 @@ function isMoneyMetric(metric: DetailMetricKey) {
   return metric !== "eventCount";
 }
 
+function downloadCsv(filename: string, headers: string[], rows: string[][]) {
+  const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
+  const lines = [headers.map(escape).join(","), ...rows.map((r) => r.map(escape).join(","))];
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function StripeThroughMrrPage() {
   const defaults = useMemo(() => defaultDateRange(), []);
 
@@ -288,6 +300,53 @@ export default function StripeThroughMrrPage() {
       return a.groupLabel.localeCompare(b.groupLabel);
     });
   }, [detailMode, detailRows, detailMonthsInRange]);
+
+  function exportMonthlyCsv() {
+    const headers = ["Month", "MRR (month end)", "New", "Expansion", "Contraction", "Churn", "Net change"];
+    const rows = months.map((row) => [
+      row.monthLabel,
+      String(row.monthEndMrr),
+      String(row.newMrr),
+      String(row.expansionMrr),
+      String(row.contractionMrr),
+      String(row.churnMrr),
+      String(row.netMrrChange),
+    ]);
+    downloadCsv("stripe-through-mrr-monthly.csv", headers, rows);
+  }
+
+  function exportRawDetailCsv() {
+    const headers = ["Event timestamp (UTC)", "Event type", "MRR change", "Customer ID", "Product ID", "Product description", "Price ID", "Price description", "Subscription Item ID", "Subscription ID"];
+    const rows = (detailRows as RawDetailRow[]).map((row) => [
+      row.eventTimestampUtc,
+      row.eventType || "(blank)",
+      String(row.mrrChange),
+      row.customerId || "(blank)",
+      row.productId || "(blank)",
+      row.productDescription || "",
+      row.priceId || "(blank)",
+      row.priceDescription || "",
+      row.subscriptionItemId || "(blank)",
+      row.subscriptionId || "(blank)",
+    ]);
+    downloadCsv("stripe-through-mrr-detail-raw.csv", headers, rows);
+  }
+
+  function exportGroupedDetailCsv() {
+    const metricHeaders = detailMonthsInRange.flatMap((month) =>
+      selectedMetrics.map((metric) => `${month.monthLabel} - ${DETAIL_METRIC_OPTIONS.find((o) => o.key === metric)?.label || metric}`),
+    );
+    const baseHeaders = groupBy === "email" ? ["Group", "Customer ID", ...metricHeaders] : ["Group", ...metricHeaders];
+    const rows = groupedMatrixRows.map((group) => {
+      const values = detailMonthsInRange.flatMap((month) =>
+        selectedMetrics.map((metric) => String(metricValue(group.byMonth.get(month.monthKey), metric))),
+      );
+      return groupBy === "email"
+        ? [group.groupLabel || group.groupKey || "(blank)", group.associatedCustomerId || "", ...values]
+        : [group.groupLabel || group.groupKey || "(blank)", ...values];
+    });
+    downloadCsv("stripe-through-mrr-detail-grouped.csv", baseHeaders, rows);
+  }
 
   function toggleMetric(metric: DetailMetricKey) {
     setSelectedMetrics((prev) => {
@@ -495,6 +554,9 @@ export default function StripeThroughMrrPage() {
                   `ACTIVE_END`.
                 </p>
               </div>
+              <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={exportMonthlyCsv} disabled={!months.length}>
+                Export CSV
+              </button>
             </div>
             <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
               <table className="stripe-ui__table" aria-label="Stripe through MRR monthly summary table">
@@ -549,6 +611,13 @@ export default function StripeThroughMrrPage() {
                   Grouped mode computes cumulative ARR at each month end (all MRR changes up to that month) for each selected group.
                 </p>
               </div>
+              <button
+                className="stripe-ui__btn stripe-ui__btn--ghost"
+                onClick={detailMode === "raw" ? exportRawDetailCsv : exportGroupedDetailCsv}
+                disabled={!detailRows.length}
+              >
+                Export CSV
+              </button>
             </div>
 
             {detailMode === "grouped" && (
