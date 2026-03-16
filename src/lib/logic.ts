@@ -18,6 +18,12 @@ export const LI_PROPS = [
 
   // recurrence
   "recurringbillingfrequency",
+
+  // plan classification hints
+  "name",
+  "description",
+  "hs_product_name",
+  "hs_sku",
 ];
 
 export type Window = { start: Date; end: Date; endIsOpenEnded: boolean };

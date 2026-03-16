@@ -32,7 +32,13 @@ export type HubspotLineItemProps = {
   quantity?: unknown;
 
   recurringbillingfrequency?: unknown;
+  name?: unknown;
+  description?: unknown;
+  hs_product_name?: unknown;
+  hs_sku?: unknown;
 };
+
+export type HubspotPlan = "enterprise" | "managed" | "team";
 
 export type ReportMode = "arr" | "contracted";
 export type Grain = "daily" | "monthly" | "quarterly" | "annually";
@@ -56,6 +62,7 @@ export type ReportRow = {
   fxDateUsed: string;
 
   dealType?: string;
+  plan?: HubspotPlan;
   closeDate?: string;
 
   windowStart?: string;

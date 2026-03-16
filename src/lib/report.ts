@@ -12,7 +12,14 @@ import {
   aggregatePeriodsFromMonthly,
   round2,
 } from "@/lib/logic";
-import type { ReportRequest, ReportResponse, ReportRow, HubspotCompany, HubspotLineItem } from "@/lib/types";
+import type {
+  ReportRequest,
+  ReportResponse,
+  ReportRow,
+  HubspotCompany,
+  HubspotLineItem,
+  HubspotPlan,
+} from "@/lib/types";
 
 function mustEnv(name: string) {
   const v = process.env[name];
@@ -52,6 +59,24 @@ function parsePrimaryCompanyId(raw: string) {
       .map((part) => part.trim())
       .find((part) => /^\d+$/.test(part)) || ""
   );
+}
+
+function inferDealPlan(liIds: string[], lineItemsById: Map<string, HubspotLineItem>): HubspotPlan {
+  let hasManaged = false;
+
+  for (const liId of liIds) {
+    const p = (lineItemsById.get(liId)?.properties || {}) as Record<string, unknown>;
+    const searchable = [p.name, p.hs_product_name, p.description, p.hs_sku]
+      .map((v) => String(v || "").trim().toLowerCase())
+      .filter((v) => !!v)
+      .join(" ");
+    if (!searchable) continue;
+
+    if (searchable.includes("enterprise")) return "enterprise";
+    if (searchable.includes("managed")) hasManaged = true;
+  }
+
+  return hasManaged ? "managed" : "team";
 }
 
 function isCompanyScopesError(err: unknown) {
@@ -283,6 +308,7 @@ export async function generateReport(
 
     const liIds = dealToLineItemIds.get(dealId) || [];
     if (!liIds.length) continue;
+    const plan = inferDealPlan(liIds, lineItemsById);
 
     const t = dealType.toLowerCase();
     const isExistingBusiness = t === "existingbusiness" || t === "upsell";
@@ -405,6 +431,7 @@ export async function generateReport(
         fxDateUsed: fx.dateUsed || "",
 
         dealType,
+        plan,
         closeDate: closeDate ? closeDate.toISOString().slice(0, 10) : "",
 
         windowStart: w?.start ? w.start.toISOString().slice(0, 10) : "",

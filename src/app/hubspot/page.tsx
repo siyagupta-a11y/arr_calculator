@@ -3,7 +3,7 @@
 import Link from "next/link";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { downloadSvgAsPng } from "@/lib/chartDownload";
-import type { ReportRequest, ReportResponse, ReportRow, Grain, ReportMode } from "@/lib/types";
+import type { ReportRequest, ReportResponse, ReportRow, Grain, ReportMode, HubspotPlan } from "@/lib/types";
 
 function fmtMoney(n: number, currencyDisplay: CurrencyDisplay) {
   const fractionDigits = currencyDisplay === "normal" ? 0 : 2;
@@ -25,9 +25,10 @@ type GroupField =
   | "territory"
   | "country"
   | "industry"
-  | "dealType";
+  | "dealType"
+  | "plan";
 
-type ChartGroupField = "none" | "deploymentType" | "territory" | "country";
+type ChartGroupField = "none" | "deploymentType" | "territory" | "country" | "plan";
 
 const GROUP_BY_OPTIONS: Array<{ key: GroupField; label: string }> = [
   { key: "dealName", label: "Deal Name" },
@@ -37,6 +38,7 @@ const GROUP_BY_OPTIONS: Array<{ key: GroupField; label: string }> = [
   { key: "country", label: "Country" },
   { key: "industry", label: "Industry" },
   { key: "dealType", label: "Deal Type" },
+  { key: "plan", label: "Plan" },
 ];
 
 const CHART_GROUP_OPTIONS: Array<{ key: ChartGroupField; label: string }> = [
@@ -44,6 +46,7 @@ const CHART_GROUP_OPTIONS: Array<{ key: ChartGroupField; label: string }> = [
   { key: "country", label: "Country" },
   { key: "territory", label: "Territory" },
   { key: "deploymentType", label: "Deployment Type" },
+  { key: "plan", label: "Plan" },
 ];
 
 const GROUP_LINE_COLORS = [
@@ -68,6 +71,7 @@ type UiRow = {
   country?: string;
   industry?: string;
   dealType?: string;
+  plan?: HubspotPlan;
   groupValues: Partial<Record<GroupField, string>>;
   valuesByPeriod: Record<string, number>;
 };
@@ -82,6 +86,7 @@ function groupValueForRow(r: UiRow, field: GroupField) {
   }
   if (field === "industry") return r.industry || "(blank)";
   if (field === "dealType") return r.dealType || "(blank)";
+  if (field === "plan") return r.plan || "(blank)";
   const accountId = String(r.accountId || "").trim();
   const accountName = String(r.accountName || "").trim();
   if (accountName && accountId) return `${accountName} (${accountId})`;
@@ -125,6 +130,7 @@ function canonicalCountryLabel(value: string) {
 
 function normalizeGroupKeyValue(field: GroupField, value: string) {
   if (field === "country") return canonicalCountryKey(value);
+  if (field === "plan") return normalizeCaseInsensitiveValue(value);
   return String(value || "").trim();
 }
 
@@ -259,6 +265,10 @@ function chartGroupDescriptorForRow(row: UiRow, field: ChartGroupField): ChartGr
   }
   if (field === "territory") {
     const raw = String(row.territory || "").trim();
+    return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
+  }
+  if (field === "plan") {
+    const raw = String(row.plan || "").trim();
     return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
   }
   const raw = String(row.deploymentType || "").trim();
@@ -1247,6 +1257,7 @@ export default function Home() {
   const [filterCountry, setFilterCountry] = useState("all");
   const [filterIndustry, setFilterIndustry] = useState("all");
   const [filterDealType, setFilterDealType] = useState("all");
+  const [filterPlan, setFilterPlan] = useState<HubspotPlan | "all">("all");
   const [currencyDisplay, setCurrencyDisplay] = useState<CurrencyDisplay>("normal");
   const [arrDisplayScope, setArrDisplayScope] = useState<ArrDisplayScope>("all");
 
@@ -1416,6 +1427,19 @@ export default function Home() {
     return Array.from(values).sort((a, b) => a.localeCompare(b));
   }, [data]);
 
+  const planOptions = useMemo(() => {
+    const order: HubspotPlan[] = ["enterprise", "managed", "team"];
+    if (!data) return order;
+    const present = new Set<HubspotPlan>();
+    for (const r of data.rows || []) {
+      const value = String(r.plan || "").trim().toLowerCase();
+      if (value === "enterprise" || value === "managed" || value === "team") {
+        present.add(value);
+      }
+    }
+    return order.filter((value) => present.has(value));
+  }, [data]);
+
   const buildFilteredLineItemRows = useCallback((
     sourceData: ReportResponse | null,
     options?: { forceCloudOnly?: boolean },
@@ -1433,6 +1457,7 @@ export default function Home() {
       country: r.country || "",
       industry: r.industry || "",
       dealType: r.dealType || "",
+      plan: r.plan || "team",
       groupValues: {},
       valuesByPeriod: r.valuesByPeriod || {},
     }));
@@ -1447,6 +1472,9 @@ export default function Home() {
         ? isCloudDeploymentType(r.deploymentType || "")
         : arrDisplayScope === "all" || isCloudDeploymentType(r.deploymentType || "");
       if (!displayScopeOk) return false;
+
+      const planOk = filterPlan === "all" || (r.plan || "team") === filterPlan;
+      if (!planOk) return false;
 
       if (!applyInteractiveFilters) return true;
 
@@ -1471,6 +1499,7 @@ export default function Home() {
     filterCountry,
     filterIndustry,
     filterDealType,
+    filterPlan,
     arrDisplayScope,
   ]);
 
@@ -1516,6 +1545,7 @@ export default function Home() {
           country: r.country,
           industry: r.industry,
           dealType: r.dealType,
+          plan: r.plan,
           groupValues,
           valuesByPeriod: { ...r.valuesByPeriod },
         });
@@ -1732,6 +1762,7 @@ export default function Home() {
       ? ["Deal name"]
       : groupByFields.map((field) => GROUP_BY_OPTIONS.find((opt) => opt.key === field)?.label || field)),
     ...(showDealIdColumn ? ["Deal ID"] : []),
+    ...(showDealIdColumn ? ["Plan"] : []),
     ...(showDealIdColumn ? ["Account"] : []),
     ...(showDealIdColumn ? ["Territory"] : []),
     ...(showDealIdColumn ? ["Company Country"] : []),
@@ -1762,7 +1793,12 @@ export default function Home() {
     if (!data) return;
 
     const csvHeaders = breakdownHeaders.map((h) =>
-      h !== "Deal name" && h !== "Deal ID" && h !== "Account" && h !== "Territory" && h !== "Company Country"
+      h !== "Deal name" &&
+      h !== "Deal ID" &&
+      h !== "Plan" &&
+      h !== "Account" &&
+      h !== "Territory" &&
+      h !== "Company Country"
         ? `${h}${currencySuffix()}`
         : h,
     );
@@ -1774,11 +1810,20 @@ export default function Home() {
           ? [r.dealName]
           : groupByFields.map((field) => r.groupValues[field] || "(blank)");
       const dealIdCol = showDealIdColumn ? [r.dealId] : [];
+      const planCol = showDealIdColumn ? [r.plan || "team"] : [];
       const accountCol = showDealIdColumn ? [groupValueForRow(r, "accountId")] : [];
       const territoryCol = showDealIdColumn ? [r.territory || "(blank)"] : [];
       const companyCountryCol = showDealIdColumn ? [r.companyCountry || "(blank)"] : [];
       const valueCols = (data.periods || []).map((p) => round2(scaleCurrency(r.valuesByPeriod[p.key] || 0)));
-      const row = [...leadingColumns, ...dealIdCol, ...accountCol, ...territoryCol, ...companyCountryCol, ...valueCols];
+      const row = [
+        ...leadingColumns,
+        ...dealIdCol,
+        ...planCol,
+        ...accountCol,
+        ...territoryCol,
+        ...companyCountryCol,
+        ...valueCols,
+      ];
       lines.push(row.map(escapeCsvCell).join(","));
     }
 
@@ -2200,7 +2245,7 @@ export default function Home() {
               <div>
                 <h2 className="stripe-ui__panel-title">Filters & Totals</h2>
                 <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-                  Apply filters to rows. Charts are always Contracted ARR + Cloud-only and can be split by chart grouping.
+                  Apply filters to rows. Charts are always Contracted ARR + Cloud-only and can be split by chart grouping. Plan filter applies to charts too.
                 </p>
               </div>
               <div className="stripe-ui__hint">
@@ -2235,6 +2280,25 @@ export default function Home() {
                 >
                   <option value="all">All</option>
                   {deploymentTypeOptions.map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="stripe-ui__field">
+                <label className="stripe-ui__field-label" htmlFor="filter-plan">
+                  Filter Plan
+                </label>
+                <select
+                  id="filter-plan"
+                  className="stripe-ui__control"
+                  value={filterPlan}
+                  onChange={(e) => setFilterPlan(e.target.value as HubspotPlan | "all")}
+                >
+                  <option value="all">All</option>
+                  {planOptions.map((v) => (
                     <option key={v} value={v}>
                       {v}
                     </option>
@@ -2394,6 +2458,7 @@ export default function Home() {
                         ))
                       )}
                       {showDealIdColumn && <td>{r.dealId}</td>}
+                      {showDealIdColumn && <td>{r.plan || "team"}</td>}
                       {showDealIdColumn && <td>{groupValueForRow(r, "accountId")}</td>}
                       {showDealIdColumn && <td>{r.territory || "(blank)"}</td>}
                       {showDealIdColumn && <td>{r.companyCountry || "(blank)"}</td>}
