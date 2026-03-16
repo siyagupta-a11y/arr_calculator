@@ -289,10 +289,11 @@ export async function batchReadCompanies(ids: string[], properties: string[]) {
   const map = new Map<string, HubspotCompany>();
 
   const dedupedIds = Array.from(new Set(ids.filter((id) => !!id)));
+  const propsCacheKey = [...properties].sort().join(",");
   const missingIds: string[] = [];
 
   for (const id of dedupedIds) {
-    const cached = readCache(COMPANY_CACHE, id);
+    const cached = readCache(COMPANY_CACHE, `${id}|${propsCacheKey}`);
     if (cached) map.set(id, cached);
     else missingIds.push(id);
   }
@@ -318,7 +319,7 @@ export async function batchReadCompanies(ids: string[], properties: string[]) {
     companies.forEach((company) => {
       const id = String(company.id);
       map.set(id, company);
-      writeCache(COMPANY_CACHE, id, company);
+      writeCache(COMPANY_CACHE, `${id}|${propsCacheKey}`, company);
     });
   }
 
