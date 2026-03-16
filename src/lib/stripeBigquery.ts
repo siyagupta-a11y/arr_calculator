@@ -2111,7 +2111,8 @@ FROM all_group_totals`;
     event_timestamp,
     event_type,
     mrr_change_major,
-    customer_id
+    customer_id,
+    customer_created
   FROM enriched
 ),
 group_totals AS (
