@@ -2030,83 +2030,6 @@ group_totals AS (
     ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change
   FROM grouped_source
   GROUP BY group_key, group_label
-)
-SELECT
-  COUNT(*) AS total_rows
-FROM group_totals`;
-    const countRows = await runBigQueryQueryRows(accessToken, projectId, location, countQuery, groupedDetailBaseParams);
-    totalRows = asInt((countRows[0] || {}).total_rows);
-    const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
-    const clampedPage = Math.min(page, totalPages);
-    const offsetRows = (clampedPage - 1) * pageSize;
-    if (totalRows > 0) {
-      const rowsQuery = `${detailBaseCte}
-, grouped_source AS (
-  SELECT
-    ${groupSql.keyExpr} AS group_key,
-    ${groupSql.labelExpr} AS group_label,
-    event_timestamp,
-    event_type,
-    mrr_change_major,
-    customer_id
-  FROM enriched
-),
-group_totals AS (
-  SELECT
-    group_key,
-    group_label,
-    ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
-    ANY_VALUE(customer_id) AS associated_customer_id
-  FROM grouped_source
-  GROUP BY group_key, group_label
-),
-paged_groups AS (
-  SELECT
-    group_key,
-    group_label,
-    net_mrr_change,
-    associated_customer_id
-  FROM group_totals
-  ORDER BY net_mrr_change DESC, group_label ASC
-  LIMIT @limit_rows
-  OFFSET @offset_rows
-),
-months_in_scope AS (
-  SELECT
-    month_start
-  FROM UNNEST(
-    GENERATE_DATE_ARRAY(
-      DATE_TRUNC(DATE(@detail_start_month_date), MONTH),
-      DATE_TRUNC(DATE_SUB(DATE(@detail_end_exclusive_date), INTERVAL 1 DAY), MONTH),
-      INTERVAL 1 MONTH
-    )
-  ) AS month_start
-),
-group_monthly AS (
-  SELECT
-    pg.group_key,
-    pg.group_label,
-    pg.net_mrr_change AS group_total_net_mrr_change,
-    pg.associated_customer_id,
-    m.month_start,
-    COUNT(gs.event_timestamp) AS event_count,
-    COALESCE(SUM(gs.mrr_change_major), 0.0) AS net_mrr_change,
-    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_START', gs.mrr_change_major, 0.0)), 0.0) AS new_mrr,
-    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_UPGRADE', gs.mrr_change_major, 0.0)), 0.0) AS expansion_mrr,
-    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_DOWNGRADE', gs.mrr_change_major, 0.0)), 0.0) AS contraction_mrr,
-    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_END', gs.mrr_change_major, 0.0)), 0.0) AS churn_mrr
-  FROM paged_groups pg
-  CROSS JOIN months_in_scope m
-  LEFT JOIN grouped_source gs
-    ON gs.group_key = pg.group_key
-    AND gs.group_label = pg.group_label
-    AND DATE_TRUNC(DATE(gs.event_timestamp), MONTH) = m.month_start
-  GROUP BY
-    pg.group_key,
-    pg.group_label,
-    pg.associated_customer_id,
-    pg.net_mrr_change,
-    m.month_start
 ),
 history_source AS (
   SELECT
@@ -2149,9 +2072,163 @@ history_enriched AS (
 history_by_group AS (
   SELECT
     ${groupSql.keyExpr} AS group_key,
+    ${groupSql.labelExpr} AS group_label,
     COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr
   FROM history_enriched
-  GROUP BY group_key
+  GROUP BY group_key, group_label
+),
+all_group_totals AS (
+  SELECT group_key, group_label FROM group_totals
+  UNION ALL
+  SELECT hbg.group_key, hbg.group_label
+  FROM history_by_group hbg
+  WHERE hbg.base_mrr <> 0
+    AND NOT EXISTS (
+      SELECT 1 FROM group_totals gt
+      WHERE gt.group_key = hbg.group_key AND gt.group_label = hbg.group_label
+    )
+)
+SELECT
+  COUNT(*) AS total_rows
+FROM all_group_totals`;
+    const countRows = await runBigQueryQueryRows(accessToken, projectId, location, countQuery, [
+      ...groupedDetailBaseParams,
+      { name: "detail_start_month_date", type: "STRING", value: detailStartMonthDateIso },
+    ]);
+    totalRows = asInt((countRows[0] || {}).total_rows);
+    const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
+    const clampedPage = Math.min(page, totalPages);
+    const offsetRows = (clampedPage - 1) * pageSize;
+    if (totalRows > 0) {
+      const rowsQuery = `${detailBaseCte}
+, grouped_source AS (
+  SELECT
+    ${groupSql.keyExpr} AS group_key,
+    ${groupSql.labelExpr} AS group_label,
+    event_timestamp,
+    event_type,
+    mrr_change_major,
+    customer_id
+  FROM enriched
+),
+group_totals AS (
+  SELECT
+    group_key,
+    group_label,
+    ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
+    ANY_VALUE(customer_id) AS associated_customer_id
+  FROM grouped_source
+  GROUP BY group_key, group_label
+),
+history_source AS (
+  SELECT
+    UPPER(CAST(event_type AS STRING)) AS event_type,
+    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_id')), ''),
+      '(blank)'
+    ) AS subscription_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_item_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_item')), ''),
+      '(blank)'
+    ) AS subscription_item_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price')), ''),
+      '(blank)'
+    ) AS price_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product')), ''),
+      '(blank)'
+    ) AS product_id
+  FROM \`${table}\` t
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp < TIMESTAMP(@detail_start_month_date)
+),
+history_enriched AS (
+  SELECT
+    hs.*,
+    COALESCE(cl.customer_email, '') AS customer_email
+  FROM history_source hs
+  LEFT JOIN customers_lookup cl ON cl.customer_id = hs.customer_id
+),
+history_by_group AS (
+  SELECT
+    ${groupSql.keyExpr} AS group_key,
+    ${groupSql.labelExpr} AS group_label,
+    COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr,
+    ANY_VALUE(customer_id) AS associated_customer_id
+  FROM history_enriched
+  GROUP BY group_key, group_label
+),
+all_group_totals AS (
+  SELECT group_key, group_label, net_mrr_change, associated_customer_id FROM group_totals
+  UNION ALL
+  SELECT
+    hbg.group_key,
+    hbg.group_label,
+    0.0 AS net_mrr_change,
+    hbg.associated_customer_id
+  FROM history_by_group hbg
+  WHERE hbg.base_mrr <> 0
+    AND NOT EXISTS (
+      SELECT 1 FROM group_totals gt
+      WHERE gt.group_key = hbg.group_key AND gt.group_label = hbg.group_label
+    )
+),
+paged_groups AS (
+  SELECT
+    group_key,
+    group_label,
+    net_mrr_change,
+    associated_customer_id
+  FROM all_group_totals
+  ORDER BY net_mrr_change DESC, group_label ASC
+  LIMIT @limit_rows
+  OFFSET @offset_rows
+),
+months_in_scope AS (
+  SELECT
+    month_start
+  FROM UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(DATE(@detail_start_month_date), MONTH),
+      DATE_TRUNC(DATE_SUB(DATE(@detail_end_exclusive_date), INTERVAL 1 DAY), MONTH),
+      INTERVAL 1 MONTH
+    )
+  ) AS month_start
+),
+group_monthly AS (
+  SELECT
+    pg.group_key,
+    pg.group_label,
+    pg.net_mrr_change AS group_total_net_mrr_change,
+    pg.associated_customer_id,
+    m.month_start,
+    COUNT(gs.event_timestamp) AS event_count,
+    COALESCE(SUM(gs.mrr_change_major), 0.0) AS net_mrr_change,
+    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_START', gs.mrr_change_major, 0.0)), 0.0) AS new_mrr,
+    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_UPGRADE', gs.mrr_change_major, 0.0)), 0.0) AS expansion_mrr,
+    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_DOWNGRADE', gs.mrr_change_major, 0.0)), 0.0) AS contraction_mrr,
+    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_END', gs.mrr_change_major, 0.0)), 0.0) AS churn_mrr
+  FROM paged_groups pg
+  CROSS JOIN months_in_scope m
+  LEFT JOIN grouped_source gs
+    ON gs.group_key = pg.group_key
+    AND gs.group_label = pg.group_label
+    AND DATE_TRUNC(DATE(gs.event_timestamp), MONTH) = m.month_start
+  GROUP BY
+    pg.group_key,
+    pg.group_label,
+    pg.associated_customer_id,
+    pg.net_mrr_change,
+    m.month_start
 ),
 group_monthly_with_base AS (
   SELECT
@@ -2170,6 +2247,7 @@ group_monthly_with_base AS (
   FROM group_monthly gm
   LEFT JOIN history_by_group hbg
     ON hbg.group_key = gm.group_key
+    AND hbg.group_label = gm.group_label
 )
 SELECT
   gmb.group_key,
