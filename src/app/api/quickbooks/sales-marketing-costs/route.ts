@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { fetchQuickBooksSalesMarketingCostsByMonth } from "@/lib/quickbooks";
+import { getMonthlyAverageFxRateForCloseMonth } from "@/lib/fx";
+import { FX_TARGET_CURRENCY } from "@/lib/logic";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -53,6 +55,40 @@ export async function POST(request: Request) {
       selectedAccountIds: accountIds,
       selectedAccountNames: accountNames,
     });
+
+    // Convert costs to target currency using monthly average FX rates
+    const sourceCurrency = String(payload.currency || "").trim().toUpperCase();
+    const targetCurrency = String(FX_TARGET_CURRENCY || "USD").trim().toUpperCase();
+    if (sourceCurrency && targetCurrency && sourceCurrency !== targetCurrency && payload.points?.length) {
+      // Collect unique month keys and fetch FX rates in parallel
+      const monthKeys = [
+        ...new Set(
+          payload.points
+            .map((p) => String(p.key || p.periodStart || "").slice(0, 7))
+            .filter(Boolean),
+        ),
+      ];
+      const fxMap = new Map<string, number>();
+      await Promise.all(
+        monthKeys.map(async (monthKey) => {
+          const date = new Date(`${monthKey}-01T00:00:00Z`);
+          const fx = await getMonthlyAverageFxRateForCloseMonth(sourceCurrency, targetCurrency, date);
+          fxMap.set(monthKey, fx.rate);
+        }),
+      );
+
+      // Apply conversion to each point
+      const convertedPoints = payload.points.map((p) => {
+        const monthKey = String(p.key || p.periodStart || "").slice(0, 7);
+        const rate = fxMap.get(monthKey) ?? 0;
+        const originalCost = Number(p.totalCost || 0);
+        const convertedCost = rate > 0 ? Math.round(originalCost * rate * 100) / 100 : originalCost;
+        return { ...p, totalCost: convertedCost };
+      });
+
+      return NextResponse.json({ ...payload, currency: targetCurrency, points: convertedPoints });
+    }
+
     return NextResponse.json(payload);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
