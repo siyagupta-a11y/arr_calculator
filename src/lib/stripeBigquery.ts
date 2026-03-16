@@ -1592,7 +1592,7 @@ WHERE
 
 const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
   Exclude<StripeThroughMrrGroupBy, "none">,
-  { keyExpr: string; labelExpr: string }
+  { keyExpr: string; labelExpr: string; customerIdExpr?: string }
 > = {
   customer_id: {
     keyExpr: "customer_id",
@@ -1623,6 +1623,7 @@ const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
   email: {
     keyExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
     labelExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
+    customerIdExpr: "ARRAY_AGG(customer_id ORDER BY customer_created ASC LIMIT 1)[OFFSET(0)]",
   },
 };
 
@@ -1768,7 +1769,8 @@ products_lookup AS (
 customers_lookup AS (
   SELECT
     COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS customer_id,
-    COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '') AS customer_email
+    COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '') AS customer_email,
+    COALESCE(CAST(created AS INT64), 0) AS customer_created
   FROM \`${customersTable}\`
 ) ,
 enriched AS (
@@ -1778,6 +1780,7 @@ enriched AS (
     p.mrr_change_major,
     p.customer_id,
     COALESCE(cl.customer_email, '') AS customer_email,
+    COALESCE(cl.customer_created, 0) AS customer_created,
     p.subscription_id,
     p.subscription_item_id,
     p.price_id,
@@ -2116,7 +2119,7 @@ group_totals AS (
     group_key,
     group_label,
     ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
-    ANY_VALUE(customer_id) AS associated_customer_id
+    ${groupSql.customerIdExpr ?? "ANY_VALUE(customer_id)"} AS associated_customer_id
   FROM grouped_source
   GROUP BY group_key, group_label
 ),
@@ -2154,7 +2157,8 @@ history_source AS (
 history_enriched AS (
   SELECT
     hs.*,
-    COALESCE(cl.customer_email, '') AS customer_email
+    COALESCE(cl.customer_email, '') AS customer_email,
+    COALESCE(cl.customer_created, 0) AS customer_created
   FROM history_source hs
   LEFT JOIN customers_lookup cl ON cl.customer_id = hs.customer_id
 ),
@@ -2163,7 +2167,7 @@ history_by_group AS (
     ${groupSql.keyExpr} AS group_key,
     ${groupSql.labelExpr} AS group_label,
     COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr,
-    ANY_VALUE(customer_id) AS associated_customer_id
+    ${groupSql.customerIdExpr ?? "ANY_VALUE(customer_id)"} AS associated_customer_id
   FROM history_enriched
   GROUP BY group_key, group_label
 ),
