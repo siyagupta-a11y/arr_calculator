@@ -1,4 +1,4 @@
-import { fetchDealsInStage, fetchLineItemIdsForDeals, batchReadCompanies, batchReadLineItems, fetchPrimaryContactEmailsByCompanyId } from "@/lib/hubspot";
+import { fetchDealsInStage, fetchLineItemIdsForDeals, batchReadCompanies, batchReadLineItems } from "@/lib/hubspot";
 import { getMonthlyAverageFxRateForCloseMonth } from "@/lib/fx";
 import {
   LI_PROPS,
@@ -33,7 +33,6 @@ type DealMeta = {
   deploymentType: string;
   accountId: string;
   accountName: string;
-  accountEmail: string;
   territory: string;
   country: string;
   companyCountry: string;
@@ -206,7 +205,6 @@ export async function generateReport(
       deploymentType: String(pDeal[DEPLOYMENT_TYPE_PROP] || ""),
       accountId: String(pDeal[ACCOUNT_ID_PROP] || ""),
       accountName: "",
-      accountEmail: "",
       territory: String(pDeal[TERRITORY_PROP] || ""),
       country: firstNonEmptyProp(pDeal, dealCountryProps),
       companyCountry: "",
@@ -237,16 +235,6 @@ export async function generateReport(
     }
   }
 
-  // Fetch primary contact email for each company (email lives on contacts, not companies)
-  let emailsByCompanyId = new Map<string, string>();
-  if (companyIds.length) {
-    try {
-      emailsByCompanyId = await fetchPrimaryContactEmailsByCompanyId(companyIds);
-    } catch {
-      console.warn("Skipping contact email enrichment: HubSpot contact/association fetch failed.");
-    }
-  }
-
   for (const meta of allDealMeta) {
     const companyId = parsePrimaryCompanyId(meta.accountId);
     if (!companyId) continue;
@@ -254,9 +242,7 @@ export async function generateReport(
     const companyProps = (company?.properties || {}) as Record<string, unknown>;
     const companyName = firstNonEmptyProp(companyProps, companyNameProps);
     const companyCountry = firstNonEmptyProp(companyProps, companyCountryProps);
-    const contactEmail = emailsByCompanyId.get(companyId) || "";
     if (companyName) meta.accountName = companyName;
-    if (contactEmail) meta.accountEmail = contactEmail;
     if (!companyCountry) continue;
     meta.companyCountry = companyCountry;
     if (!meta.country) meta.country = companyCountry;
@@ -306,7 +292,6 @@ export async function generateReport(
       deploymentType,
       accountId,
       accountName,
-      accountEmail,
       territory,
       country,
       companyCountry,
@@ -464,7 +449,6 @@ export async function generateReport(
         deploymentType,
         accountId,
         accountName,
-        accountEmail,
         territory,
         country,
         companyCountry,

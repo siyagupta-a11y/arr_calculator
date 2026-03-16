@@ -67,7 +67,6 @@ type UiRow = {
   deploymentType?: string;
   accountId?: string;
   accountName?: string;
-  accountEmail?: string;
   territory?: string;
   country?: string;
   industry?: string;
@@ -1454,7 +1453,6 @@ export default function Home() {
       deploymentType: r.deploymentType || "",
       accountId: r.accountId || "",
       accountName: r.accountName || "",
-      accountEmail: r.accountEmail || "",
       territory: r.territory || "",
       country: r.country || "",
       industry: r.industry || "",
@@ -1543,7 +1541,6 @@ export default function Home() {
           deploymentType: r.deploymentType,
           accountId: r.accountId,
           accountName: r.accountName,
-          accountEmail: r.accountEmail,
           territory: r.territory,
           country: r.country,
           industry: r.industry,
@@ -1757,7 +1754,6 @@ export default function Home() {
   const chartGroupingEnabled = chartGroupBy !== "none" && groupedChartSeries.length > 0;
 
   const showDealIdColumn = groupByFields.length === 0;
-  const showEmailColumn = groupByFields.includes("accountId");
   const groupByLabel = groupByFields
     .map((field) => GROUP_BY_OPTIONS.find((opt) => opt.key === field)?.label || field)
     .join(" + ");
@@ -1770,7 +1766,6 @@ export default function Home() {
     ...(showDealIdColumn ? ["Account"] : []),
     ...(showDealIdColumn ? ["Territory"] : []),
     ...(showDealIdColumn ? ["Company Country"] : []),
-    ...(showEmailColumn ? ["Email"] : []),
     ...(data?.periods.map((p) => p.label) || []),
   ];
 
@@ -1820,7 +1815,6 @@ export default function Home() {
       const accountCol = showDealIdColumn ? [groupValueForRow(r, "accountId")] : [];
       const territoryCol = showDealIdColumn ? [r.territory || "(blank)"] : [];
       const companyCountryCol = showDealIdColumn ? [r.companyCountry || "(blank)"] : [];
-      const emailCol = showEmailColumn ? [r.accountEmail || ""] : [];
       const valueCols = (data.periods || []).map((p) => round2(scaleCurrency(r.valuesByPeriod[p.key] || 0)));
       const row = [
         ...leadingColumns,
@@ -1829,7 +1823,6 @@ export default function Home() {
         ...accountCol,
         ...territoryCol,
         ...companyCountryCol,
-        ...emailCol,
         ...valueCols,
       ];
       lines.push(row.map(escapeCsvCell).join(","));
@@ -2470,7 +2463,6 @@ export default function Home() {
                       {showDealIdColumn && <td>{groupValueForRow(r, "accountId")}</td>}
                       {showDealIdColumn && <td>{r.territory || "(blank)"}</td>}
                       {showDealIdColumn && <td>{r.companyCountry || "(blank)"}</td>}
-                      {showEmailColumn && <td>{r.accountEmail || ""}</td>}
 
                       {data.periods.map((p) => (
                         <td key={p.key} className="stripe-ui__num">

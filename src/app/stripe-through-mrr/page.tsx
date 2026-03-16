@@ -10,7 +10,8 @@ type GroupBy =
   | "price_id"
   | "subscription_id"
   | "subscription_item_id"
-  | "event_type";
+  | "event_type"
+  | "email";
 
 type MonthlyRow = {
   monthKey: string;
@@ -49,6 +50,7 @@ type GroupedDetailRow = {
   churnMrr: number;
   monthEndMrr: number;
   monthEndArr: number;
+  associatedCustomerId?: string;
 };
 
 type ApiResponse = {
@@ -94,6 +96,7 @@ const DETAIL_METRIC_OPTIONS: Array<{ key: DetailMetricKey; label: string }> = [
 const GROUP_BY_OPTIONS: Array<{ key: GroupBy; label: string }> = [
   { key: "none", label: "No grouping (line items)" },
   { key: "customer_id", label: "Customer ID" },
+  { key: "email", label: "Email" },
   { key: "product_id", label: "Product ID" },
   { key: "price_id", label: "Price ID" },
   { key: "subscription_id", label: "Subscription ID" },
@@ -257,7 +260,7 @@ export default function StripeThroughMrrPage() {
     const groupedRows = detailRows.filter(isGroupedRow);
     const byGroup = new Map<
       string,
-      { groupKey: string; groupLabel: string; totalNet: number; byMonth: Map<string, GroupedDetailRow> }
+      { groupKey: string; groupLabel: string; associatedCustomerId?: string; totalNet: number; byMonth: Map<string, GroupedDetailRow> }
     >();
     for (const row of groupedRows) {
       const mapKey = `${row.groupKey}|${row.groupLabel}`;
@@ -265,6 +268,7 @@ export default function StripeThroughMrrPage() {
         byGroup.set(mapKey, {
           groupKey: row.groupKey,
           groupLabel: row.groupLabel || row.groupKey || "(blank)",
+          associatedCustomerId: row.associatedCustomerId,
           totalNet: 0,
           byMonth: new Map(),
         });
@@ -632,6 +636,7 @@ export default function StripeThroughMrrPage() {
                     <>
                       <tr>
                         <th rowSpan={2}>Group</th>
+                        {groupBy === "email" && <th rowSpan={2}>Customer ID</th>}
                         {detailMonthsInRange.map((month) => (
                           <th key={month.monthKey} className="stripe-ui__num" colSpan={selectedMetrics.length}>
                             {month.monthLabel}
@@ -669,6 +674,7 @@ export default function StripeThroughMrrPage() {
                     : groupedMatrixRows.map((group) => (
                         <tr key={`${group.groupKey}|${group.groupLabel}`}>
                           <td>{group.groupLabel || group.groupKey || "(blank)"}</td>
+                          {groupBy === "email" && <td>{group.associatedCustomerId || ""}</td>}
                           {detailMonthsInRange.flatMap((month) =>
                             selectedMetrics.map((metric) => {
                               const value = metricValue(group.byMonth.get(month.monthKey), metric);

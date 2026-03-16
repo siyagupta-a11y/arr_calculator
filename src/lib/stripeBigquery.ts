@@ -73,7 +73,8 @@ export type StripeThroughMrrGroupBy =
   | "price_id"
   | "subscription_id"
   | "subscription_item_id"
-  | "event_type";
+  | "event_type"
+  | "email";
 
 export type StripeThroughMrrMonthlyRow = {
   monthKey: string;
@@ -112,6 +113,7 @@ export type StripeThroughMrrGroupedDetailRow = {
   churnMrr: number;
   monthEndMrr: number;
   monthEndArr: number;
+  associatedCustomerId?: string;
 };
 
 export type StripeThroughMrrReportRequest = {
@@ -1612,6 +1614,10 @@ const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
     keyExpr: "event_type",
     labelExpr: "event_type",
   },
+  email: {
+    keyExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
+    labelExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
+  },
 };
 
 function normalizeStripeThroughMrrGroupBy(groupBy: string | undefined): StripeThroughMrrGroupBy {
@@ -1701,6 +1707,7 @@ parsed AS (
     event_type,
     mrr_change_major,
     COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_id')), ''), '(blank)') AS customer_id,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_email')), ''), '') AS customer_email,
     COALESCE(
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_id')), ''),
       '(blank)'
@@ -1759,6 +1766,7 @@ enriched AS (
     p.event_type,
     p.mrr_change_major,
     p.customer_id,
+    p.customer_email,
     p.subscription_id,
     p.subscription_item_id,
     p.price_id,
@@ -2025,14 +2033,16 @@ FROM group_totals`;
     ${groupSql.labelExpr} AS group_label,
     event_timestamp,
     event_type,
-    mrr_change_major
+    mrr_change_major,
+    customer_id
   FROM enriched
 ),
 group_totals AS (
   SELECT
     group_key,
     group_label,
-    ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change
+    ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
+    ANY_VALUE(customer_id) AS associated_customer_id
   FROM grouped_source
   GROUP BY group_key, group_label
 ),
@@ -2040,7 +2050,8 @@ paged_groups AS (
   SELECT
     group_key,
     group_label,
-    net_mrr_change
+    net_mrr_change,
+    associated_customer_id
   FROM group_totals
   ORDER BY net_mrr_change DESC, group_label ASC
   LIMIT @limit_rows
@@ -2062,6 +2073,7 @@ group_monthly AS (
     pg.group_key,
     pg.group_label,
     pg.net_mrr_change AS group_total_net_mrr_change,
+    pg.associated_customer_id,
     m.month_start,
     COUNT(gs.event_timestamp) AS event_count,
     COALESCE(SUM(gs.mrr_change_major), 0.0) AS net_mrr_change,
@@ -2078,6 +2090,7 @@ group_monthly AS (
   GROUP BY
     pg.group_key,
     pg.group_label,
+    pg.associated_customer_id,
     pg.net_mrr_change,
     m.month_start
 ),
@@ -2123,6 +2136,7 @@ group_monthly_with_base AS (
   SELECT
     gm.group_key,
     gm.group_label,
+    gm.associated_customer_id,
     gm.group_total_net_mrr_change,
     gm.month_start,
     gm.event_count,
@@ -2139,6 +2153,7 @@ group_monthly_with_base AS (
 SELECT
   gmb.group_key,
   gmb.group_label,
+  gmb.associated_customer_id,
   FORMAT_DATE('%Y-%m', gmb.month_start) AS month_key,
   FORMAT_DATE('%b %Y', gmb.month_start) AS month_label,
   gmb.event_count,
@@ -2208,6 +2223,7 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
           churnMrr: asNumber(row.churn_mrr),
           monthEndMrr: asNumber(row.month_end_mrr),
           monthEndArr: asNumber(row.month_end_arr),
+          associatedCustomerId: asString(row.associated_customer_id) || undefined,
         }));
 
   return {

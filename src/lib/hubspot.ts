@@ -15,7 +15,6 @@ const DEALS_CACHE = new Map<string, CacheEntry<HubspotDeal[]>>();
 const DEAL_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
 const COMPANY_CACHE = new Map<string, CacheEntry<HubspotCompany>>();
 const LINE_ITEM_CACHE = new Map<string, CacheEntry<HubspotLineItem>>();
-const COMPANY_CONTACT_EMAIL_CACHE = new Map<string, CacheEntry<string>>();
 
 function getToken() {
   const t = process.env.HUBSPOT_PRIVATE_APP_TOKEN;
@@ -326,89 +325,6 @@ export async function batchReadCompanies(ids: string[], properties: string[]) {
   }
 
   return map;
-}
-
-export async function fetchPrimaryContactEmailsByCompanyId(
-  companyIds: string[],
-): Promise<Map<string, string>> {
-  const dedupedIds = Array.from(new Set(companyIds.filter((id) => !!id)));
-  const result = new Map<string, string>();
-  const missingIds: string[] = [];
-
-  for (const id of dedupedIds) {
-    const cached = readCache(COMPANY_CONTACT_EMAIL_CACHE, id);
-    if (cached !== null) {
-      if (cached) result.set(id, cached);
-    } else {
-      missingIds.push(id);
-    }
-  }
-
-  if (!missingIds.length) return result;
-
-  // Use contacts search with associatedcompanyid IN [...] to find the first
-  // contact email for each company. This avoids needing separate association
-  // scopes and works with the standard crm.objects.contacts.read scope.
-  const searchUrl = `${HUBSPOT_BASE}/crm/v3/objects/contacts/search`;
-  const chunkSize = 100; // HubSpot IN operator supports up to 100 values
-  const chunks: string[][] = [];
-  for (let i = 0; i < missingIds.length; i += chunkSize) {
-    chunks.push(missingIds.slice(i, i + chunkSize));
-  }
-
-  // companyId → first email found
-  const companyEmailMap = new Map<string, string>();
-
-  await mapWithConcurrency(chunks, HUBSPOT_BATCH_READ_CONCURRENCY, async (chunk) => {
-    let after: string | undefined;
-    // Collect all contacts for this chunk (paginate if needed)
-    while (true) {
-      const body: Record<string, unknown> = {
-        filterGroups: [
-          {
-            filters: [
-              {
-                propertyName: "associatedcompanyid",
-                operator: "IN",
-                values: chunk,
-              },
-            ],
-          },
-        ],
-        properties: ["email", "associatedcompanyid"],
-        limit: 100,
-      };
-      if (after) body.after = after;
-
-      const json = await hsFetch(searchUrl, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-
-      const contacts = (json.results || []) as Array<{
-        properties?: Record<string, unknown>;
-      }>;
-
-      for (const contact of contacts) {
-        const email = String(contact.properties?.email || "").trim();
-        const companyId = String(contact.properties?.associatedcompanyid || "").trim();
-        if (email && companyId && !companyEmailMap.has(companyId)) {
-          companyEmailMap.set(companyId, email);
-        }
-      }
-
-      after = json.paging?.next?.after;
-      if (!after) break;
-    }
-  });
-
-  for (const id of missingIds) {
-    const email = companyEmailMap.get(id) || "";
-    if (email) result.set(id, email);
-    writeCache(COMPANY_CONTACT_EMAIL_CACHE, id, email);
-  }
-
-  return result;
 }
 
 export async function batchUpdateDealProperties(updates: HubspotDealPropertyUpdate[]) {

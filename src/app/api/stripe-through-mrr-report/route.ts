@@ -21,6 +21,7 @@ const GROUP_BY_VALUES = new Set<StripeThroughMrrGroupBy>([
   "subscription_id",
   "subscription_item_id",
   "event_type",
+  "email",
 ]);
 
 const DEFAULT_PAGE_SIZE = 1000;
