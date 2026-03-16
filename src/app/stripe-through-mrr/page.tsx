@@ -188,8 +188,15 @@ export default function StripeThroughMrrPage() {
   const [hasRunOnce, setHasRunOnce] = useState(false);
 
   const [loading, setLoading] = useState(false);
+  const [exportingCsv, setExportingCsv] = useState(false);
   const [data, setData] = useState<ApiResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Detail table filters
+  const [filterEventType, setFilterEventType] = useState("all");
+  const [filterCustomerId, setFilterCustomerId] = useState("");
+  const [filterProductSearch, setFilterProductSearch] = useState("");
+  const [filterGroupSearch, setFilterGroupSearch] = useState("");
 
   async function run(targetPage = 1) {
     setHasRunOnce(true);
@@ -243,6 +250,10 @@ export default function StripeThroughMrrPage() {
   function runFresh() {
     setPage(1);
     setPageJumpInput("1");
+    setFilterEventType("all");
+    setFilterCustomerId("");
+    setFilterProductSearch("");
+    setFilterGroupSearch("");
     void run(1);
   }
 
@@ -301,6 +312,59 @@ export default function StripeThroughMrrPage() {
     });
   }, [detailMode, detailRows, detailMonthsInRange]);
 
+  const eventTypeOptions = useMemo(() => {
+    const types = new Set(
+      (detailRows as RawDetailRow[]).filter((r) => !isGroupedRow(r as unknown as GroupedDetailRow)).map((r) => r.eventType).filter(Boolean),
+    );
+    return Array.from(types).sort();
+  }, [detailRows]);
+
+  const filteredRawRows = useMemo(() => {
+    if (detailMode !== "raw") return detailRows as RawDetailRow[];
+    const rows = detailRows as RawDetailRow[];
+    const customerNeedle = filterCustomerId.trim().toLowerCase();
+    const productNeedle = filterProductSearch.trim().toLowerCase();
+    return rows.filter((r) => {
+      if (filterEventType !== "all" && r.eventType !== filterEventType) return false;
+      if (customerNeedle && !String(r.customerId || "").toLowerCase().includes(customerNeedle)) return false;
+      if (productNeedle) {
+        const productText = `${r.productId || ""} ${r.productDescription || ""} ${r.priceId || ""} ${r.priceDescription || ""}`.toLowerCase();
+        if (!productText.includes(productNeedle)) return false;
+      }
+      return true;
+    });
+  }, [detailMode, detailRows, filterEventType, filterCustomerId, filterProductSearch]);
+
+  const filteredGroupedMatrixRows = useMemo(() => {
+    const needle = filterGroupSearch.trim().toLowerCase();
+    if (!needle) return groupedMatrixRows;
+    return groupedMatrixRows.filter(
+      (g) =>
+        String(g.groupLabel || g.groupKey || "").toLowerCase().includes(needle) ||
+        (g.associatedCustomerId && String(g.associatedCustomerId).toLowerCase().includes(needle)),
+    );
+  }, [groupedMatrixRows, filterGroupSearch]);
+
+  function buildGroupMatrix(rows: GroupedDetailRow[]) {
+    const byGroup = new Map<
+      string,
+      { groupKey: string; groupLabel: string; associatedCustomerId?: string; byMonth: Map<string, GroupedDetailRow> }
+    >();
+    for (const row of rows) {
+      const mapKey = `${row.groupKey}|${row.groupLabel}`;
+      if (!byGroup.has(mapKey)) {
+        byGroup.set(mapKey, {
+          groupKey: row.groupKey,
+          groupLabel: row.groupLabel || row.groupKey || "(blank)",
+          associatedCustomerId: row.associatedCustomerId,
+          byMonth: new Map(),
+        });
+      }
+      byGroup.get(mapKey)!.byMonth.set(row.monthKey, row);
+    }
+    return Array.from(byGroup.values());
+  }
+
   function exportMonthlyCsv() {
     const headers = ["Month", "MRR (month end)", "New", "Expansion", "Contraction", "Churn", "Net change"];
     const rows = months.map((row) => [
@@ -315,37 +379,83 @@ export default function StripeThroughMrrPage() {
     downloadCsv("stripe-through-mrr-monthly.csv", headers, rows);
   }
 
-  function exportRawDetailCsv() {
-    const headers = ["Event timestamp (UTC)", "Event type", "MRR change", "Customer ID", "Product ID", "Product description", "Price ID", "Price description", "Subscription Item ID", "Subscription ID"];
-    const rows = (detailRows as RawDetailRow[]).map((row) => [
-      row.eventTimestampUtc,
-      row.eventType || "(blank)",
-      String(row.mrrChange),
-      row.customerId || "(blank)",
-      row.productId || "(blank)",
-      row.productDescription || "",
-      row.priceId || "(blank)",
-      row.priceDescription || "",
-      row.subscriptionItemId || "(blank)",
-      row.subscriptionId || "(blank)",
-    ]);
-    downloadCsv("stripe-through-mrr-detail-raw.csv", headers, rows);
+  async function exportRawDetailCsv() {
+    setExportingCsv(true);
+    try {
+      const res = await fetch("/api/stripe-through-mrr-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startDate, endDate, detailStartMonth, detailEndMonth, groupBy, page: 1, pageSize: 100000 }),
+      });
+      const allData = (await res.json()) as ApiResponse;
+      const customerNeedle = filterCustomerId.trim().toLowerCase();
+      const productNeedle = filterProductSearch.trim().toLowerCase();
+      const filtered = (allData.detailRows as RawDetailRow[]).filter((r) => {
+        if (filterEventType !== "all" && r.eventType !== filterEventType) return false;
+        if (customerNeedle && !String(r.customerId || "").toLowerCase().includes(customerNeedle)) return false;
+        if (productNeedle) {
+          const t = `${r.productId || ""} ${r.productDescription || ""} ${r.priceId || ""} ${r.priceDescription || ""}`.toLowerCase();
+          if (!t.includes(productNeedle)) return false;
+        }
+        return true;
+      });
+      const headers = ["Event timestamp (UTC)", "Event type", "MRR change", "Customer ID", "Product ID", "Product description", "Price ID", "Price description", "Subscription Item ID", "Subscription ID"];
+      const rows = filtered.map((row) => [
+        row.eventTimestampUtc,
+        row.eventType || "(blank)",
+        String(row.mrrChange),
+        row.customerId || "(blank)",
+        row.productId || "(blank)",
+        row.productDescription || "",
+        row.priceId || "(blank)",
+        row.priceDescription || "",
+        row.subscriptionItemId || "(blank)",
+        row.subscriptionId || "(blank)",
+      ]);
+      downloadCsv("stripe-through-mrr-detail-raw.csv", headers, rows);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExportingCsv(false);
+    }
   }
 
-  function exportGroupedDetailCsv() {
-    const metricHeaders = detailMonthsInRange.flatMap((month) =>
-      selectedMetrics.map((metric) => `${month.monthLabel} - ${DETAIL_METRIC_OPTIONS.find((o) => o.key === metric)?.label || metric}`),
-    );
-    const baseHeaders = groupBy === "email" ? ["Group", "Customer ID", ...metricHeaders] : ["Group", ...metricHeaders];
-    const rows = groupedMatrixRows.map((group) => {
-      const values = detailMonthsInRange.flatMap((month) =>
-        selectedMetrics.map((metric) => String(metricValue(group.byMonth.get(month.monthKey), metric))),
+  async function exportGroupedDetailCsv() {
+    setExportingCsv(true);
+    try {
+      const res = await fetch("/api/stripe-through-mrr-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startDate, endDate, detailStartMonth, detailEndMonth, groupBy, page: 1, pageSize: 100000 }),
+      });
+      const allData = (await res.json()) as ApiResponse;
+      const allMatrix = buildGroupMatrix(allData.detailRows.filter(isGroupedRow));
+      const needle = filterGroupSearch.trim().toLowerCase();
+      const filtered = needle
+        ? allMatrix.filter(
+            (g) =>
+              String(g.groupLabel || g.groupKey || "").toLowerCase().includes(needle) ||
+              (g.associatedCustomerId && String(g.associatedCustomerId).toLowerCase().includes(needle)),
+          )
+        : allMatrix;
+      const metricHeaders = detailMonthsInRange.flatMap((month) =>
+        selectedMetrics.map((metric) => `${month.monthLabel} - ${DETAIL_METRIC_OPTIONS.find((o) => o.key === metric)?.label || metric}`),
       );
-      return groupBy === "email"
-        ? [group.groupLabel || group.groupKey || "(blank)", group.associatedCustomerId || "", ...values]
-        : [group.groupLabel || group.groupKey || "(blank)", ...values];
-    });
-    downloadCsv("stripe-through-mrr-detail-grouped.csv", baseHeaders, rows);
+      const baseHeaders = groupBy === "email" ? ["Group", "Customer ID", ...metricHeaders] : ["Group", ...metricHeaders];
+      const csvRows = filtered.map((group) => {
+        const values = detailMonthsInRange.flatMap((month) =>
+          selectedMetrics.map((metric) => String(metricValue(group.byMonth.get(month.monthKey), metric))),
+        );
+        return groupBy === "email"
+          ? [group.groupLabel || group.groupKey || "(blank)", group.associatedCustomerId || "", ...values]
+          : [group.groupLabel || group.groupKey || "(blank)", ...values];
+      });
+      downloadCsv("stripe-through-mrr-detail-grouped.csv", baseHeaders, csvRows);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExportingCsv(false);
+    }
   }
 
   function toggleMetric(metric: DetailMetricKey) {
@@ -613,11 +723,66 @@ export default function StripeThroughMrrPage() {
               </div>
               <button
                 className="stripe-ui__btn stripe-ui__btn--ghost"
-                onClick={detailMode === "raw" ? exportRawDetailCsv : exportGroupedDetailCsv}
-                disabled={!detailRows.length}
+                onClick={() => void (detailMode === "raw" ? exportRawDetailCsv() : exportGroupedDetailCsv())}
+                disabled={!detailRows.length || exportingCsv}
               >
-                Export CSV
+                {exportingCsv ? "Exporting..." : "Export CSV (all rows)"}
               </button>
+            </div>
+
+            <div className="stripe-ui__filter-grid">
+              {detailMode === "raw" ? (
+                <>
+                  <div className="stripe-ui__field">
+                    <label className="stripe-ui__field-label" htmlFor="filter-event-type">Filter Event Type</label>
+                    <select
+                      id="filter-event-type"
+                      className="stripe-ui__control"
+                      value={filterEventType}
+                      onChange={(e) => setFilterEventType(e.target.value)}
+                    >
+                      <option value="all">All</option>
+                      {eventTypeOptions.map((v) => (
+                        <option key={v} value={v}>{v}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="stripe-ui__field">
+                    <label className="stripe-ui__field-label" htmlFor="filter-customer-id">Filter Customer ID</label>
+                    <input
+                      id="filter-customer-id"
+                      className="stripe-ui__control"
+                      type="text"
+                      value={filterCustomerId}
+                      onChange={(e) => setFilterCustomerId(e.target.value)}
+                      placeholder="contains..."
+                    />
+                  </div>
+                  <div className="stripe-ui__field">
+                    <label className="stripe-ui__field-label" htmlFor="filter-product">Filter Product / Price</label>
+                    <input
+                      id="filter-product"
+                      className="stripe-ui__control"
+                      type="text"
+                      value={filterProductSearch}
+                      onChange={(e) => setFilterProductSearch(e.target.value)}
+                      placeholder="contains..."
+                    />
+                  </div>
+                </>
+              ) : (
+                <div className="stripe-ui__field">
+                  <label className="stripe-ui__field-label" htmlFor="filter-group">Filter Group</label>
+                  <input
+                    id="filter-group"
+                    className="stripe-ui__control"
+                    type="text"
+                    value={filterGroupSearch}
+                    onChange={(e) => setFilterGroupSearch(e.target.value)}
+                    placeholder="contains..."
+                  />
+                </div>
+              )}
             </div>
 
             {detailMode === "grouped" && (
@@ -641,7 +806,19 @@ export default function StripeThroughMrrPage() {
             <div className="stripe-ui__toolbar">
               <div className="stripe-ui__toolbar-group">
                 <span className="stripe-ui__hint">{`Page ${data.pagination.page} of ${data.pagination.totalPages}`}</span>
-                <span className="stripe-ui__hint">{`${data.pagination.totalRows} rows`}</span>
+                {detailMode === "raw" ? (
+                  <span className="stripe-ui__hint">
+                    {filteredRawRows.length !== detailRows.length
+                      ? `${filteredRawRows.length} of ${data.pagination.totalRows} rows (filtered)`
+                      : `${data.pagination.totalRows} rows`}
+                  </span>
+                ) : (
+                  <span className="stripe-ui__hint">
+                    {filteredGroupedMatrixRows.length !== groupedMatrixRows.length
+                      ? `${filteredGroupedMatrixRows.length} of ${groupedMatrixRows.length} groups (filtered)`
+                      : `${groupedMatrixRows.length} groups`}
+                  </span>
+                )}
               </div>
 
               <div className="stripe-ui__toolbar-group">
@@ -726,7 +903,7 @@ export default function StripeThroughMrrPage() {
                 </thead>
                 <tbody>
                   {detailMode === "raw"
-                    ? (detailRows as RawDetailRow[]).map((row, idx) =>
+                    ? filteredRawRows.map((row, idx) =>
                       <tr key={`${row.eventTimestampUtc}:${row.subscriptionItemId}:${idx}`}>
                         <td>{row.eventTimestampUtc}</td>
                         <td>{row.eventType || "(blank)"}</td>
@@ -740,7 +917,7 @@ export default function StripeThroughMrrPage() {
                         <td>{row.subscriptionId || "(blank)"}</td>
                       </tr>
                     )
-                    : groupedMatrixRows.map((group) => (
+                    : filteredGroupedMatrixRows.map((group) => (
                         <tr key={`${group.groupKey}|${group.groupLabel}`}>
                           <td>{group.groupLabel || group.groupKey || "(blank)"}</td>
                           {groupBy === "email" && <td>{group.associatedCustomerId || ""}</td>}
