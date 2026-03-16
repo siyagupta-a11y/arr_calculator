@@ -33,6 +33,7 @@ type DealMeta = {
   deploymentType: string;
   accountId: string;
   accountName: string;
+  accountEmail: string;
   territory: string;
   country: string;
   companyCountry: string;
@@ -167,6 +168,7 @@ export async function generateReport(
   const INDUSTRY_PROP = process.env.DEAL_INDUSTRY_PROP || "industry";
   const COMPANY_COUNTRY_PROP = process.env.COMPANY_COUNTRY_PROP || "country";
   const COMPANY_NAME_PROP = process.env.COMPANY_NAME_PROP || "name";
+  const COMPANY_EMAIL_PROP = process.env.COMPANY_EMAIL_PROP || "email";
   const dealCountryProps = Array.from(new Set([COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]));
   const companyCountryProps = Array.from(
     new Set([COMPANY_COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]),
@@ -205,6 +207,7 @@ export async function generateReport(
       deploymentType: String(pDeal[DEPLOYMENT_TYPE_PROP] || ""),
       accountId: String(pDeal[ACCOUNT_ID_PROP] || ""),
       accountName: "",
+      accountEmail: "",
       territory: String(pDeal[TERRITORY_PROP] || ""),
       country: firstNonEmptyProp(pDeal, dealCountryProps),
       companyCountry: "",
@@ -225,9 +228,11 @@ export async function generateReport(
     ),
   );
   let companiesById: Map<string, HubspotCompany> = new Map<string, HubspotCompany>();
+  const companyEmailProps = Array.from(new Set([COMPANY_EMAIL_PROP, "email"]));
+
   if (companyIds.length) {
     try {
-      companiesById = await batchReadCompanies(companyIds, Array.from(new Set([...companyCountryProps, ...companyNameProps])));
+      companiesById = await batchReadCompanies(companyIds, Array.from(new Set([...companyCountryProps, ...companyNameProps, ...companyEmailProps])));
     } catch (err) {
       if (!isCompanyScopesError(err)) throw err;
       console.warn("Skipping company-country enrichment: missing HubSpot company read scopes.");
@@ -241,7 +246,9 @@ export async function generateReport(
     const companyProps = (company?.properties || {}) as Record<string, unknown>;
     const companyName = firstNonEmptyProp(companyProps, companyNameProps);
     const companyCountry = firstNonEmptyProp(companyProps, companyCountryProps);
+    const companyEmail = firstNonEmptyProp(companyProps, companyEmailProps);
     if (companyName) meta.accountName = companyName;
+    if (companyEmail) meta.accountEmail = companyEmail;
     if (!companyCountry) continue;
     meta.companyCountry = companyCountry;
     if (!meta.country) meta.country = companyCountry;
@@ -291,6 +298,7 @@ export async function generateReport(
       deploymentType,
       accountId,
       accountName,
+      accountEmail,
       territory,
       country,
       companyCountry,
@@ -448,6 +456,7 @@ export async function generateReport(
         deploymentType,
         accountId,
         accountName,
+        accountEmail,
         territory,
         country,
         companyCountry,

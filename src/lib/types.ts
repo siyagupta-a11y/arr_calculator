@@ -79,6 +79,7 @@ export type ReportRow = {
   deploymentType?: string;
   accountId?: string;
   accountName?: string;
+  accountEmail?: string;
   territory?: string;
   country?: string;
   companyCountry?: string;
