@@ -1,10 +1,9 @@
 import { NextResponse } from "next/server";
 import {
-  getCurrentMonthDateRangeIso,
-  queryStripeAiSpendReport,
+  queryStripeAiSpendFromBigQuery,
   type StripeAiSpendGrain,
   type StripeAiSpendRequest,
-} from "@/lib/stripeAiSpendReport";
+} from "@/lib/stripeBigquery";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -18,6 +17,16 @@ const ALLOWED_GRAINS = new Set<StripeAiSpendGrain>([
 
 function isIsoDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function getCurrentMonthDateRangeIso() {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const toIso = (value: Date) => value.toISOString().slice(0, 10);
+  return {
+    startDate: toIso(start),
+    endDate: toIso(now),
+  };
 }
 
 type ApiBody = {
@@ -39,8 +48,8 @@ function parsePayload(raw: Partial<ApiBody>): StripeAiSpendRequest {
   const grainRaw = String(raw.grain || "monthly").trim().toLowerCase() as StripeAiSpendGrain;
   const grain = ALLOWED_GRAINS.has(grainRaw) ? grainRaw : "monthly";
 
-  const topLimitRaw = Number(raw.topLimit || 25);
-  const topLimit = Number.isFinite(topLimitRaw) ? Math.max(1, Math.floor(topLimitRaw)) : 25;
+  const topLimitRaw = Number(raw.topLimit || 5000);
+  const topLimit = Number.isFinite(topLimitRaw) ? Math.max(1, Math.floor(topLimitRaw)) : 5000;
 
   const detailLimitRaw = Number(raw.detailLimit || 300);
   const detailLimit = Number.isFinite(detailLimitRaw) ? Math.max(1, Math.floor(detailLimitRaw)) : 300;
@@ -64,7 +73,7 @@ function parsePayload(raw: Partial<ApiBody>): StripeAiSpendRequest {
 
 async function validateAndRun(body: Partial<ApiBody>) {
   const payload = parsePayload(body);
-  return queryStripeAiSpendReport(payload);
+  return queryStripeAiSpendFromBigQuery(payload);
 }
 
 export async function POST(req: Request) {
@@ -88,7 +97,7 @@ export async function GET(req: Request) {
       startDate: searchParams.get("startDate") || undefined,
       endDate: searchParams.get("endDate") || undefined,
       grain: searchParams.get("grain") || "monthly",
-      topLimit: Number(searchParams.get("topLimit") || 25),
+      topLimit: Number(searchParams.get("topLimit") || 5000),
       detailLimit: Number(searchParams.get("detailLimit") || 300),
     };
     const report = await validateAndRun(body);

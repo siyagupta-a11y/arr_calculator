@@ -99,7 +99,7 @@ export default function AiSpendPage() {
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
   const [grain, setGrain] = useState<Grain>("monthly");
-  const [topLimit, setTopLimit] = useState(25);
+  const [topLimit, setTopLimit] = useState(5000);
   const [detailLimit, setDetailLimit] = useState(300);
 
   const [hasRunOnce, setHasRunOnce] = useState(false);
@@ -154,7 +154,7 @@ export default function AiSpendPage() {
       startDate: defaults.startDate,
       endDate: defaults.endDate,
       grain: "monthly",
-      topLimit: 25,
+      topLimit: 5000,
       detailLimit: 300,
     });
   }, [defaults.endDate, defaults.startDate, run]);
@@ -181,8 +181,8 @@ export default function AiSpendPage() {
           <div>
             <h1 className="stripe-ui__title">AI spend</h1>
             <p className="stripe-ui__subtitle">
-              Pulls Stripe&apos;s metered usage revenue report for the selected period (default: current month) and displays totals,
-              top contributors, and raw metered line items.
+              Uses Stripe BigQuery invoice lines (metered usage, net of line-item discounts) for the selected period and
+              displays totals, per-customer breakdown, and raw line items.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -210,7 +210,9 @@ export default function AiSpendPage() {
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Report controls</h2>
-        <p className="stripe-ui__panel-subtitle">Current month is preselected. Adjust if needed, then load Stripe report data.</p>
+        <p className="stripe-ui__panel-subtitle">
+          Current month is preselected. Adjust if needed, then load Stripe BigQuery data.
+        </p>
 
         <div className="stripe-ui__control-grid">
           <div className="stripe-ui__field">
@@ -258,14 +260,14 @@ export default function AiSpendPage() {
 
           <div className="stripe-ui__field">
             <label className="stripe-ui__field-label" htmlFor="ai-spend-top-limit">
-              Top rows per group
+              Customer rows
             </label>
             <input
               id="ai-spend-top-limit"
               className="stripe-ui__control"
               type="number"
               min={1}
-              max={500}
+              max={5000}
               value={topLimit}
               onChange={(e) => setTopLimit(Math.max(1, Math.floor(Number(e.target.value) || 1)))}
             />
@@ -332,7 +334,7 @@ export default function AiSpendPage() {
             ) : null}
             <div className="stripe-ui__stats" style={{ gridTemplateColumns: "repeat(4, minmax(140px, 1fr))" }}>
               <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Total metered revenue</p>
+                <p className="stripe-ui__stat-label">Total net metered revenue</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.totalRevenue || 0, summaryCurrency)}</p>
               </article>
               <article className="stripe-ui__stat">
@@ -384,76 +386,27 @@ export default function AiSpendPage() {
           </section>
 
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
-            <h2 className="stripe-ui__panel-title">Top contributors</h2>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-                gap: "0.72rem",
-              }}
-            >
-              <article className="stripe-ui__table-wrap">
-                <table className="stripe-ui__table">
-                  <thead>
-                    <tr>
-                      <th>Customer</th>
-                      <th className="stripe-ui__num">Revenue</th>
-                      <th className="stripe-ui__num">Lines</th>
+            <h2 className="stripe-ui__panel-title">Customer breakdown</h2>
+            <p className="stripe-ui__panel-subtitle">Sorted by highest to lowest net revenue.</p>
+            <div className="stripe-ui__table-wrap">
+              <table className="stripe-ui__table">
+                <thead>
+                  <tr>
+                    <th>Customer</th>
+                    <th className="stripe-ui__num">Revenue</th>
+                    <th className="stripe-ui__num">Lines</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data.topCustomers || []).map((row) => (
+                    <tr key={`customer-${row.key}`}>
+                      <td>{withLabel(row.key, row.label)}</td>
+                      <td className="stripe-ui__num">{formatMoney(row.revenue, summaryCurrency)}</td>
+                      <td className="stripe-ui__num">{row.lineCount}</td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {(data.topCustomers || []).map((row) => (
-                      <tr key={`customer-${row.key}`}>
-                        <td>{withLabel(row.key, row.label)}</td>
-                        <td className="stripe-ui__num">{formatMoney(row.revenue, summaryCurrency)}</td>
-                        <td className="stripe-ui__num">{row.lineCount}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </article>
-
-              <article className="stripe-ui__table-wrap">
-                <table className="stripe-ui__table">
-                  <thead>
-                    <tr>
-                      <th>Product</th>
-                      <th className="stripe-ui__num">Revenue</th>
-                      <th className="stripe-ui__num">Lines</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(data.topProducts || []).map((row) => (
-                      <tr key={`product-${row.key}`}>
-                        <td>{withLabel(row.key, row.label)}</td>
-                        <td className="stripe-ui__num">{formatMoney(row.revenue, summaryCurrency)}</td>
-                        <td className="stripe-ui__num">{row.lineCount}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </article>
-
-              <article className="stripe-ui__table-wrap">
-                <table className="stripe-ui__table">
-                  <thead>
-                    <tr>
-                      <th>Price</th>
-                      <th>Product</th>
-                      <th className="stripe-ui__num">Revenue</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(data.topPrices || []).map((row) => (
-                      <tr key={`price-${row.priceId}-${row.productId}`}>
-                        <td>{withLabel(row.priceId, row.priceLabel)}</td>
-                        <td>{withLabel(row.productId, row.productLabel)}</td>
-                        <td className="stripe-ui__num">{formatMoney(row.revenue, summaryCurrency)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </article>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </section>
 

@@ -3456,7 +3456,7 @@ export async function queryStripeAiSpendFromBigQuery(
   const endDateIso = endDate.toISOString().slice(0, 10);
   const grain = normalizeStripeAiSpendGrain(request.grain);
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
-  const topLimit = Math.max(1, Math.min(500, asInt(request.topLimit || 50)));
+  const topLimit = Math.max(1, Math.min(5000, asInt(request.topLimit || 50)));
   const detailLimit = Math.max(1, Math.min(1000, asInt(request.detailLimit || 200)));
 
   const profile = normalizeProfile(options?.profile);
@@ -3493,19 +3493,6 @@ latest_prices AS (
   )
   WHERE rn = 1
 ),
-latest_products AS (
-  SELECT * EXCEPT(rn)
-  FROM (
-    SELECT
-      p.*,
-      ROW_NUMBER() OVER (
-        PARTITION BY p.id
-        ORDER BY p.batch_timestamp DESC
-      ) AS rn
-    FROM \`botpress-stripe-data-pipeline.stripe.products\` p
-  )
-  WHERE rn = 1
-),
 latest_invoices AS (
   SELECT * EXCEPT(rn)
   FROM (
@@ -3519,9 +3506,16 @@ latest_invoices AS (
   )
   WHERE rn = 1
 ),
+line_discounts AS (
+  SELECT
+    invoice_line_item_id,
+    SUM(COALESCE(amount, 0)) AS discount_amount
+  FROM \`botpress-stripe-data-pipeline.stripe.invoice_line_item_discount_amounts\`
+  GROUP BY invoice_line_item_id
+),
 metered_lines AS (
   SELECT
-    DATE(COALESCE(i.date, il.period_start)) AS event_date,
+    DATE(il.period_start) AS event_date,
     COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)') AS customer_id,
     COALESCE(
       NULLIF(TRIM(CAST(i.customer_name AS STRING)), ''),
@@ -3535,25 +3529,20 @@ metered_lines AS (
       COALESCE(NULLIF(TRIM(CAST(il.price_id AS STRING)), ''), '(blank)')
     ) AS price_label,
     COALESCE(NULLIF(TRIM(CAST(p.product_id AS STRING)), ''), '(blank)') AS product_id,
-    COALESCE(
-      NULLIF(TRIM(CAST(prod.description AS STRING)), ''),
-      NULLIF(TRIM(CAST(prod.name AS STRING)), ''),
-      COALESCE(NULLIF(TRIM(CAST(p.product_id AS STRING)), ''), '(blank)')
-    ) AS product_label,
-    CAST(COALESCE(il.amount, 0) AS FLOAT64) / 100.0 AS revenue_major,
+    COALESCE(NULLIF(TRIM(CAST(p.product_id AS STRING)), ''), '(blank)') AS product_label,
+    CAST(COALESCE(il.amount, 0) - COALESCE(ld.discount_amount, 0) AS FLOAT64) / 100.0 AS revenue_major,
     CAST(COALESCE(il.quantity, 0) AS FLOAT64) AS quantity
   FROM latest_invoice_lines il
-  LEFT JOIN latest_prices p
+  JOIN latest_prices p
     ON p.id = il.price_id
-  LEFT JOIN latest_products prod
-    ON prod.id = p.product_id
+  LEFT JOIN line_discounts ld
+    ON ld.invoice_line_item_id = il.id
   LEFT JOIN latest_invoices i
     ON i.id = il.invoice_id
   WHERE
     LOWER(COALESCE(p.recurring_usage_type, '')) = 'metered'
-    AND LOWER(COALESCE(il.currency, i.currency, '')) = @target_currency
-    AND COALESCE(i.paid, FALSE) = TRUE
-    AND DATE(COALESCE(i.date, il.period_start)) BETWEEN DATE(@start_date) AND DATE(@end_date)
+    AND LOWER(COALESCE(il.currency, '')) = @target_currency
+    AND DATE(il.period_start) BETWEEN DATE(@start_date) AND DATE(@end_date)
 )
 `;
 
