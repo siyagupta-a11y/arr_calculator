@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 const HUBSPOT_BASE = "https://api.hubapi.com";
 
 function getToken() {
-  const t = process.env.HUBSPOT_PRIVATE_APP_TOKEN;
+  const raw = process.env.HUBSPOT_PRIVATE_APP_TOKEN || "";
+  // Strip surrounding quotes in case dotenv didn't remove them
+  const t = raw.replace(/^["']|["']$/g, "").trim();
   if (!t) throw new Error("Missing HUBSPOT_PRIVATE_APP_TOKEN");
   return t;
 }

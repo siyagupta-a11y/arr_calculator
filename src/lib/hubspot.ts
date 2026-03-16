@@ -104,12 +104,6 @@ type DealLineItemBatchAssociationResponse = {
   }>;
 };
 
-type CompanyContactBatchAssociationResponse = {
-  results?: Array<{
-    from?: { id?: string | number };
-    to?: Array<{ toObjectId?: string | number; id?: string | number }>;
-  }>;
-};
 
 export type HubspotDealPropertyUpdate = {
   dealId: string;
@@ -352,83 +346,64 @@ export async function fetchPrimaryContactEmailsByCompanyId(
 
   if (!missingIds.length) return result;
 
-  // Step 1: batch-fetch company → contact associations
-  const assocUrl = `${HUBSPOT_BASE}/crm/v4/associations/companies/contacts/batch/read`;
-  const chunkSize = 100;
-  const assocChunks: string[][] = [];
+  // Use contacts search with associatedcompanyid IN [...] to find the first
+  // contact email for each company. This avoids needing separate association
+  // scopes and works with the standard crm.objects.contacts.read scope.
+  const searchUrl = `${HUBSPOT_BASE}/crm/v3/objects/contacts/search`;
+  const chunkSize = 100; // HubSpot IN operator supports up to 100 values
+  const chunks: string[][] = [];
   for (let i = 0; i < missingIds.length; i += chunkSize) {
-    assocChunks.push(missingIds.slice(i, i + chunkSize));
+    chunks.push(missingIds.slice(i, i + chunkSize));
   }
 
-  const companyToFirstContactId = new Map<string, string>();
-  const assocChunkResults = await mapWithConcurrency(
-    assocChunks,
-    HUBSPOT_BATCH_READ_CONCURRENCY,
-    async (chunk): Promise<CompanyContactBatchAssociationResponse> => {
-      const json = await hsFetch(assocUrl, {
+  // companyId → first email found
+  const companyEmailMap = new Map<string, string>();
+
+  await mapWithConcurrency(chunks, HUBSPOT_BATCH_READ_CONCURRENCY, async (chunk) => {
+    let after: string | undefined;
+    // Collect all contacts for this chunk (paginate if needed)
+    while (true) {
+      const body: Record<string, unknown> = {
+        filterGroups: [
+          {
+            filters: [
+              {
+                propertyName: "associatedcompanyid",
+                operator: "IN",
+                values: chunk,
+              },
+            ],
+          },
+        ],
+        properties: ["email", "associatedcompanyid"],
+        limit: 100,
+      };
+      if (after) body.after = after;
+
+      const json = await hsFetch(searchUrl, {
         method: "POST",
-        body: JSON.stringify({ inputs: chunk.map((id) => ({ id })) }),
+        body: JSON.stringify(body),
       });
-      return json as CompanyContactBatchAssociationResponse;
-    },
-  );
 
-  for (const chunkResult of assocChunkResults) {
-    for (const assoc of chunkResult.results || []) {
-      const companyId = String(assoc.from?.id || "");
-      if (!companyId) continue;
-      const firstContactId = String(
-        (assoc.to?.[0] as { toObjectId?: string | number; id?: string | number } | undefined)
-          ?.toObjectId ||
-          (assoc.to?.[0] as { toObjectId?: string | number; id?: string | number } | undefined)
-            ?.id ||
-          "",
-      );
-      if (firstContactId) companyToFirstContactId.set(companyId, firstContactId);
-    }
-  }
+      const contacts = (json.results || []) as Array<{
+        properties?: Record<string, unknown>;
+      }>;
 
-  // Step 2: batch-read those contacts for their `email` property
-  const contactIds = Array.from(new Set(companyToFirstContactId.values()));
-  const contactEmailById = new Map<string, string>();
-
-  if (contactIds.length) {
-    const contactUrl = `${HUBSPOT_BASE}/crm/v3/objects/contacts/batch/read`;
-    const contactChunks: string[][] = [];
-    for (let i = 0; i < contactIds.length; i += chunkSize) {
-      contactChunks.push(contactIds.slice(i, i + chunkSize));
-    }
-
-    const contactChunkResults = await mapWithConcurrency(
-      contactChunks,
-      HUBSPOT_BATCH_READ_CONCURRENCY,
-      async (chunk) => {
-        const json = await hsFetch(contactUrl, {
-          method: "POST",
-          body: JSON.stringify({
-            properties: ["email"],
-            inputs: chunk.map((id) => ({ id })),
-          }),
-        });
-        return (json.results || []) as Array<{
-          id: string;
-          properties?: Record<string, unknown>;
-        }>;
-      },
-    );
-
-    for (const contacts of contactChunkResults) {
       for (const contact of contacts) {
         const email = String(contact.properties?.email || "").trim();
-        if (email) contactEmailById.set(String(contact.id), email);
+        const companyId = String(contact.properties?.associatedcompanyid || "").trim();
+        if (email && companyId && !companyEmailMap.has(companyId)) {
+          companyEmailMap.set(companyId, email);
+        }
       }
-    }
-  }
 
-  // Combine: map each company to its primary contact's email
+      after = json.paging?.next?.after;
+      if (!after) break;
+    }
+  });
+
   for (const id of missingIds) {
-    const contactId = companyToFirstContactId.get(id) || "";
-    const email = contactId ? (contactEmailById.get(contactId) || "") : "";
+    const email = companyEmailMap.get(id) || "";
     if (email) result.set(id, email);
     writeCache(COMPANY_CONTACT_EMAIL_CACHE, id, email);
   }
