@@ -110,6 +110,8 @@ export type StripeThroughMrrGroupedDetailRow = {
   expansionMrr: number;
   contractionMrr: number;
   churnMrr: number;
+  monthEndMrr: number;
+  monthEndArr: number;
 };
 
 export type StripeThroughMrrReportRequest = {
@@ -1813,6 +1815,7 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const startDateIso = startDate.toISOString().slice(0, 10);
   const endDateIso = endDate.toISOString().slice(0, 10);
   const endExclusiveDateIso = endExclusiveDate.toISOString().slice(0, 10);
+  const detailStartMonthDateIso = detailStartMonthDate.toISOString().slice(0, 10);
   const detailRangeStartDateIso = detailRangeStartDate.toISOString().slice(0, 10);
   const detailEndExclusiveDateIso = detailEndExclusiveDate.toISOString().slice(0, 10);
   const detailStartMonth = isoMonthFromDateUtc(detailStartMonthDate);
@@ -1945,6 +1948,11 @@ WHERE
     { name: "detail_range_start_date", type: "STRING", value: detailRangeStartDateIso },
     { name: "detail_end_exclusive_date", type: "STRING", value: detailEndExclusiveDateIso },
   ];
+  const groupedDetailBaseParams: BigQueryNamedParameter[] = [
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+    { name: "detail_range_start_date", type: "STRING", value: detailStartMonthDateIso },
+    { name: "detail_end_exclusive_date", type: "STRING", value: detailEndExclusiveDateIso },
+  ];
 
   let totalRows = 0;
   let detailRowsRaw: Record<string, unknown>[] = [];
@@ -2004,7 +2012,7 @@ group_totals AS (
 SELECT
   COUNT(*) AS total_rows
 FROM group_totals`;
-    const countRows = await runBigQueryQueryRows(accessToken, projectId, location, countQuery, detailBaseParams);
+    const countRows = await runBigQueryQueryRows(accessToken, projectId, location, countQuery, groupedDetailBaseParams);
     totalRows = asInt((countRows[0] || {}).total_rows);
     const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
     const clampedPage = Math.min(page, totalPages);
@@ -2037,31 +2045,133 @@ paged_groups AS (
   ORDER BY net_mrr_change DESC, group_label ASC
   LIMIT @limit_rows
   OFFSET @offset_rows
+),
+months_in_scope AS (
+  SELECT
+    month_start
+  FROM UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(DATE(@detail_start_month_date), MONTH),
+      DATE_TRUNC(DATE_SUB(DATE(@detail_end_exclusive_date), INTERVAL 1 DAY), MONTH),
+      INTERVAL 1 MONTH
+    )
+  ) AS month_start
+),
+group_monthly AS (
+  SELECT
+    pg.group_key,
+    pg.group_label,
+    pg.net_mrr_change AS group_total_net_mrr_change,
+    m.month_start,
+    COUNT(gs.event_timestamp) AS event_count,
+    COALESCE(SUM(gs.mrr_change_major), 0.0) AS net_mrr_change,
+    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_START', gs.mrr_change_major, 0.0)), 0.0) AS new_mrr,
+    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_UPGRADE', gs.mrr_change_major, 0.0)), 0.0) AS expansion_mrr,
+    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_DOWNGRADE', gs.mrr_change_major, 0.0)), 0.0) AS contraction_mrr,
+    COALESCE(SUM(IF(gs.event_type = 'ACTIVE_END', gs.mrr_change_major, 0.0)), 0.0) AS churn_mrr
+  FROM paged_groups pg
+  CROSS JOIN months_in_scope m
+  LEFT JOIN grouped_source gs
+    ON gs.group_key = pg.group_key
+    AND gs.group_label = pg.group_label
+    AND DATE_TRUNC(DATE(gs.event_timestamp), MONTH) = m.month_start
+  GROUP BY
+    pg.group_key,
+    pg.group_label,
+    pg.net_mrr_change,
+    m.month_start
+),
+history_source AS (
+  SELECT
+    UPPER(CAST(event_type AS STRING)) AS event_type,
+    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_id')), ''),
+      '(blank)'
+    ) AS subscription_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_item_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_item')), ''),
+      '(blank)'
+    ) AS subscription_item_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price')), ''),
+      '(blank)'
+    ) AS price_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product')), ''),
+      '(blank)'
+    ) AS product_id
+  FROM \`${table}\` t
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp < TIMESTAMP(@detail_start_month_date)
+),
+history_by_group AS (
+  SELECT
+    ${groupSql.keyExpr} AS group_key,
+    COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr
+  FROM history_source
+  GROUP BY group_key
+),
+group_monthly_with_base AS (
+  SELECT
+    gm.group_key,
+    gm.group_label,
+    gm.group_total_net_mrr_change,
+    gm.month_start,
+    gm.event_count,
+    gm.net_mrr_change,
+    gm.new_mrr,
+    gm.expansion_mrr,
+    gm.contraction_mrr,
+    gm.churn_mrr,
+    COALESCE(hbg.base_mrr, 0.0) AS base_mrr
+  FROM group_monthly gm
+  LEFT JOIN history_by_group hbg
+    ON hbg.group_key = gm.group_key
 )
 SELECT
-  pg.group_key,
-  pg.group_label,
-  FORMAT_DATE('%Y-%m', DATE_TRUNC(DATE(gs.event_timestamp), MONTH)) AS month_key,
-  FORMAT_DATE('%b %Y', DATE_TRUNC(DATE(gs.event_timestamp), MONTH)) AS month_label,
-  COUNT(*) AS event_count,
-  ROUND(COALESCE(SUM(gs.mrr_change_major), 0.0), 2) AS net_mrr_change,
-  ROUND(COALESCE(SUM(IF(gs.event_type = 'ACTIVE_START', gs.mrr_change_major, 0.0)), 0.0), 2) AS new_mrr,
-  ROUND(COALESCE(SUM(IF(gs.event_type = 'ACTIVE_UPGRADE', gs.mrr_change_major, 0.0)), 0.0), 2) AS expansion_mrr,
-  ROUND(COALESCE(SUM(IF(gs.event_type = 'ACTIVE_DOWNGRADE', gs.mrr_change_major, 0.0)), 0.0), 2) AS contraction_mrr,
-  ROUND(COALESCE(SUM(IF(gs.event_type = 'ACTIVE_END', gs.mrr_change_major, 0.0)), 0.0), 2) AS churn_mrr
-FROM paged_groups pg
-LEFT JOIN grouped_source gs
-  ON gs.group_key = pg.group_key
-  AND gs.group_label = pg.group_label
-GROUP BY
-  pg.group_key,
-  pg.group_label,
-  pg.net_mrr_change,
-  DATE_TRUNC(DATE(gs.event_timestamp), MONTH)
-HAVING DATE_TRUNC(DATE(gs.event_timestamp), MONTH) IS NOT NULL
-ORDER BY pg.net_mrr_change DESC, pg.group_label ASC, DATE_TRUNC(DATE(gs.event_timestamp), MONTH) ASC`;
+  gmb.group_key,
+  gmb.group_label,
+  FORMAT_DATE('%Y-%m', gmb.month_start) AS month_key,
+  FORMAT_DATE('%b %Y', gmb.month_start) AS month_label,
+  gmb.event_count,
+  ROUND(gmb.net_mrr_change, 2) AS net_mrr_change,
+  ROUND(gmb.new_mrr, 2) AS new_mrr,
+  ROUND(gmb.expansion_mrr, 2) AS expansion_mrr,
+  ROUND(gmb.contraction_mrr, 2) AS contraction_mrr,
+  ROUND(gmb.churn_mrr, 2) AS churn_mrr,
+  ROUND(
+    gmb.base_mrr
+      + SUM(gmb.net_mrr_change) OVER (
+          PARTITION BY gmb.group_key, gmb.group_label
+          ORDER BY gmb.month_start
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ),
+    2
+  ) AS month_end_mrr,
+  ROUND(
+    (
+      gmb.base_mrr
+      + SUM(gmb.net_mrr_change) OVER (
+          PARTITION BY gmb.group_key, gmb.group_label
+          ORDER BY gmb.month_start
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        )
+    ) * 12.0,
+    2
+  ) AS month_end_arr
+FROM group_monthly_with_base gmb
+ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_start ASC`;
       detailRowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, rowsQuery, [
-        ...detailBaseParams,
+        ...groupedDetailBaseParams,
+        { name: "detail_start_month_date", type: "STRING", value: detailStartMonthDateIso },
         { name: "limit_rows", type: "INT64", value: String(pageSize) },
         { name: "offset_rows", type: "INT64", value: String(offsetRows) },
       ]);
@@ -2096,6 +2206,8 @@ ORDER BY pg.net_mrr_change DESC, pg.group_label ASC, DATE_TRUNC(DATE(gs.event_ti
           expansionMrr: asNumber(row.expansion_mrr),
           contractionMrr: asNumber(row.contraction_mrr),
           churnMrr: asNumber(row.churn_mrr),
+          monthEndMrr: asNumber(row.month_end_mrr),
+          monthEndArr: asNumber(row.month_end_arr),
         }));
 
   return {

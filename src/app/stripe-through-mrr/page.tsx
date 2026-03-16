@@ -47,6 +47,8 @@ type GroupedDetailRow = {
   expansionMrr: number;
   contractionMrr: number;
   churnMrr: number;
+  monthEndMrr: number;
+  monthEndArr: number;
 };
 
 type ApiResponse = {
@@ -70,9 +72,17 @@ type ApiResponse = {
   };
 };
 
-type DetailMetricKey = "newMrr" | "expansionMrr" | "contractionMrr" | "churnMrr" | "netMrrChange" | "eventCount";
+type DetailMetricKey =
+  | "monthEndArr"
+  | "newMrr"
+  | "expansionMrr"
+  | "contractionMrr"
+  | "churnMrr"
+  | "netMrrChange"
+  | "eventCount";
 
 const DETAIL_METRIC_OPTIONS: Array<{ key: DetailMetricKey; label: string }> = [
+  { key: "monthEndArr", label: "ARR (month end)" },
   { key: "newMrr", label: "New" },
   { key: "expansionMrr", label: "Expansion" },
   { key: "contractionMrr", label: "Contraction" },
@@ -135,6 +145,7 @@ function isGroupedRow(row: RawDetailRow | GroupedDetailRow): row is GroupedDetai
 
 function metricValue(row: GroupedDetailRow | undefined, metric: DetailMetricKey) {
   if (!row) return 0;
+  if (metric === "monthEndArr") return row.monthEndArr;
   if (metric === "newMrr") return row.newMrr;
   if (metric === "expansionMrr") return row.expansionMrr;
   if (metric === "contractionMrr") return row.contractionMrr;
@@ -155,13 +166,7 @@ export default function StripeThroughMrrPage() {
   const [detailStartMonth, setDetailStartMonth] = useState(defaults.startMonth);
   const [detailEndMonth, setDetailEndMonth] = useState(defaults.endMonth);
   const [groupBy, setGroupBy] = useState<GroupBy>("none");
-  const [selectedMetrics, setSelectedMetrics] = useState<DetailMetricKey[]>([
-    "newMrr",
-    "expansionMrr",
-    "contractionMrr",
-    "churnMrr",
-    "netMrrChange",
-  ]);
+  const [selectedMetrics, setSelectedMetrics] = useState<DetailMetricKey[]>(["monthEndArr"]);
 
   const [page, setPage] = useState(1);
   const [pageJumpInput, setPageJumpInput] = useState("1");
@@ -268,12 +273,17 @@ export default function StripeThroughMrrPage() {
       entry.byMonth.set(row.monthKey, row);
       entry.totalNet += row.netMrrChange;
     }
+    const latestMonthKey = detailMonthsInRange.length ? detailMonthsInRange[detailMonthsInRange.length - 1].monthKey : "";
     return Array.from(byGroup.values()).sort((a, b) => {
+      const aLatestArr = latestMonthKey ? metricValue(a.byMonth.get(latestMonthKey), "monthEndArr") : 0;
+      const bLatestArr = latestMonthKey ? metricValue(b.byMonth.get(latestMonthKey), "monthEndArr") : 0;
+      const arrDiff = bLatestArr - aLatestArr;
+      if (Math.abs(arrDiff) > 1e-9) return arrDiff;
       const diff = b.totalNet - a.totalNet;
       if (Math.abs(diff) > 1e-9) return diff;
       return a.groupLabel.localeCompare(b.groupLabel);
     });
-  }, [detailMode, detailRows]);
+  }, [detailMode, detailRows, detailMonthsInRange]);
 
   function toggleMetric(metric: DetailMetricKey) {
     setSelectedMetrics((prev) => {
@@ -294,8 +304,8 @@ export default function StripeThroughMrrPage() {
             <h1 className="stripe-ui__title">Stripe through MRR</h1>
             <p className="stripe-ui__subtitle">
               Uses `botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta` to compute monthly
-              MRR, cumulative total MRR to end date, and monthly New/Expansion/Contraction/Churn. Detail rows are
-              served backend-side for fast rendering.
+              MRR, cumulative total MRR to end date, and monthly New/Expansion/Contraction/Churn. Grouped detail mode
+              shows cumulative month-end ARR per selected group.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -532,7 +542,7 @@ export default function StripeThroughMrrPage() {
                   {detailMode === "raw" ? "line items" : "grouped by month"})
                 </h2>
                 <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-                  Grouped mode shows month column groups with selectable metrics for each month.
+                  Grouped mode computes cumulative ARR at each month end (all MRR changes up to that month) for each selected group.
                 </p>
               </div>
             </div>
