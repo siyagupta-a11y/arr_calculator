@@ -2139,11 +2139,18 @@ history_source AS (
     LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
     AND event_timestamp < TIMESTAMP(@detail_start_month_date)
 ),
+history_enriched AS (
+  SELECT
+    hs.*,
+    COALESCE(cl.customer_email, '') AS customer_email
+  FROM history_source hs
+  LEFT JOIN customers_lookup cl ON cl.customer_id = hs.customer_id
+),
 history_by_group AS (
   SELECT
     ${groupSql.keyExpr} AS group_key,
     COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr
-  FROM history_source
+  FROM history_enriched
   GROUP BY group_key
 ),
 group_monthly_with_base AS (
