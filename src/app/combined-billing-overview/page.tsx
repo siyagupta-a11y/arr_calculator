@@ -2430,30 +2430,14 @@ export default function CombinedBillingOverviewPage() {
             },
           );
 
-        let frankfurterCosts: QuickBooksSalesMarketingCostResponse | null = null;
-        let currencyLayerCosts: QuickBooksSalesMarketingCostResponse | null = null;
-        let frankfurterError: unknown = null;
-        let currencyLayerError: unknown = null;
-
-        await Promise.all([
-          (async () => {
-            try {
-              frankfurterCosts = await loadCacCosts("frankfurter");
-            } catch (e: unknown) {
-              frankfurterError = e;
-            }
-          })(),
-          (async () => {
-            try {
-              currencyLayerCosts = await loadCacCosts("currencylayer");
-            } catch (e: unknown) {
-              currencyLayerError = e;
-            }
-          })(),
+        const [frankfurterResult, currencyLayerResult] = await Promise.allSettled([
+          loadCacCosts("frankfurter"),
+          loadCacCosts("currencylayer"),
         ]);
         if (isStale()) return;
 
-        if (frankfurterCosts) {
+        if (frankfurterResult.status === "fulfilled") {
+          const frankfurterCosts = frankfurterResult.value;
           cacPoints = buildCacSeries(
             periodOrder,
             grain,
@@ -2462,11 +2446,15 @@ export default function CombinedBillingOverviewPage() {
           );
           nextCacNotice = buildCacAccountMatchNotice(frankfurterCosts, normalizedSelectedCacAccountIds);
         } else {
-          nextCacNotice = `CAC unavailable: ${conciseErrorMessage(frankfurterError, "QuickBooks cost query failed.")}`;
+          nextCacNotice = `CAC unavailable: ${conciseErrorMessage(
+            frankfurterResult.reason,
+            "QuickBooks cost query failed.",
+          )}`;
           cacPoints = emptyCacSeries;
         }
 
-        if (currencyLayerCosts) {
+        if (currencyLayerResult.status === "fulfilled") {
+          const currencyLayerCosts = currencyLayerResult.value;
           cacCurrencyLayerPoints = buildCacSeries(
             periodOrder,
             grain,
@@ -2477,7 +2465,7 @@ export default function CombinedBillingOverviewPage() {
           nextCacCurrencyLayerNotice = accountMatchNotice ? `Currencylayer CAC: ${accountMatchNotice}` : null;
         } else {
           nextCacCurrencyLayerNotice = `Currencylayer CAC unavailable: ${conciseErrorMessage(
-            currencyLayerError,
+            currencyLayerResult.reason,
             "QuickBooks cost query failed.",
           )}`;
           cacCurrencyLayerPoints = emptyCacSeries;
