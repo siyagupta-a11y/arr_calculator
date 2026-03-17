@@ -17,6 +17,7 @@ This is a Next.js ARR dashboard.
 - `GET /api/quickbooks/connect` Start Intuit OAuth
 - `GET /api/quickbooks/callback` Intuit OAuth callback
 - `GET /api/quickbooks/status` QuickBooks connection status
+- `GET /api/quickbooks/keepalive` Refresh QuickBooks tokens (for cron keepalive)
 - `GET /api/quickbooks/company-info` Fetch QuickBooks CompanyInfo
 - `POST /api/quickbooks/query` Run a QuickBooks SQL-like query
 - `POST /api/quickbooks/disconnect` Clear saved QuickBooks tokens
@@ -27,6 +28,7 @@ Vercel cron runs Stripe sync automatically every 5 minutes:
 
 - `*/5 * * * *` (`/api/stripe-sync`)
 - `0 * * * *` (`/api/stripe-bigquery-refresh`) hourly refresh of bucket-backed external Stripe tables
+- `0 */6 * * *` (`/api/quickbooks/keepalive`) QuickBooks OAuth token keepalive
 
 `/api/stripe-sync` accepts:
 

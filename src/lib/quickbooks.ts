@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import {
   clearQuickBooksConnection,
   loadQuickBooksConnection,
+  quickBooksStorageKind,
   saveQuickBooksConnection,
   type QuickBooksConnection,
   type QuickBooksStorageKind,
@@ -631,19 +632,61 @@ export async function getQuickBooksStatus(): Promise<{
   accessTokenExpiresAt?: number;
   refreshTokenExpiresAt?: number;
   updatedAt?: number;
+  statusError?: string;
+  needsReconnect?: boolean;
 }> {
-  const { connection, storage } = await loadQuickBooksConnection();
-  if (!connection) return { connected: false, storage };
+  try {
+    // Status checks also keep tokens fresh so periodic page loads can maintain the connection.
+    const { connection, storage } = await ensureValidConnection();
+    return {
+      connected: true,
+      storage,
+      realmId: connection.realmId,
+      scope: connection.scope,
+      accessTokenExpiresAt: connection.accessTokenExpiresAt,
+      refreshTokenExpiresAt: connection.refreshTokenExpiresAt,
+      updatedAt: connection.updatedAt,
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    const lower = message.toLowerCase();
+    const isReconnectError =
+      lower.includes("invalid_grant") ||
+      lower.includes("not connected") ||
+      lower.includes("refresh token") ||
+      lower.includes("token has been revoked") ||
+      lower.includes("token expired");
 
-  return {
-    connected: true,
-    storage,
-    realmId: connection.realmId,
-    scope: connection.scope,
-    accessTokenExpiresAt: connection.accessTokenExpiresAt,
-    refreshTokenExpiresAt: connection.refreshTokenExpiresAt,
-    updatedAt: connection.updatedAt,
-  };
+    try {
+      const { connection, storage } = await loadQuickBooksConnection();
+      if (!connection) {
+        return {
+          connected: false,
+          storage,
+          statusError: message,
+          needsReconnect: isReconnectError || lower.includes("not connected"),
+        };
+      }
+      return {
+        connected: !isReconnectError,
+        storage,
+        realmId: connection.realmId,
+        scope: connection.scope,
+        accessTokenExpiresAt: connection.accessTokenExpiresAt,
+        refreshTokenExpiresAt: connection.refreshTokenExpiresAt,
+        updatedAt: connection.updatedAt,
+        statusError: message,
+        needsReconnect: isReconnectError,
+      };
+    } catch {
+      return {
+        connected: false,
+        storage: quickBooksStorageKind(),
+        statusError: message,
+        needsReconnect: isReconnectError,
+      };
+    }
+  }
 }
 
 export async function fetchQuickBooksCompanyInfo() {

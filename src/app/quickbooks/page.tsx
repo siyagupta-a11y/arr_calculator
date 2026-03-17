@@ -11,6 +11,8 @@ type QuickBooksStatus = {
   accessTokenExpiresAt?: number;
   refreshTokenExpiresAt?: number;
   updatedAt?: number;
+  statusError?: string;
+  needsReconnect?: boolean;
 };
 
 function formatEpoch(epochMs?: number) {
@@ -176,6 +178,13 @@ export default function QuickBooksPage() {
       {error ? (
         <div className="stripe-ui__error ui-reveal ui-reveal-1" role="alert" aria-live="assertive">
           <strong>Request failed.</strong> {error}
+        </div>
+      ) : null}
+
+      {status?.statusError ? (
+        <div className="stripe-ui__error ui-reveal ui-reveal-1" role="alert" aria-live="polite">
+          <strong>{status.needsReconnect ? "Reconnect required." : "Token refresh warning."}</strong>{" "}
+          {status.statusError}
         </div>
       ) : null}
 

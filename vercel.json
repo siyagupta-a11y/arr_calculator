@@ -7,6 +7,10 @@
     {
       "path": "/api/stripe-bigquery-refresh",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/quickbooks/keepalive",
+      "schedule": "0 */6 * * *"
     }
   ]
 }
