@@ -7,6 +7,7 @@ import type { ReportResponse, ReportRow } from "@/lib/types";
 
 type CombinedGrain = "daily" | "monthly" | "quarterly";
 type CacFxProvider = "frankfurter" | "currencylayer";
+type CacMenuTarget = CacFxProvider | null;
 
 type CombinedPoint = {
   key: string;
@@ -1941,7 +1942,7 @@ export default function CombinedBillingOverviewPage() {
   const [cacNotice, setCacNotice] = useState<string | null>(null);
   const [cacCurrencyLayerNotice, setCacCurrencyLayerNotice] = useState<string | null>(null);
   const [selectedCacAccountIds, setSelectedCacAccountIds] = useState<string[]>([]);
-  const [cacAccountMenuOpen, setCacAccountMenuOpen] = useState(false);
+  const [cacAccountMenuTarget, setCacAccountMenuTarget] = useState<CacMenuTarget>(null);
   const [cacExpenseAccounts, setCacExpenseAccounts] = useState<QuickBooksExpenseAccount[]>([]);
   const [cacExpenseAccountsLoaded, setCacExpenseAccountsLoaded] = useState(false);
   const [cacExpenseAccountsLoading, setCacExpenseAccountsLoading] = useState(false);
@@ -2010,9 +2011,9 @@ export default function CombinedBillingOverviewPage() {
     void loadCacDefaultSelection();
   }, [loadCacDefaultSelection]);
 
-  const toggleCacAccountMenu = useCallback(() => {
-    setCacAccountMenuOpen((prev) => {
-      const next = !prev;
+  const toggleCacAccountMenu = useCallback((target: CacFxProvider) => {
+    setCacAccountMenuTarget((prev) => {
+      const next = prev === target ? null : target;
       if (next && !cacExpenseAccountsLoaded && !cacExpenseAccountsLoading) {
         void loadCacExpenseAccounts();
       }
@@ -2721,19 +2722,19 @@ export default function CombinedBillingOverviewPage() {
               expenseAccounts={cacExpenseAccounts}
               selectedAccountIds={selectedCacAccountIds}
               runLoading={loading}
-              accountMenuOpen={cacAccountMenuOpen}
+              accountMenuOpen={cacAccountMenuTarget === "frankfurter"}
               accountsLoading={cacExpenseAccountsLoading}
               accountsError={cacExpenseAccountsError}
               savingDefaultSelection={savingCacDefaultSelection}
               defaultSaveStatus={cacDefaultSaveStatus}
-              onToggleAccountMenu={toggleCacAccountMenu}
+              onToggleAccountMenu={() => toggleCacAccountMenu("frankfurter")}
               onRefreshAccounts={() => void loadCacExpenseAccounts()}
               onToggleAccountSelection={toggleCacAccountSelection}
               onSelectAllAccounts={selectAllCacAccounts}
               onClearAccounts={clearCacAccounts}
               onSaveDefaultSelection={() => void saveCacDefaultSelection()}
               onApplySelection={() => {
-                setCacAccountMenuOpen(false);
+                setCacAccountMenuTarget(null);
                 void run();
               }}
             />
@@ -2747,23 +2748,22 @@ export default function CombinedBillingOverviewPage() {
               downloadFilename="combined-billing-overview-cac-over-time-currencylayer"
               tableTitle="CAC Table (Currencylayer FX)"
               tableAriaLabel="CAC table using Currencylayer FX"
-              showAccountSelector={false}
               expenseAccounts={cacExpenseAccounts}
               selectedAccountIds={selectedCacAccountIds}
               runLoading={loading}
-              accountMenuOpen={cacAccountMenuOpen}
+              accountMenuOpen={cacAccountMenuTarget === "currencylayer"}
               accountsLoading={cacExpenseAccountsLoading}
               accountsError={cacExpenseAccountsError}
               savingDefaultSelection={savingCacDefaultSelection}
               defaultSaveStatus={cacDefaultSaveStatus}
-              onToggleAccountMenu={toggleCacAccountMenu}
+              onToggleAccountMenu={() => toggleCacAccountMenu("currencylayer")}
               onRefreshAccounts={() => void loadCacExpenseAccounts()}
               onToggleAccountSelection={toggleCacAccountSelection}
               onSelectAllAccounts={selectAllCacAccounts}
               onClearAccounts={clearCacAccounts}
               onSaveDefaultSelection={() => void saveCacDefaultSelection()}
               onApplySelection={() => {
-                setCacAccountMenuOpen(false);
+                setCacAccountMenuTarget(null);
                 void run();
               }}
             />
