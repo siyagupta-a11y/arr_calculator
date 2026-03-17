@@ -2536,6 +2536,9 @@ export default function CombinedBillingOverviewPage() {
             <Link href="/stripe-through-mrr" className="stripe-ui__hero-link">
               Open Stripe through MRR
             </Link>
+            <Link href="/combined-all-subs" className="stripe-ui__hero-link">
+              Open Combined All Subs
+            </Link>
             <Link href="/ai-spend" className="stripe-ui__hero-link">
               Open AI spend
             </Link>

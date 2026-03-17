@@ -1872,6 +1872,9 @@ export default function Home() {
             <Link href="/stripe-billing-overview" className="stripe-ui__hero-link">
               Open Stripe Billing Overview
             </Link>
+            <Link href="/combined-all-subs" className="stripe-ui__hero-link">
+              Open Combined All Subs
+            </Link>
             <Link href="/ai-spend" className="stripe-ui__hero-link">
               Open AI spend
             </Link>

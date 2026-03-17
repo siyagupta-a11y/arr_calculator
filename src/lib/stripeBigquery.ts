@@ -148,6 +148,28 @@ export type StripeThroughMrrReportResult = {
   };
 };
 
+export type StripeThroughMrrCustomerArrRow = {
+  customerKey: string;
+  periodKey: string;
+  periodLabel: string;
+  periodStart: string;
+  periodEnd: string;
+  arr: number;
+};
+
+export type StripeThroughMrrCustomerArrRequest = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+};
+
+export type StripeThroughMrrCustomerArrResult = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+  rows: StripeThroughMrrCustomerArrRow[];
+};
+
 export type StripeBillingOverviewGrain = "daily" | "weekly" | "monthly" | "quarterly";
 export type StripeBillingOverviewGroupBy =
   | "none"
@@ -2349,6 +2371,158 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
       totalPages,
       hasMore: clampedPage < totalPages,
     },
+  };
+}
+
+export async function queryStripeThroughMrrCustomerArrFromBigQuery(
+  request: StripeThroughMrrCustomerArrRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeThroughMrrCustomerArrResult> {
+  const startDate = parseIsoDateUtc(request.startDate);
+  const endDate = parseIsoDateUtc(request.endDate);
+  if (!startDate || !endDate) {
+    throw new Error("Invalid startDate/endDate");
+  }
+  if (endDate.getTime() < startDate.getTime()) {
+    throw new Error("endDate must be >= startDate");
+  }
+
+  const startDateIso = startDate.toISOString().slice(0, 10);
+  const endDateIso = endDate.toISOString().slice(0, 10);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const table = getStripeArrCorrectMrrChangeTable();
+
+  const query = `
+WITH bounds AS (
+  SELECT
+    DATE(@start_date) AS requested_start_date,
+    DATE(@end_date) AS requested_end_date,
+    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS requested_end_exclusive_date,
+    DATE_TRUNC(DATE(@start_date), MONTH) AS first_bucket_start,
+    DATE_TRUNC(DATE(@end_date), MONTH) AS last_bucket_start
+),
+buckets AS (
+  SELECT
+    month_start AS bucket_start,
+    GREATEST(month_start, b.requested_start_date) AS effective_start,
+    LEAST(DATE_ADD(month_start, INTERVAL 1 MONTH), b.requested_end_exclusive_date) AS effective_end_exclusive
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.first_bucket_start, b.last_bucket_start, INTERVAL 1 MONTH)) AS month_start
+),
+events_base AS (
+  SELECT
+    event_timestamp,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_email')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer.email')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_details.email')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.billing_details.email')), ''),
+      NULLIF(TRIM(CAST(customer_id AS STRING)), ''),
+      '(blank)'
+    ) AS customer_key,
+    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` AS t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+),
+customer_start_mrr AS (
+  SELECT
+    e.customer_key,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS start_mrr
+  FROM events_base e
+  CROSS JOIN bounds b
+  WHERE e.event_timestamp < TIMESTAMP(b.requested_start_date)
+  GROUP BY e.customer_key
+),
+bucket_deltas AS (
+  SELECT
+    b.bucket_start,
+    e.customer_key,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS delta_mrr
+  FROM buckets b
+  JOIN events_base e
+    ON e.event_timestamp >= TIMESTAMP(b.effective_start)
+    AND e.event_timestamp < TIMESTAMP(b.effective_end_exclusive)
+  GROUP BY b.bucket_start, e.customer_key
+),
+customers_in_scope AS (
+  SELECT customer_key
+  FROM customer_start_mrr
+  WHERE ABS(start_mrr) > 1e-9
+
+  UNION DISTINCT
+
+  SELECT customer_key
+  FROM bucket_deltas
+),
+customer_buckets AS (
+  SELECT
+    c.customer_key,
+    b.bucket_start,
+    b.effective_start,
+    b.effective_end_exclusive
+  FROM customers_in_scope c
+  CROSS JOIN buckets b
+),
+snapshot_rows AS (
+  SELECT
+    cb.customer_key,
+    cb.bucket_start,
+    cb.effective_start,
+    cb.effective_end_exclusive,
+    COALESCE(csm.start_mrr, 0.0)
+      + SUM(COALESCE(bd.delta_mrr, 0.0)) OVER (
+          PARTITION BY cb.customer_key
+          ORDER BY cb.bucket_start
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS mrr_end
+  FROM customer_buckets cb
+  LEFT JOIN customer_start_mrr csm
+    ON csm.customer_key = cb.customer_key
+  LEFT JOIN bucket_deltas bd
+    ON bd.customer_key = cb.customer_key
+    AND bd.bucket_start = cb.bucket_start
+)
+SELECT
+  customer_key,
+  FORMAT_DATE('%Y-%m', bucket_start) AS period_key,
+  FORMAT_DATE('%b %Y', bucket_start) AS period_label,
+  FORMAT_DATE('%Y-%m-%d', effective_start) AS period_start,
+  FORMAT_DATE('%Y-%m-%d', DATE_SUB(effective_end_exclusive, INTERVAL 1 DAY)) AS period_end,
+  ROUND(mrr_end * 12.0, 2) AS arr
+FROM snapshot_rows
+WHERE ABS(mrr_end) > 1e-9
+ORDER BY customer_key ASC, bucket_start ASC
+`;
+
+  const params: BigQueryNamedParameter[] = [
+    { name: "start_date", type: "STRING", value: startDateIso },
+    { name: "end_date", type: "STRING", value: endDateIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+  ];
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+
+  return {
+    startDate: startDateIso,
+    endDate: endDateIso,
+    targetCurrency: targetCurrency.toUpperCase(),
+    rows: rows.map((row) => ({
+      customerKey: asString(row.customer_key),
+      periodKey: asString(row.period_key),
+      periodLabel: asString(row.period_label),
+      periodStart: asString(row.period_start),
+      periodEnd: asString(row.period_end),
+      arr: asNumber(row.arr),
+    })),
   };
 }
 
