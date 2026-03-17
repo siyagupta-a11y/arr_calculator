@@ -6,6 +6,7 @@ import { downloadSvgAsPng } from "@/lib/chartDownload";
 import type { ReportResponse, ReportRow } from "@/lib/types";
 
 type CombinedGrain = "daily" | "monthly" | "quarterly";
+type CacFxProvider = "frankfurter" | "currencylayer";
 
 type CombinedPoint = {
   key: string;
@@ -162,6 +163,7 @@ type CombinedOverviewData = {
   points: CombinedPoint[];
   retentionPoints: RetentionSeriesPoint[];
   cacPoints: CacPoint[];
+  cacCurrencyLayerPoints: CacPoint[];
 };
 
 function round2(n: number) {
@@ -436,6 +438,61 @@ function calculateRetentionRates(prevMrr: number, expansionMrr: number, contract
   };
 }
 
+function buildCostByMonth(points: QuickBooksSalesMarketingCostPoint[]) {
+  const byMonth = new Map<string, number>();
+  for (const point of points || []) {
+    const key = String(point.key || point.periodStart || "").trim().slice(0, 7);
+    if (!key) continue;
+    byMonth.set(key, round2((byMonth.get(key) || 0) + Number(point.totalCost || 0)));
+  }
+  return byMonth;
+}
+
+function buildCacSeries(
+  periodOrder: PeriodRef[],
+  grain: CombinedGrain,
+  costByMonth: Map<string, number>,
+  newCustomerCountByPeriod: Map<string, number>,
+): CacPoint[] {
+  return periodOrder.map((period) => {
+    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+    const salesMarketingCost = round2(costByMonth.get(key) || 0);
+    const newCustomerCount = newCustomerCountByPeriod.get(key) || 0;
+    const cac = newCustomerCount > 0 ? round2(salesMarketingCost / newCustomerCount) : 0;
+    const periodStart = grain === "monthly" ? `${key}-01` : key;
+    return {
+      key,
+      label: period.label,
+      periodStart,
+      periodEnd: periodStart,
+      salesMarketingCost,
+      newCustomerCount,
+      cac,
+    };
+  });
+}
+
+function buildCacAccountMatchNotice(
+  qbCosts: QuickBooksSalesMarketingCostResponse,
+  normalizedSelectedAccountIds: string[],
+) {
+  const matchedDepartmentCount = qbCosts.matchedDepartments?.length || 0;
+  if (
+    qbCosts.accountMatchMode === "selected_accounts" &&
+    normalizedSelectedAccountIds.length > 0 &&
+    qbCosts.matchedAccounts.length === 0
+  ) {
+    return "Selected CAC expense accounts returned no matching costs for this range. Update your account selection from the ... menu on the CAC chart.";
+  }
+  if (qbCosts.accountMatchMode === "department" && matchedDepartmentCount === 0) {
+    return "QuickBooks is connected, but no Sales/Marketing departments matched. Set QUICKBOOKS_CAC_DEPARTMENT_IDS or QUICKBOOKS_CAC_DEPARTMENT_NAMES.";
+  }
+  if (qbCosts.accountMatchMode !== "department" && qbCosts.matchedAccounts.length === 0) {
+    return "QuickBooks is connected, but no sales/marketing expense accounts matched in this range. Configure QUICKBOOKS_CAC_EXPENSE_ACCOUNT_NAMES if your account names differ.";
+  }
+  return null;
+}
+
 function csvEscape(value: string | number) {
   const text = String(value ?? "");
   if (/[",\n]/.test(text)) {
@@ -680,6 +737,13 @@ function LineChartCard<TPoint extends LineChartPointBase>({
 type CacChartCardProps = {
   points: CacPoint[];
   currency: string;
+  title?: string;
+  subtitle?: string;
+  accentColor?: string;
+  downloadFilename?: string;
+  tableTitle?: string;
+  tableAriaLabel?: string;
+  showAccountSelector?: boolean;
   expenseAccounts: QuickBooksExpenseAccount[];
   selectedAccountIds: string[];
   runLoading: boolean;
@@ -700,6 +764,13 @@ type CacChartCardProps = {
 function CacChartCard({
   points,
   currency,
+  title = "CAC Over Time",
+  subtitle = "CAC = Sales & Marketing Cost / Total Users. Click the chart to open the data table.",
+  accentColor = "#e879f9",
+  downloadFilename = "combined-billing-overview-cac-over-time",
+  tableTitle = "CAC Table",
+  tableAriaLabel = "CAC table",
+  showAccountSelector = true,
   expenseAccounts,
   selectedAccountIds,
   runLoading,
@@ -772,11 +843,11 @@ function CacChartCard({
     if (!chartRef.current || downloading) return;
     setDownloading(true);
     try {
-      await downloadSvgAsPng(chartRef.current, "combined-billing-overview-cac-over-time");
+      await downloadSvgAsPng(chartRef.current, downloadFilename);
     } finally {
       setDownloading(false);
     }
-  }, [downloading]);
+  }, [downloadFilename, downloading]);
 
   const exportTableCsv = () => {
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
@@ -796,9 +867,9 @@ function CacChartCard({
     <section className="stripe-ui__panel ui-reveal ui-reveal-2">
       <div className="stripe-ui__section-head">
         <div>
-          <h2 className="stripe-ui__panel-title">CAC Over Time</h2>
+          <h2 className="stripe-ui__panel-title">{title}</h2>
           <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-            CAC = Sales & Marketing Cost / Total Users. Click the chart to open the data table.
+            {subtitle}
           </p>
         </div>
         <div
@@ -811,16 +882,18 @@ function CacChartCard({
             position: "relative",
           }}
         >
-          <button
-            className="stripe-ui__btn stripe-ui__btn--ghost"
-            onClick={onToggleAccountMenu}
-            aria-haspopup="menu"
-            aria-expanded={accountMenuOpen}
-            title="Configure CAC expense accounts"
-            style={{ minWidth: "2.2rem", paddingInline: "0.55rem" }}
-          >
-            ...
-          </button>
+          {showAccountSelector ? (
+            <button
+              className="stripe-ui__btn stripe-ui__btn--ghost"
+              onClick={onToggleAccountMenu}
+              aria-haspopup="menu"
+              aria-expanded={accountMenuOpen}
+              title="Configure CAC expense accounts"
+              style={{ minWidth: "2.2rem", paddingInline: "0.55rem" }}
+            >
+              ...
+            </button>
+          ) : null}
           <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
             {downloading ? "Downloading..." : "Download SVG"}
           </button>
@@ -830,7 +903,7 @@ function CacChartCard({
               : "Hover on chart for values"}
           </div>
 
-          {accountMenuOpen && (
+          {showAccountSelector && accountMenuOpen && (
             <div
               className="stripe-ui__panel"
               style={{
@@ -982,7 +1055,7 @@ function CacChartCard({
                 );
               })}
 
-              <path d={pathD} fill="none" stroke="#e879f9" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+              <path d={pathD} fill="none" stroke={accentColor} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
 
               {hoverIndex != null && points[hoverIndex] && (
                 <line
@@ -1002,7 +1075,7 @@ function CacChartCard({
                   <text x={tooltipX + 10} y={tooltipY + 16} fill="#d9e6fa" fontSize="11.5">
                     {hoveredPoint.label}
                   </text>
-                  <text x={tooltipX + 10} y={tooltipY + 33} fill="#e879f9" fontSize="12.5" fontWeight="600">
+                  <text x={tooltipX + 10} y={tooltipY + 33} fill={accentColor} fontSize="12.5" fontWeight="600">
                     CAC: {formatMoney(hoveredPoint.cac, currency)}
                   </text>
                   <text x={tooltipX + 10} y={tooltipY + 50} fill="#d9e6fa" fontSize="11.5">
@@ -1020,7 +1093,7 @@ function CacChartCard({
                   cx={xAt(idx)}
                   cy={yAt(point.cac)}
                   r={hoverIndex === idx ? 4.6 : 3.2}
-                  fill="#e879f9"
+                  fill={accentColor}
                   data-tooltip={`${point.label}: CAC ${formatMoney(point.cac, currency)} | S&M ${formatMoney(point.salesMarketingCost, currency)} | Users ${Math.max(0, Math.round(point.newCustomerCount || 0))}`}
                   onMouseEnter={() => setHoverIndex(idx)}
                 />
@@ -1052,7 +1125,7 @@ function CacChartCard({
             <div className="stripe-ui__panel" style={{ marginTop: "0.9rem", padding: "0.85rem" }}>
               <div className="stripe-ui__section-head" style={{ marginBottom: "0.65rem" }}>
                 <h3 className="stripe-ui__panel-title" style={{ margin: 0, fontSize: "1rem" }}>
-                  CAC Table
+                  {tableTitle}
                 </h3>
                 <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
                   <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={exportTableCsv}>
@@ -1065,7 +1138,7 @@ function CacChartCard({
               </div>
 
               <div className="stripe-ui__table-wrap">
-                <table className="stripe-ui__table" aria-label="CAC table">
+                <table className="stripe-ui__table" aria-label={tableAriaLabel}>
                   <thead>
                     <tr>
                       <th>Period</th>
@@ -1866,6 +1939,7 @@ export default function CombinedBillingOverviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<CombinedOverviewData | null>(null);
   const [cacNotice, setCacNotice] = useState<string | null>(null);
+  const [cacCurrencyLayerNotice, setCacCurrencyLayerNotice] = useState<string | null>(null);
   const [selectedCacAccountIds, setSelectedCacAccountIds] = useState<string[]>([]);
   const [cacAccountMenuOpen, setCacAccountMenuOpen] = useState(false);
   const [cacExpenseAccounts, setCacExpenseAccounts] = useState<QuickBooksExpenseAccount[]>([]);
@@ -2022,6 +2096,7 @@ export default function CombinedBillingOverviewPage() {
     setLoading(true);
     setError(null);
     setCacNotice(null);
+    setCacCurrencyLayerNotice(null);
 
     try {
       const fetchJson = async <T,>(url: string, payload: unknown): Promise<T> => {
@@ -2319,7 +2394,9 @@ export default function CombinedBillingOverviewPage() {
       });
 
       let cacPoints: CacPoint[] = [];
+      let cacCurrencyLayerPoints: CacPoint[] = [];
       let nextCacNotice: string | null = null;
+      let nextCacCurrencyLayerNotice: string | null = null;
       const normalizedSelectedCacAccountIds = normalizeIdList(selectedCacAccountIds);
       const selectedCacAccountIdSet = new Set(normalizedSelectedCacAccountIds);
       const selectedCacAccountNames = Array.from(
@@ -2330,80 +2407,86 @@ export default function CombinedBillingOverviewPage() {
             .filter(Boolean),
         ),
       );
+      const emptyCacSeries = buildCacSeries(periodOrder, grain, new Map<string, number>(), combinedNewCustomerCountByPeriod);
       if (grain !== "monthly") {
         nextCacNotice = "CAC currently supports monthly grain. Switch Time grain to Monthly to load CAC over time.";
+        nextCacCurrencyLayerNotice =
+          "Currencylayer CAC currently supports monthly grain. Switch Time grain to Monthly to load CAC over time.";
+        cacPoints = emptyCacSeries;
+        cacCurrencyLayerPoints = emptyCacSeries;
       } else {
-        try {
-          const qbCosts = await fetchJson<QuickBooksSalesMarketingCostResponse>(
+        const cacRequestPayload = {
+          startDate,
+          endDate,
+          accountIds: normalizedSelectedCacAccountIds,
+          accountNames: selectedCacAccountNames,
+        };
+        const loadCacCosts = async (fxProvider: CacFxProvider) =>
+          fetchJson<QuickBooksSalesMarketingCostResponse>(
             "/api/quickbooks/sales-marketing-costs",
             {
-              startDate,
-              endDate,
-              accountIds: normalizedSelectedCacAccountIds,
-              accountNames: selectedCacAccountNames,
+              ...cacRequestPayload,
+              fxProvider,
             },
           );
-          if (isStale()) return;
-          const costByMonth = new Map<string, number>();
-          for (const point of qbCosts.points || []) {
-            const key = String(point.key || point.periodStart || "").trim().slice(0, 7);
-            if (!key) continue;
-            costByMonth.set(key, round2((costByMonth.get(key) || 0) + Number(point.totalCost || 0)));
-          }
 
-          cacPoints = periodOrder.map((period) => {
-            const key = canonicalHubPeriodKey(period.key, grain) || period.key;
-            const salesMarketingCost = round2(costByMonth.get(key) || 0);
-            const newCustomerCount = combinedNewCustomerCountByPeriod.get(key) || 0;
-            const cac = newCustomerCount > 0 ? round2(salesMarketingCost / newCustomerCount) : 0;
-            const periodStart =
-              grain === "monthly" ? `${key}-01` : key;
-            return {
-              key,
-              label: period.label,
-              periodStart,
-              periodEnd: periodStart,
-              salesMarketingCost,
-              newCustomerCount,
-              cac,
-            };
-          });
+        let frankfurterCosts: QuickBooksSalesMarketingCostResponse | null = null;
+        let currencyLayerCosts: QuickBooksSalesMarketingCostResponse | null = null;
+        let frankfurterError: unknown = null;
+        let currencyLayerError: unknown = null;
 
-          const matchedDepartmentCount = qbCosts.matchedDepartments?.length || 0;
-          if (
-            qbCosts.accountMatchMode === "selected_accounts" &&
-            normalizedSelectedCacAccountIds.length > 0 &&
-            qbCosts.matchedAccounts.length === 0
-          ) {
-            nextCacNotice =
-              "Selected CAC expense accounts returned no matching costs for this range. Update your account selection from the ... menu on the CAC chart.";
-          } else if (qbCosts.accountMatchMode === "department" && matchedDepartmentCount === 0) {
-            nextCacNotice =
-              "QuickBooks is connected, but no Sales/Marketing departments matched. Set QUICKBOOKS_CAC_DEPARTMENT_IDS or QUICKBOOKS_CAC_DEPARTMENT_NAMES.";
-          } else if (qbCosts.accountMatchMode !== "department" && qbCosts.matchedAccounts.length === 0) {
-            nextCacNotice =
-              "QuickBooks is connected, but no sales/marketing expense accounts matched in this range. Configure QUICKBOOKS_CAC_EXPENSE_ACCOUNT_NAMES if your account names differ.";
-          }
-        } catch (cacError: unknown) {
-          nextCacNotice = `CAC unavailable: ${conciseErrorMessage(cacError, "QuickBooks cost query failed.")}`;
-          cacPoints = periodOrder.map((period) => {
-            const key = canonicalHubPeriodKey(period.key, grain) || period.key;
-            const periodStart = grain === "monthly" ? `${key}-01` : key;
-            return {
-              key,
-              label: period.label,
-              periodStart,
-              periodEnd: periodStart,
-              salesMarketingCost: 0,
-              newCustomerCount: combinedNewCustomerCountByPeriod.get(key) || 0,
-              cac: 0,
-            };
-          });
+        await Promise.all([
+          (async () => {
+            try {
+              frankfurterCosts = await loadCacCosts("frankfurter");
+            } catch (e: unknown) {
+              frankfurterError = e;
+            }
+          })(),
+          (async () => {
+            try {
+              currencyLayerCosts = await loadCacCosts("currencylayer");
+            } catch (e: unknown) {
+              currencyLayerError = e;
+            }
+          })(),
+        ]);
+        if (isStale()) return;
+
+        if (frankfurterCosts) {
+          cacPoints = buildCacSeries(
+            periodOrder,
+            grain,
+            buildCostByMonth(frankfurterCosts.points || []),
+            combinedNewCustomerCountByPeriod,
+          );
+          nextCacNotice = buildCacAccountMatchNotice(frankfurterCosts, normalizedSelectedCacAccountIds);
+        } else {
+          nextCacNotice = `CAC unavailable: ${conciseErrorMessage(frankfurterError, "QuickBooks cost query failed.")}`;
+          cacPoints = emptyCacSeries;
+        }
+
+        if (currencyLayerCosts) {
+          cacCurrencyLayerPoints = buildCacSeries(
+            periodOrder,
+            grain,
+            buildCostByMonth(currencyLayerCosts.points || []),
+            combinedNewCustomerCountByPeriod,
+          );
+          const accountMatchNotice = buildCacAccountMatchNotice(currencyLayerCosts, normalizedSelectedCacAccountIds);
+          nextCacCurrencyLayerNotice = accountMatchNotice ? `Currencylayer CAC: ${accountMatchNotice}` : null;
+        } else {
+          nextCacCurrencyLayerNotice = `Currencylayer CAC unavailable: ${conciseErrorMessage(
+            currencyLayerError,
+            "QuickBooks cost query failed.",
+          )}`;
+          cacCurrencyLayerPoints = emptyCacSeries;
         }
       }
       if (isStale()) return;
 
       setCacNotice(nextCacNotice);
+      setCacCurrencyLayerNotice(nextCacCurrencyLayerNotice);
 
       setData({
         startDate,
@@ -2418,6 +2501,7 @@ export default function CombinedBillingOverviewPage() {
         points: combinedPoints,
         retentionPoints,
         cacPoints,
+        cacCurrencyLayerPoints,
       });
     } catch (e: unknown) {
       if (isStale()) return;
@@ -2432,6 +2516,7 @@ export default function CombinedBillingOverviewPage() {
   const points = useMemo(() => data?.points ?? [], [data]);
   const retentionPoints = useMemo(() => data?.retentionPoints ?? [], [data]);
   const cacPoints = useMemo(() => data?.cacPoints ?? [], [data]);
+  const cacCurrencyLayerPoints = useMemo(() => data?.cacCurrencyLayerPoints ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
 
   return (
@@ -2561,6 +2646,14 @@ export default function CombinedBillingOverviewPage() {
         </section>
       )}
 
+      {!loading && !error && cacCurrencyLayerNotice && (
+        <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+          <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+            {cacCurrencyLayerNotice}
+          </p>
+        </section>
+      )}
+
       {!loading && !error && data && (
         <>
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
@@ -2637,6 +2730,36 @@ export default function CombinedBillingOverviewPage() {
             <CacChartCard
               points={cacPoints}
               currency={currency}
+              expenseAccounts={cacExpenseAccounts}
+              selectedAccountIds={selectedCacAccountIds}
+              runLoading={loading}
+              accountMenuOpen={cacAccountMenuOpen}
+              accountsLoading={cacExpenseAccountsLoading}
+              accountsError={cacExpenseAccountsError}
+              savingDefaultSelection={savingCacDefaultSelection}
+              defaultSaveStatus={cacDefaultSaveStatus}
+              onToggleAccountMenu={toggleCacAccountMenu}
+              onRefreshAccounts={() => void loadCacExpenseAccounts()}
+              onToggleAccountSelection={toggleCacAccountSelection}
+              onSelectAllAccounts={selectAllCacAccounts}
+              onClearAccounts={clearCacAccounts}
+              onSaveDefaultSelection={() => void saveCacDefaultSelection()}
+              onApplySelection={() => {
+                setCacAccountMenuOpen(false);
+                void run();
+              }}
+            />
+
+            <CacChartCard
+              points={cacCurrencyLayerPoints}
+              currency={currency}
+              title="CAC Over Time (Currencylayer FX)"
+              subtitle="CAC = Sales & Marketing Cost / Total Users. Same CAC logic as above, with Currencylayer monthly FX conversion."
+              accentColor="#f97316"
+              downloadFilename="combined-billing-overview-cac-over-time-currencylayer"
+              tableTitle="CAC Table (Currencylayer FX)"
+              tableAriaLabel="CAC table using Currencylayer FX"
+              showAccountSelector={false}
               expenseAccounts={cacExpenseAccounts}
               selectedAccountIds={selectedCacAccountIds}
               runLoading={loading}

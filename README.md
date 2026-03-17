@@ -251,6 +251,8 @@ QuickBooks:
 ## Optional Tuning
 
 - `CRON_SECRET` (recommended)
+- `CURRENCYLAYER_ACCESS_KEY` (required for Currencylayer FX conversion on the secondary CAC chart)
+- `CURRENCYLAYER_BASE_URL` (optional, default `https://api.currencylayer.com`)
 - `STRIPE_LINE_FETCH_CONCURRENCY` (default `8`)
 - `STRIPE_REPORT_CACHE_TTL_MS` (default `300000`)
 - `STRIPE_REPORT_AUTO_SYNC` (default `false`)

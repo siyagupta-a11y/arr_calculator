@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { fetchQuickBooksSalesMarketingCostsByMonth } from "@/lib/quickbooks";
-import { getMonthlyAverageFxRateForCloseMonth } from "@/lib/fx";
+import {
+  getMonthlyAverageCurrencyLayerFxRateForCloseMonth,
+  getMonthlyAverageFxRateForCloseMonth,
+} from "@/lib/fx";
 import { FX_TARGET_CURRENCY } from "@/lib/logic";
 
 export const runtime = "nodejs";
@@ -11,6 +14,7 @@ type RequestBody = {
   endDate?: string;
   accountIds?: string[];
   accountNames?: string[];
+  fxProvider?: "frankfurter" | "currencylayer";
 };
 
 function normalizeIds(values: unknown) {
@@ -59,6 +63,11 @@ export async function POST(request: Request) {
     // Convert costs to target currency using monthly average FX rates
     const sourceCurrency = String(payload.currency || "").trim().toUpperCase();
     const targetCurrency = String(FX_TARGET_CURRENCY || "USD").trim().toUpperCase();
+    const fxProvider = String(body.fxProvider || "frankfurter").trim().toLowerCase();
+    const monthlyRateForMonth =
+      fxProvider === "currencylayer"
+        ? getMonthlyAverageCurrencyLayerFxRateForCloseMonth
+        : getMonthlyAverageFxRateForCloseMonth;
     if (sourceCurrency && targetCurrency && sourceCurrency !== targetCurrency && payload.points?.length) {
       // Collect unique month keys and fetch FX rates in parallel
       const monthKeys = [
@@ -72,7 +81,7 @@ export async function POST(request: Request) {
       await Promise.all(
         monthKeys.map(async (monthKey) => {
           const date = new Date(`${monthKey}-01T00:00:00Z`);
-          const fx = await getMonthlyAverageFxRateForCloseMonth(sourceCurrency, targetCurrency, date);
+          const fx = await monthlyRateForMonth(sourceCurrency, targetCurrency, date);
           fxMap.set(monthKey, fx.rate);
         }),
       );
