@@ -59,6 +59,7 @@ type HubspotAccountAggregate = {
 
 type StripeCustomerAggregate = {
   customerKey: string;
+  matchingKeys: Set<string>;
   valuesByPeriod: Record<string, number>;
 };
 
@@ -282,6 +283,7 @@ async function attachStripeKeysFromHubspotContacts(
 
 function buildStripeCustomerMap(rows: StripeThroughMrrCustomerArrRow[]) {
   const customers = new Map<string, StripeCustomerAggregate>();
+  const aliasesToCustomerKey = new Map<string, string>();
 
   for (const row of rows || []) {
     const key = normalizeStripeKey(row.customerKey);
@@ -290,24 +292,34 @@ function buildStripeCustomerMap(rows: StripeThroughMrrCustomerArrRow[]) {
     if (!customers.has(key)) {
       customers.set(key, {
         customerKey: key,
+        matchingKeys: new Set<string>([key]),
         valuesByPeriod: {},
       });
     }
 
     const bucket = customers.get(key)!;
+    aliasesToCustomerKey.set(key, key);
+    for (const customerId of row.customerIds || []) {
+      const normalized = normalizeStripeKey(customerId);
+      if (!normalized) continue;
+      bucket.matchingKeys.add(normalized);
+      if (!aliasesToCustomerKey.has(normalized)) aliasesToCustomerKey.set(normalized, key);
+    }
+
     const periodKey = String(row.periodKey || "").trim();
     if (!periodKey) continue;
     const arr = round2(Number(row.arr || 0));
     bucket.valuesByPeriod[periodKey] = round2((bucket.valuesByPeriod[periodKey] || 0) + arr);
   }
 
-  return customers;
+  return { customers, aliasesToCustomerKey };
 }
 
 function mergeStripeIntoHubspotAccounts(
   periods: Array<{ key: string; label: string }>,
   accounts: Map<string, HubspotAccountAggregate>,
   stripeCustomers: Map<string, StripeCustomerAggregate>,
+  aliasesToCustomerKey: Map<string, string>,
 ) {
   const claimedStripeCustomerKeys = new Set<string>();
   const sortedAccounts = Array.from(accounts.values()).sort((a, b) => a.accountKey.localeCompare(b.accountKey));
@@ -315,12 +327,16 @@ function mergeStripeIntoHubspotAccounts(
   for (const account of sortedAccounts) {
     const stripeKeys = Array.from(account.stripeKeys).sort();
     for (const stripeKey of stripeKeys) {
-      if (!stripeCustomers.has(stripeKey)) continue;
-      if (claimedStripeCustomerKeys.has(stripeKey)) continue;
+      const canonicalStripeKey = aliasesToCustomerKey.get(stripeKey);
+      if (!canonicalStripeKey) continue;
+      if (claimedStripeCustomerKeys.has(canonicalStripeKey)) continue;
 
-      const stripeCustomer = stripeCustomers.get(stripeKey)!;
-      claimedStripeCustomerKeys.add(stripeKey);
-      account.matchedStripeKeys.add(stripeKey);
+      const stripeCustomer = stripeCustomers.get(canonicalStripeKey);
+      if (!stripeCustomer) continue;
+      claimedStripeCustomerKeys.add(canonicalStripeKey);
+      for (const matchingKey of stripeCustomer.matchingKeys) {
+        account.matchedStripeKeys.add(matchingKey);
+      }
 
       for (const period of periods) {
         const value = round2(Number(stripeCustomer.valuesByPeriod[period.key] || 0));
@@ -394,12 +410,17 @@ export async function generateCombinedAllSubsReport(
   ]);
 
   const { periods, accounts, companyIdToAccountKey } = buildHubspotAccountMap(hubspotReport);
-  const stripeCustomers = buildStripeCustomerMap(stripeCustomerArr.rows || []);
+  const { customers: stripeCustomers, aliasesToCustomerKey } = buildStripeCustomerMap(stripeCustomerArr.rows || []);
   let matchedStripeCustomerKeys = new Set<string>();
 
   if (combineMode === "grouped") {
     await attachStripeKeysFromHubspotContacts(accounts, companyIdToAccountKey);
-    matchedStripeCustomerKeys = mergeStripeIntoHubspotAccounts(periods, accounts, stripeCustomers);
+    matchedStripeCustomerKeys = mergeStripeIntoHubspotAccounts(
+      periods,
+      accounts,
+      stripeCustomers,
+      aliasesToCustomerKey,
+    );
   }
 
   const rows: CombinedAllSubsRow[] = [];
@@ -435,7 +456,7 @@ export async function generateCombinedAllSubsReport(
       customerLabel: customerKey,
       accountId: "",
       accountName: "",
-      stripeKeys: [customerKey],
+      stripeKeys: Array.from(stripeCustomer.matchingKeys).sort(),
       matchedStripeKeys: [],
       hubspotValuesByPeriod: {},
       stripeValuesByPeriod: valuesByPeriod,
