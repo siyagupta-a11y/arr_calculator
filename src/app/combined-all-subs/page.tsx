@@ -213,6 +213,37 @@ export default function CombinedAllSubsPage() {
     downloadCsv(`combined-all-subs-full-${effectiveCombineMode}-${csvTimestamp()}.csv`, rows);
   }
 
+  function exportCombinedOnlyCsv() {
+    if (!data) return;
+    const header: Array<string> = [
+      "id",
+      "source",
+      "customer_label",
+      "account_id",
+      "account_name",
+    ];
+    for (const period of data.periods) {
+      header.push(`combined_arr_${period.key}`);
+    }
+
+    const rows: Array<Array<string | number>> = [header];
+    for (const row of data.rows) {
+      const cells: Array<string | number> = [
+        row.id,
+        row.source,
+        row.customerLabel,
+        row.accountId,
+        row.accountName,
+      ];
+      for (const period of data.periods) {
+        cells.push(Number(row.valuesByPeriod[period.key] || 0));
+      }
+      rows.push(cells);
+    }
+
+    downloadCsv(`combined-all-subs-combined-only-${effectiveCombineMode}-${csvTimestamp()}.csv`, rows);
+  }
+
   return (
     <div className="stripe-ui">
       <section className="stripe-ui__hero ui-reveal">
@@ -369,6 +400,9 @@ export default function CombinedAllSubsPage() {
                 </p>
               </div>
               <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={exportCombinedOnlyCsv}>
+                  Export Combined-Only CSV
+                </button>
                 <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={exportSummaryCsv}>
                   Export Summary CSV
                 </button>
