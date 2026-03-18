@@ -38,7 +38,7 @@ type CombinedAllSubsResponse = {
 
 function defaultDateRange() {
   const end = new Date();
-  const start = new Date(end.getFullYear() - 1, end.getMonth(), 1);
+  const start = new Date(end.getFullYear(), end.getMonth(), 1);
   const toIso = (value: Date) => value.toISOString().slice(0, 10);
   return {
     startDate: toIso(start),
@@ -101,7 +101,7 @@ export default function CombinedAllSubsPage() {
 
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
-  const [combineMode, setCombineMode] = useState<CombineMode>("grouped");
+  const [combineMode, setCombineMode] = useState<CombineMode>("simple");
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<CombinedAllSubsResponse | null>(null);

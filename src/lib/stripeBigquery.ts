@@ -2696,14 +2696,12 @@ events_base AS (
   SELECT
     t.event_timestamp,
     COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
-    COALESCE(
-      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_email')), '')),
-      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer.email')), '')),
-      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_details.email')), '')),
-      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.billing_details.email')), '')),
-      cl.customer_email,
-      NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''),
-      '(blank)'
+    LOWER(
+      COALESCE(
+        NULLIF(TRIM(cl.customer_email), ''),
+        NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''),
+        '(blank)'
+      )
     ) AS customer_key,
     CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
   FROM \`${table}\` AS t
@@ -2791,6 +2789,7 @@ SELECT
 FROM snapshot_rows sr
 LEFT JOIN customer_ids_by_key cik
   ON cik.customer_key = sr.customer_key
+WHERE ABS(sr.mrr_end) > 1e-9
 ORDER BY sr.customer_key ASC, sr.bucket_start ASC
 `;
 
