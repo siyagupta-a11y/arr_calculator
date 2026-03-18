@@ -1,5 +1,3 @@
-import { redirect } from "next/navigation";
+"use client";
 
-export default function CombinedAllSubsAliasPage() {
-  redirect("/combined-billing-overview");
-}
+export { default } from "../combined-billing-overview/page";
