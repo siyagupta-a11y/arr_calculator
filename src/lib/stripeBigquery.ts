@@ -1893,6 +1893,10 @@ customer_ids_in_scope AS (
 payment_methods_lookup AS (
   SELECT
     COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS payment_method_id,
+    COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    created AS payment_method_created,
+    COALESCE(NULLIF(TRIM(CAST(card_country AS STRING)), ''), '') AS card_country,
+    COALESCE(NULLIF(TRIM(CAST(billing_details_address_country AS STRING)), ''), '') AS billing_details_address_country,
     COALESCE(NULLIF(TRIM(CAST(sepa_debit_country AS STRING)), ''), '') AS sepa_debit_country,
     COALESCE(NULLIF(TRIM(CAST(sofort_country AS STRING)), ''), '') AS sofort_country
   FROM \`${paymentMethodsTable}\`
@@ -1922,6 +1926,33 @@ most_recent_charge_country_by_customer AS (
   WHERE charge_country IS NOT NULL
   GROUP BY customer_id
 ),
+most_recent_payment_method_country_by_customer AS (
+  SELECT
+    customer_id,
+    ARRAY_AGG(
+      payment_method_country IGNORE NULLS
+      ORDER BY payment_method_created DESC, payment_method_id DESC
+      LIMIT 1
+    )[OFFSET(0)] AS most_recent_payment_method_country
+  FROM (
+    SELECT
+      payment_method_id,
+      customer_id,
+      payment_method_created,
+      COALESCE(
+        NULLIF(TRIM(card_country), ''),
+        NULLIF(TRIM(billing_details_address_country), ''),
+        NULLIF(TRIM(sepa_debit_country), ''),
+        NULLIF(TRIM(sofort_country), '')
+      ) AS payment_method_country
+    FROM payment_methods_lookup
+    WHERE
+      customer_id IN (SELECT customer_id FROM customer_ids_in_scope)
+      AND customer_id <> '(blank)'
+  )
+  WHERE payment_method_country IS NOT NULL
+  GROUP BY customer_id
+),
 customer_country_inputs AS (
   SELECT
     ids.customer_id,
@@ -1929,6 +1960,7 @@ customer_country_inputs AS (
       NULLIF(TRIM(cl.address_country), ''),
       NULLIF(TRIM(cl.shipping_address_country), ''),
       NULLIF(TRIM(mr.most_recent_charge_country), ''),
+      NULLIF(TRIM(pm.most_recent_payment_method_country), ''),
       ''
     ) AS raw_customer_country,
     LOWER(
@@ -1937,6 +1969,7 @@ customer_country_inputs AS (
           NULLIF(TRIM(cl.address_country), ''),
           NULLIF(TRIM(cl.shipping_address_country), ''),
           NULLIF(TRIM(mr.most_recent_charge_country), ''),
+          NULLIF(TRIM(pm.most_recent_payment_method_country), ''),
           ''
         ),
         r'[^a-z0-9]',
@@ -1950,6 +1983,8 @@ customer_country_inputs AS (
     ON cl.customer_id = ids.customer_id
   LEFT JOIN most_recent_charge_country_by_customer mr
     ON mr.customer_id = ids.customer_id
+  LEFT JOIN most_recent_payment_method_country_by_customer pm
+    ON pm.customer_id = ids.customer_id
 ),
 customer_countries AS (
   SELECT
