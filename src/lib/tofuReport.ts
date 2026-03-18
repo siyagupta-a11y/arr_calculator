@@ -1,5 +1,6 @@
 import {
   generateCombinedAllSubsReport,
+  type CombinedAllSubsCombineMode,
   type CombinedAllSubsRequest,
   type CombinedAllSubsRow,
 } from "@/lib/combinedAllSubsReport";
@@ -20,6 +21,7 @@ export type TofuMonthRow = {
 export type TofuResponse = {
   startDate: string;
   endDate: string;
+  combineMode: CombinedAllSubsCombineMode;
   targetCurrency: string;
   rows: TofuMonthRow[];
 };
@@ -93,7 +95,10 @@ export async function generateTofuReport(request: TofuRequest): Promise<TofuResp
       const prev = monthBeforeRange(request.startDate);
       if (!prev) return null;
       try {
-        return await generateCombinedAllSubsReport(prev);
+        return await generateCombinedAllSubsReport({
+          ...prev,
+          combineMode: request.combineMode,
+        });
       } catch {
         return null;
       }
@@ -166,6 +171,7 @@ export async function generateTofuReport(request: TofuRequest): Promise<TofuResp
   return {
     startDate: main.startDate,
     endDate: main.endDate,
+    combineMode: main.combineMode,
     targetCurrency: main.targetCurrency,
     rows,
   };

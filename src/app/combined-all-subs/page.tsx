@@ -3,6 +3,8 @@
 import Link from "next/link";
 import React, { useMemo, useState } from "react";
 
+type CombineMode = "grouped" | "simple";
+
 type CombinedAllSubsRow = {
   id: string;
   source: "hubspot_account" | "stripe_only_customer";
@@ -19,6 +21,7 @@ type CombinedAllSubsRow = {
 type CombinedAllSubsResponse = {
   startDate: string;
   endDate: string;
+  combineMode: CombineMode;
   targetCurrency: string;
   periods: Array<{ key: string; label: string }>;
   totalsByPeriod: Array<{ key: string; label: string; total: number }>;
@@ -97,6 +100,7 @@ export default function CombinedAllSubsPage() {
 
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
+  const [combineMode, setCombineMode] = useState<CombineMode>("grouped");
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<CombinedAllSubsResponse | null>(null);
@@ -110,7 +114,7 @@ export default function CombinedAllSubsPage() {
       const res = await fetch("/api/combined-all-subs-report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startDate, endDate }),
+        body: JSON.stringify({ startDate, endDate, combineMode }),
       });
 
       const text = await res.text();
@@ -138,6 +142,7 @@ export default function CombinedAllSubsPage() {
   }
 
   const currency = data?.targetCurrency || "USD";
+  const effectiveCombineMode = data?.combineMode || combineMode;
   const lastKey = latestPeriodKey(data);
 
   function exportSummaryCsv() {
@@ -166,7 +171,7 @@ export default function CombinedAllSubsPage() {
         Number(row.valuesByPeriod[lastKey] || 0),
       ]),
     ];
-    downloadCsv(`combined-all-subs-summary-${csvTimestamp()}.csv`, rows);
+    downloadCsv(`combined-all-subs-summary-${effectiveCombineMode}-${csvTimestamp()}.csv`, rows);
   }
 
   function exportFullCsv() {
@@ -205,7 +210,7 @@ export default function CombinedAllSubsPage() {
       rows.push(cells);
     }
 
-    downloadCsv(`combined-all-subs-full-${csvTimestamp()}.csv`, rows);
+    downloadCsv(`combined-all-subs-full-${effectiveCombineMode}-${csvTimestamp()}.csv`, rows);
   }
 
   return (
@@ -216,9 +221,8 @@ export default function CombinedAllSubsPage() {
           <div>
             <h1 className="stripe-ui__title">Combined All Subs</h1>
             <p className="stripe-ui__subtitle">
-              Merges cloud-only HubSpot contracted ARR by account with Stripe through-MRR ARR by customer key.
-              HubSpot account contact Stripe IDs are used to attach Stripe customers to their account; unmatched Stripe
-              customers remain as standalone rows.
+              Compare two views of the same dataset: Grouped mode matches Stripe customers to HubSpot accounts via
+              associated contact Stripe IDs, while Simple mode just appends HubSpot and Stripe rows without matching.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -240,8 +244,8 @@ export default function CombinedAllSubsPage() {
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Report controls</h2>
-        <p className="stripe-ui__panel-subtitle">Pick a date range and run the merged ARR customer breakdown.</p>
-        <div className="stripe-ui__control-grid" style={{ gridTemplateColumns: "repeat(3, minmax(180px, 1fr))" }}>
+        <p className="stripe-ui__panel-subtitle">Pick date range and mode, then run the ARR customer breakdown.</p>
+        <div className="stripe-ui__control-grid" style={{ gridTemplateColumns: "repeat(4, minmax(180px, 1fr))" }}>
           <div className="stripe-ui__field">
             <label className="stripe-ui__field-label" htmlFor="combined-all-subs-start-date">
               Start date
@@ -266,6 +270,21 @@ export default function CombinedAllSubsPage() {
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
             />
+          </div>
+
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="combined-all-subs-combine-mode">
+              Combine mode
+            </label>
+            <select
+              id="combined-all-subs-combine-mode"
+              className="stripe-ui__control"
+              value={combineMode}
+              onChange={(e) => setCombineMode(e.target.value as CombineMode)}
+            >
+              <option value="grouped">Grouped (match HubSpot contacts to Stripe)</option>
+              <option value="simple">Simple (no matching; append HubSpot + Stripe)</option>
+            </select>
           </div>
 
           <div className="stripe-ui__field">
@@ -316,8 +335,14 @@ export default function CombinedAllSubsPage() {
                 <p className="stripe-ui__stat-value">{data?.summary.hubspotAccounts || 0}</p>
               </div>
               <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Accounts with Stripe match</p>
-                <p className="stripe-ui__stat-value">{data?.summary.hubspotAccountsWithStripeMatch || 0}</p>
+                <p className="stripe-ui__stat-label">
+                  {effectiveCombineMode === "grouped" ? "Accounts with Stripe match" : "Matching mode"}
+                </p>
+                <p className="stripe-ui__stat-value">
+                  {effectiveCombineMode === "grouped"
+                    ? data?.summary.hubspotAccountsWithStripeMatch || 0
+                    : "Simple (off)"}
+                </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Stripe-only customers</p>

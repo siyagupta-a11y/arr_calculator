@@ -3,6 +3,8 @@
 import Link from "next/link";
 import React, { useMemo, useState } from "react";
 
+type CombineMode = "grouped" | "simple";
+
 type TofuMonthRow = {
   periodKey: string;
   periodLabel: string;
@@ -17,6 +19,7 @@ type TofuMonthRow = {
 type TofuResponse = {
   startDate: string;
   endDate: string;
+  combineMode: CombineMode;
   targetCurrency: string;
   rows: TofuMonthRow[];
 };
@@ -56,6 +59,7 @@ export default function TofuPage() {
 
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
+  const [combineMode, setCombineMode] = useState<CombineMode>("grouped");
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<TofuResponse | null>(null);
@@ -69,7 +73,7 @@ export default function TofuPage() {
       const res = await fetch("/api/tofu-report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startDate, endDate }),
+        body: JSON.stringify({ startDate, endDate, combineMode }),
       });
 
       const text = await res.text();
@@ -97,6 +101,7 @@ export default function TofuPage() {
   }
 
   const currency = data?.targetCurrency || "USD";
+  const effectiveCombineMode = data?.combineMode || combineMode;
   const rows = data?.rows || [];
 
   return (
@@ -107,8 +112,8 @@ export default function TofuPage() {
           <div>
             <h1 className="stripe-ui__title">TOFU</h1>
             <p className="stripe-ui__subtitle">
-              Monthly ARR bridge from Combined All Subs showing Beginning, New, Expansion, Contraction, Churn, and
-              Ending ARR for each month in the selected range.
+              Monthly ARR bridge based on Combined All Subs. Choose Grouped mode to use contact-based matching, or
+              Simple mode to use the non-grouped HubSpot+Stripe table.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -127,8 +132,8 @@ export default function TofuPage() {
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Report controls</h2>
-        <p className="stripe-ui__panel-subtitle">Select date range and run monthly TOFU ARR breakdown.</p>
-        <div className="stripe-ui__control-grid" style={{ gridTemplateColumns: "repeat(3, minmax(180px, 1fr))" }}>
+        <p className="stripe-ui__panel-subtitle">Select date range and mode, then run monthly TOFU ARR breakdown.</p>
+        <div className="stripe-ui__control-grid" style={{ gridTemplateColumns: "repeat(4, minmax(180px, 1fr))" }}>
           <div className="stripe-ui__field">
             <label className="stripe-ui__field-label" htmlFor="tofu-start-date">
               Start date
@@ -153,6 +158,21 @@ export default function TofuPage() {
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
             />
+          </div>
+
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="tofu-combine-mode">
+              Combine mode
+            </label>
+            <select
+              id="tofu-combine-mode"
+              className="stripe-ui__control"
+              value={combineMode}
+              onChange={(e) => setCombineMode(e.target.value as CombineMode)}
+            >
+              <option value="grouped">Grouped (contact matching)</option>
+              <option value="simple">Simple (non-grouped append)</option>
+            </select>
           </div>
 
           <div className="stripe-ui__field">
@@ -201,6 +221,12 @@ export default function TofuPage() {
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Months</p>
                 <p className="stripe-ui__stat-value">{rows.length}</p>
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Mode</p>
+                <p className="stripe-ui__stat-value">
+                  {effectiveCombineMode === "grouped" ? "Grouped" : "Simple"}
+                </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Total New ARR</p>

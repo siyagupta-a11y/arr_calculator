@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { generateTofuReport, type TofuRequest } from "@/lib/tofuReport";
+import type { CombinedAllSubsCombineMode } from "@/lib/combinedAllSubsReport";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -8,6 +9,7 @@ function validateAndRun(body: Partial<TofuRequest>) {
   const payload: TofuRequest = {
     startDate: String(body.startDate || ""),
     endDate: String(body.endDate || ""),
+    combineMode: String(body.combineMode || "grouped") as CombinedAllSubsCombineMode,
   };
   return generateTofuReport(payload);
 }
@@ -34,6 +36,7 @@ export async function GET(req: Request) {
       await validateAndRun({
         startDate: searchParams.get("startDate") || "",
         endDate: searchParams.get("endDate") || "",
+        combineMode: String(searchParams.get("combineMode") || "grouped") as CombinedAllSubsCombineMode,
       }),
     );
   } catch (error: unknown) {

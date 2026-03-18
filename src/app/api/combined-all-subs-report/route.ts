@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   generateCombinedAllSubsReport,
+  type CombinedAllSubsCombineMode,
   type CombinedAllSubsRequest,
 } from "@/lib/combinedAllSubsReport";
 
@@ -11,6 +12,7 @@ function validateAndRun(body: Partial<CombinedAllSubsRequest>) {
   const payload: CombinedAllSubsRequest = {
     startDate: String(body.startDate || ""),
     endDate: String(body.endDate || ""),
+    combineMode: String(body.combineMode || "grouped") as CombinedAllSubsCombineMode,
   };
   return generateCombinedAllSubsReport(payload);
 }
@@ -38,6 +40,7 @@ export async function GET(req: Request) {
     const report = await validateAndRun({
       startDate: searchParams.get("startDate") || "",
       endDate: searchParams.get("endDate") || "",
+      combineMode: String(searchParams.get("combineMode") || "grouped") as CombinedAllSubsCombineMode,
     });
     return NextResponse.json(report);
   } catch (error: unknown) {
