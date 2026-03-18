@@ -184,8 +184,7 @@ function buildHubspotAccountMap(report: ReportResponse) {
   const companyIdToAccountKey = new Map<string, string>();
 
   const filteredRows: ReportRow[] = (report.rows || [])
-    .filter((row) => isCloudDeploymentType(String(row.deploymentType || "")))
-    .filter((row) => hasAnyNonZeroValue(row.valuesByPeriod || {}));
+    .filter((row) => isCloudDeploymentType(String(row.deploymentType || "")));
 
   for (const row of filteredRows) {
     const rawAccountId = String(row.accountId || "").trim();
@@ -405,6 +404,7 @@ export async function generateCombinedAllSubsReport(
 
   const rows: CombinedAllSubsRow[] = [];
   for (const account of accounts.values()) {
+    if (!hasAnyNonZeroValue(account.valuesByPeriod)) continue;
     rows.push({
       id: `hubspot:${account.accountKey}`,
       source: "hubspot_account",
@@ -462,10 +462,10 @@ export async function generateCombinedAllSubsReport(
     totalsByPeriod,
     rows: sortedRows,
     summary: {
-      hubspotAccounts: accounts.size,
+      hubspotAccounts: sortedRows.filter((row) => row.source === "hubspot_account").length,
       hubspotAccountsWithStripeMatch:
         combineMode === "grouped"
-          ? Array.from(accounts.values()).filter((account) => account.matchedStripeKeys.size > 0).length
+          ? sortedRows.filter((row) => row.source === "hubspot_account" && row.matchedStripeKeys.length > 0).length
           : 0,
       stripeCustomers: stripeCustomers.size,
       stripeCustomersMatched: combineMode === "grouped" ? matchedStripeCustomerKeys.size : 0,
