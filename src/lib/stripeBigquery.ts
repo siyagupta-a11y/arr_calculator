@@ -2537,7 +2537,6 @@ SELECT
 FROM snapshot_rows sr
 LEFT JOIN customer_ids_by_key cik
   ON cik.customer_key = sr.customer_key
-WHERE ABS(sr.mrr_end) > 1e-9
 ORDER BY sr.customer_key ASC, sr.bucket_start ASC
 `;
 

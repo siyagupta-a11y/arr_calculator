@@ -137,10 +137,6 @@ function parseStripeKeyTokens(raw: unknown) {
   );
 }
 
-function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
-  return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > 1e-9);
-}
-
 function isCloudDeploymentType(value: string) {
   return String(value || "").trim().toLowerCase() === "cloud";
 }
@@ -425,7 +421,6 @@ export async function generateCombinedAllSubsReport(
 
   const rows: CombinedAllSubsRow[] = [];
   for (const account of accounts.values()) {
-    if (!hasAnyNonZeroValue(account.valuesByPeriod)) continue;
     rows.push({
       id: `hubspot:${account.accountKey}`,
       source: "hubspot_account",
@@ -447,8 +442,6 @@ export async function generateCombinedAllSubsReport(
     for (const period of periods) {
       valuesByPeriod[period.key] = round2(Number(stripeCustomer.valuesByPeriod[period.key] || 0));
     }
-
-    if (!hasAnyNonZeroValue(valuesByPeriod)) continue;
 
     rows.push({
       id: `stripe:${customerKey}`,
