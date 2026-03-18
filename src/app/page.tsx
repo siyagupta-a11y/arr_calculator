@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
 
 export default function HomePage() {
-  redirect("/combined-billing-overview");
+  redirect("/combined-all-subs");
 }

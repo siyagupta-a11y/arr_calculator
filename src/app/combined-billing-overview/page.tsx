@@ -2514,15 +2514,15 @@ export default function CombinedBillingOverviewPage() {
         <div className="stripe-ui__eyebrow">Revenue intelligence</div>
         <div className="stripe-ui__hero-row">
           <div>
-            <h1 className="stripe-ui__title">Combined Billing Overview</h1>
+            <h1 className="stripe-ui__title">Combined All Subs</h1>
             <p className="stripe-ui__subtitle">
               Combined billing trends where each metric is HubSpot (contracted ARR cloud-only method) + Stripe Billing
               Overview (Stripe method) for the same period.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <Link href="/combined-billing-overview" className="stripe-ui__hero-link">
-              Open Combined Billing Overview
+            <Link href="/combined-all-subs" className="stripe-ui__hero-link">
+              Open Combined All Subs
             </Link>
             <Link href="/hubspot" className="stripe-ui__hero-link">
               Open HubSpot report
