@@ -7,6 +7,7 @@ type GroupBy =
   | "none"
   | "customer_id"
   | "country"
+  | "territory"
   | "product_id"
   | "price_id"
   | "subscription_id"
@@ -31,6 +32,7 @@ type RawDetailRow = {
   mrrChange: number;
   customerId: string;
   customerCountry: string;
+  customerTerritory: string;
   subscriptionId: string;
   subscriptionItemId: string;
   productId: string;
@@ -99,6 +101,7 @@ const GROUP_BY_OPTIONS: Array<{ key: GroupBy; label: string }> = [
   { key: "none", label: "No grouping (line items)" },
   { key: "customer_id", label: "Customer ID" },
   { key: "country", label: "Country" },
+  { key: "territory", label: "Territory" },
   { key: "email", label: "Email" },
   { key: "product_id", label: "Product ID" },
   { key: "price_id", label: "Price ID" },
@@ -421,6 +424,7 @@ export default function StripeThroughMrrPage() {
         "MRR change",
         "Customer ID",
         "Customer country",
+        "Customer territory",
         "Product ID",
         "Product description",
         "Price ID",
@@ -434,6 +438,7 @@ export default function StripeThroughMrrPage() {
         String(row.mrrChange),
         row.customerId || "(blank)",
         row.customerCountry || "N/A",
+        row.customerTerritory || "N/A",
         row.productId || "(blank)",
         row.productDescription || "",
         row.priceId || "(blank)",
@@ -898,6 +903,7 @@ export default function StripeThroughMrrPage() {
                       <th className="stripe-ui__num">MRR change</th>
                       <th>Customer</th>
                       <th>Country</th>
+                      <th>Territory</th>
                       <th>Product</th>
                       <th>Price</th>
                       <th>Subscription Item</th>
@@ -937,6 +943,7 @@ export default function StripeThroughMrrPage() {
                         </td>
                         <td>{row.customerId || "(blank)"}</td>
                         <td>{row.customerCountry || "N/A"}</td>
+                        <td>{row.customerTerritory || "N/A"}</td>
                         <td>{withDescription(row.productId, row.productDescription)}</td>
                         <td>{withDescription(row.priceId, row.priceDescription)}</td>
                         <td>{row.subscriptionItemId || "(blank)"}</td>

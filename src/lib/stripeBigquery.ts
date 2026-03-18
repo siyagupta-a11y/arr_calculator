@@ -1,4 +1,10 @@
 import { createSign } from "node:crypto";
+import {
+  canonicalCountryLabel,
+  canonicalTerritoryLabel,
+  countryCodeToTerritoryEntries,
+  countryNameKeyToCodeEntries,
+} from "@/lib/geo";
 import type { SyncedStripeLineItem } from "@/lib/stripeSyncStore";
 import type { ReportRow } from "@/lib/types";
 
@@ -70,6 +76,7 @@ export type StripeThroughMrrGroupBy =
   | "none"
   | "customer_id"
   | "country"
+  | "territory"
   | "product_id"
   | "price_id"
   | "subscription_id"
@@ -94,6 +101,7 @@ export type StripeThroughMrrRawDetailRow = {
   mrrChange: number;
   customerId: string;
   customerCountry: string;
+  customerTerritory: string;
   subscriptionId: string;
   subscriptionItemId: string;
   productId: string;
@@ -344,6 +352,18 @@ const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   BIGQUERY_SERVING_TS_UNIT: "BIGQUERY_STRIPE_ARR_CORRECT_SERVING_TS_UNIT",
   BIGQUERY_TS_UNIT: "BIGQUERY_STRIPE_ARR_CORRECT_TS_UNIT",
 };
+
+function escapeSqlString(value: string) {
+  return String(value || "").replace(/'/g, "''");
+}
+
+const COUNTRY_KEY_TO_CODE_SQL_WHENS = countryNameKeyToCodeEntries()
+  .map(({ key, code }) => `WHEN '${escapeSqlString(key)}' THEN '${escapeSqlString(code)}'`)
+  .join("\n      ");
+
+const COUNTRY_CODE_TO_TERRITORY_SQL_WHENS = countryCodeToTerritoryEntries()
+  .map(({ code, territory }) => `WHEN '${escapeSqlString(code)}' THEN '${escapeSqlString(territory)}'`)
+  .join("\n      ");
 
 function base64Url(input: Buffer | string) {
   const b = Buffer.isBuffer(input) ? input : Buffer.from(input, "utf8");
@@ -1623,8 +1643,12 @@ const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
     labelExpr: "customer_id",
   },
   country: {
-    keyExpr: "COALESCE(NULLIF(TRIM(customer_country), ''), 'N/A')",
-    labelExpr: "COALESCE(NULLIF(TRIM(customer_country), ''), 'N/A')",
+    keyExpr: "COALESCE(NULLIF(TRIM(customer_country_code), ''), NULLIF(TRIM(customer_country), ''), 'N/A')",
+    labelExpr: "COALESCE(NULLIF(TRIM(customer_country_code), ''), NULLIF(TRIM(customer_country), ''), 'N/A')",
+  },
+  territory: {
+    keyExpr: "COALESCE(NULLIF(TRIM(customer_territory), ''), 'N/A')",
+    labelExpr: "COALESCE(NULLIF(TRIM(customer_territory), ''), 'N/A')",
   },
   product_id: {
     keyExpr: "product_id",
@@ -1851,15 +1875,27 @@ most_recent_charge_country_by_customer AS (
   WHERE charge_country IS NOT NULL
   GROUP BY customer_id
 ),
-customer_countries AS (
+customer_country_inputs AS (
   SELECT
     ids.customer_id,
     COALESCE(
       NULLIF(TRIM(cl.address_country), ''),
       NULLIF(TRIM(cl.shipping_address_country), ''),
       NULLIF(TRIM(mr.most_recent_charge_country), ''),
-      'N/A'
-    ) AS customer_country,
+      ''
+    ) AS raw_customer_country,
+    LOWER(
+      REGEXP_REPLACE(
+        COALESCE(
+          NULLIF(TRIM(cl.address_country), ''),
+          NULLIF(TRIM(cl.shipping_address_country), ''),
+          NULLIF(TRIM(mr.most_recent_charge_country), ''),
+          ''
+        ),
+        r'[^a-z0-9]',
+        ''
+      )
+    ) AS raw_country_key,
     COALESCE(cl.customer_email, '') AS customer_email,
     cl.customer_created AS customer_created
   FROM customer_ids_in_scope ids
@@ -1867,6 +1903,54 @@ customer_countries AS (
     ON cl.customer_id = ids.customer_id
   LEFT JOIN most_recent_charge_country_by_customer mr
     ON mr.customer_id = ids.customer_id
+),
+customer_countries AS (
+  SELECT
+    cci.customer_id,
+    cci.raw_customer_country AS customer_country,
+    CASE
+      WHEN REGEXP_CONTAINS(TRIM(cci.raw_customer_country), r'^[A-Za-z]{2}$') THEN UPPER(TRIM(cci.raw_customer_country))
+      WHEN REGEXP_CONTAINS(TRIM(cci.raw_customer_country), r'^[A-Za-z]{3}$') THEN (
+        CASE UPPER(TRIM(cci.raw_customer_country))
+          WHEN 'USA' THEN 'US'
+          WHEN 'GBR' THEN 'GB'
+          WHEN 'ARE' THEN 'AE'
+          WHEN 'KOR' THEN 'KR'
+          WHEN 'PRK' THEN 'KP'
+          WHEN 'CZE' THEN 'CZ'
+          WHEN 'RUS' THEN 'RU'
+          WHEN 'VNM' THEN 'VN'
+          ELSE ''
+        END
+      )
+      ELSE (
+        CASE cci.raw_country_key
+      ${COUNTRY_KEY_TO_CODE_SQL_WHENS}
+          ELSE ''
+        END
+      )
+    END AS customer_country_code,
+    cci.customer_email AS customer_email,
+    cci.customer_created AS customer_created
+  FROM customer_country_inputs cci
+),
+customer_countries_enriched AS (
+  SELECT
+    cc.customer_id,
+    COALESCE(NULLIF(TRIM(cc.customer_country), ''), 'N/A') AS customer_country,
+    COALESCE(NULLIF(TRIM(cc.customer_country_code), ''), '') AS customer_country_code,
+    CASE
+      WHEN COALESCE(NULLIF(TRIM(cc.customer_country_code), ''), '') = '' THEN 'N/A'
+      ELSE (
+        CASE UPPER(TRIM(cc.customer_country_code))
+      ${COUNTRY_CODE_TO_TERRITORY_SQL_WHENS}
+          ELSE 'N/A'
+        END
+      )
+    END AS customer_territory,
+    COALESCE(cc.customer_email, '') AS customer_email,
+    cc.customer_created AS customer_created
+  FROM customer_countries cc
 ),
 enriched AS (
   SELECT
@@ -1877,6 +1961,8 @@ enriched AS (
     COALESCE(cc.customer_email, '') AS customer_email,
     cc.customer_created AS customer_created,
     COALESCE(cc.customer_country, 'N/A') AS customer_country,
+    COALESCE(cc.customer_country_code, '') AS customer_country_code,
+    COALESCE(cc.customer_territory, 'N/A') AS customer_territory,
     p.subscription_id,
     p.subscription_item_id,
     p.price_id,
@@ -1890,7 +1976,7 @@ enriched AS (
   FROM parsed p
   LEFT JOIN products_lookup pl
     ON pl.product_id = p.product_id
-  LEFT JOIN customer_countries cc
+  LEFT JOIN customer_countries_enriched cc
     ON cc.customer_id = p.customer_id
 )`;
 }
@@ -2105,6 +2191,8 @@ SELECT
   ROUND(mrr_change_major, 2) AS mrr_change,
   customer_id,
   customer_country,
+  customer_country_code,
+  customer_territory,
   subscription_id,
   subscription_item_id,
   product_id,
@@ -2177,9 +2265,11 @@ history_enriched AS (
     hs.*,
     COALESCE(cc.customer_email, '') AS customer_email,
     cc.customer_created AS customer_created,
-    COALESCE(cc.customer_country, 'N/A') AS customer_country
+    COALESCE(cc.customer_country, 'N/A') AS customer_country,
+    COALESCE(cc.customer_country_code, '') AS customer_country_code,
+    COALESCE(cc.customer_territory, 'N/A') AS customer_territory
   FROM history_source hs
-  LEFT JOIN customer_countries cc ON cc.customer_id = hs.customer_id
+  LEFT JOIN customer_countries_enriched cc ON cc.customer_id = hs.customer_id
 ),
 history_by_group AS (
   SELECT
@@ -2266,9 +2356,11 @@ history_enriched AS (
     hs.*,
     COALESCE(cc.customer_email, '') AS customer_email,
     cc.customer_created AS customer_created,
-    COALESCE(cc.customer_country, 'N/A') AS customer_country
+    COALESCE(cc.customer_country, 'N/A') AS customer_country,
+    COALESCE(cc.customer_country_code, '') AS customer_country_code,
+    COALESCE(cc.customer_territory, 'N/A') AS customer_territory
   FROM history_source hs
-  LEFT JOIN customer_countries cc ON cc.customer_id = hs.customer_id
+  LEFT JOIN customer_countries_enriched cc ON cc.customer_id = hs.customer_id
 ),
 history_by_group AS (
   SELECT
@@ -2406,6 +2498,12 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
   const detailMode: "raw" | "grouped" = groupBy === "none" ? "raw" : "grouped";
   const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
   const clampedPage = Math.min(page, totalPages);
+  const groupLabelForDisplay = (rawKey: string, rawLabel: string) => {
+    const raw = rawLabel || rawKey;
+    if (groupBy === "country") return canonicalCountryLabel(raw) || raw || "N/A";
+    if (groupBy === "territory") return canonicalTerritoryLabel(raw) || raw || "N/A";
+    return rawLabel || rawKey || "(blank)";
+  };
   const detailRows: Array<StripeThroughMrrRawDetailRow | StripeThroughMrrGroupedDetailRow> =
     detailMode === "raw"
       ? detailRowsRaw.map((row) => ({
@@ -2413,7 +2511,11 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
           eventType: asString(row.event_type),
           mrrChange: asNumber(row.mrr_change),
           customerId: asString(row.customer_id),
-          customerCountry: asString(row.customer_country) || "N/A",
+          customerCountry:
+            canonicalCountryLabel(asString(row.customer_country_code) || asString(row.customer_country)) ||
+            asString(row.customer_country) ||
+            "N/A",
+          customerTerritory: canonicalTerritoryLabel(asString(row.customer_territory)) || asString(row.customer_territory) || "N/A",
           subscriptionId: asString(row.subscription_id),
           subscriptionItemId: asString(row.subscription_item_id),
           productId: asString(row.product_id),
@@ -2423,7 +2525,7 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
         }))
       : detailRowsRaw.map((row) => ({
           groupKey: asString(row.group_key),
-          groupLabel: asString(row.group_label),
+          groupLabel: groupLabelForDisplay(asString(row.group_key), asString(row.group_label)),
           monthKey: asString(row.month_key),
           monthLabel: asString(row.month_label),
           eventCount: asInt(row.event_count),

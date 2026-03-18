@@ -3,6 +3,7 @@
 import Link from "next/link";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { downloadSvgAsPng } from "@/lib/chartDownload";
+import { canonicalCountryKey, canonicalCountryLabel, canonicalTerritoryLabel, resolveTerritoryLabel } from "@/lib/geo";
 import type { ReportRequest, ReportResponse, ReportRow, Grain, ReportMode, HubspotPlan } from "@/lib/types";
 
 function fmtMoney(n: number, currencyDisplay: CurrencyDisplay) {
@@ -79,7 +80,10 @@ type UiRow = {
 function groupValueForRow(r: UiRow, field: GroupField) {
   if (field === "dealName") return r.dealName || "(blank)";
   if (field === "deploymentType") return r.deploymentType || "(blank)";
-  if (field === "territory") return r.territory || "(blank)";
+  if (field === "territory") {
+    const territory = canonicalTerritoryLabel(String(r.territory || "").trim());
+    return territory || "(blank)";
+  }
   if (field === "country") {
     const country = String(r.country || "").trim();
     return country ? canonicalCountryLabel(country) : "(blank)";
@@ -99,37 +103,9 @@ function normalizeCaseInsensitiveValue(value: string) {
   return String(value || "").trim().toLowerCase();
 }
 
-function canonicalCountryKey(value: string) {
-  const normalized = normalizeCaseInsensitiveValue(value);
-  if (!normalized) return "";
-
-  const compact = normalized.replace(/[^a-z0-9]/g, "");
-
-  if (
-    compact === "us" ||
-    compact === "usa" ||
-    compact === "unitedstates" ||
-    compact === "unitedstatesofamerica"
-  ) {
-    return "united states";
-  }
-
-  if (compact === "uae" || compact === "unitedarabemirates") {
-    return "united arab emirates";
-  }
-
-  return normalized;
-}
-
-function canonicalCountryLabel(value: string) {
-  const key = canonicalCountryKey(value);
-  if (key === "united states") return "United States";
-  if (key === "united arab emirates") return "United Arab Emirates";
-  return String(value || "").trim();
-}
-
 function normalizeGroupKeyValue(field: GroupField, value: string) {
   if (field === "country") return canonicalCountryKey(value);
+  if (field === "territory") return normalizeCaseInsensitiveValue(canonicalTerritoryLabel(value));
   if (field === "plan") return normalizeCaseInsensitiveValue(value);
   return String(value || "").trim();
 }
@@ -264,7 +240,7 @@ function chartGroupDescriptorForRow(row: UiRow, field: ChartGroupField): ChartGr
     return { key: canonicalCountryKey(raw) || "(blank)", label: canonicalCountryLabel(raw) || "(blank)" };
   }
   if (field === "territory") {
-    const raw = String(row.territory || "").trim();
+    const raw = canonicalTerritoryLabel(String(row.territory || "").trim());
     return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
   }
   if (field === "plan") {
@@ -1389,7 +1365,7 @@ export default function Home() {
     if (!data) return [];
     const values = new Set<string>();
     for (const r of data.rows || []) {
-      const value = String(r.territory || "").trim();
+      const value = canonicalTerritoryLabel(String(r.territory || "").trim());
       if (value) values.add(value);
     }
     return Array.from(values).sort((a, b) => a.localeCompare(b));
@@ -1453,8 +1429,8 @@ export default function Home() {
       deploymentType: r.deploymentType || "",
       accountId: r.accountId || "",
       accountName: r.accountName || "",
-      territory: r.territory || "",
-      country: r.country || "",
+      country: canonicalCountryLabel(r.country || "") || "",
+      territory: resolveTerritoryLabel(r.territory || "", r.country || ""),
       industry: r.industry || "",
       dealType: r.dealType || "",
       plan: r.plan || "team",
@@ -1481,7 +1457,9 @@ export default function Home() {
       const dealNameOk = !dealNameNeedle || (r.dealName || "").toLowerCase().includes(dealNameNeedle);
       const deploymentTypeOk = filterDeploymentType === "all" || (r.deploymentType || "") === filterDeploymentType;
       const accountIdOk = !accountIdNeedle || (r.accountId || "").toLowerCase().includes(accountIdNeedle);
-      const territoryOk = filterTerritory === "all" || (r.territory || "") === filterTerritory;
+      const territoryOk =
+        filterTerritory === "all" ||
+        canonicalTerritoryLabel(r.territory || "") === canonicalTerritoryLabel(filterTerritory);
       const countryOk =
         filterCountry === "all" ||
         canonicalCountryKey(r.country || "") === canonicalCountryKey(filterCountry);
