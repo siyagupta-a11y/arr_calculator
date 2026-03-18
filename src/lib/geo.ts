@@ -47,20 +47,28 @@ const TERRITORY_ALIASES: Record<string, string> = {
   northamerica: "North America",
   americas: "North America",
   uscanada: "North America",
-  latam: "LATAM",
-  latinamerica: "LATAM",
-  latinamericacaribbean: "LATAM",
-  southamerica: "LATAM",
-  centralamerica: "LATAM",
-  apac: "APAC",
-  asiapacific: "APAC",
-  asia: "APAC",
-  anz: "APAC",
-  emea: "EMEA",
-  europemiddleeastafrica: "EMEA",
-  mea: "EMEA",
-  europe: "EMEA",
+  latam: "Latin America",
+  latinamerica: "Latin America",
+  latinamericacaribbean: "Latin America",
+  southamerica: "Latin America",
+  centralamerica: "Latin America",
+  apac: "Asia Pacific",
+  asiapacific: "Asia Pacific",
+  asia: "Asia Pacific",
+  anz: "Asia Pacific",
+  europe: "Europe",
+  eu: "Europe",
+  emea: "Europe",
+  europemiddleeastafrica: "Europe",
+  mea: "Middle East",
+  middleeast: "Middle East",
+  middleeastafrica: "Middle East",
+  gcc: "Middle East",
+  africa: "Africa",
+  af: "Africa",
 };
+
+const TERRITORY_KEYS_SPLIT_BY_COUNTRY = new Set(["emea", "europemiddleeastafrica", "middleeastafrica", "mea"]);
 
 const NORTH_AMERICA_CODES = new Set(["US", "CA", "GL", "PM"]);
 
@@ -177,6 +185,86 @@ const APAC_CODES = new Set([
   "WS",
 ]);
 
+const MIDDLE_EAST_CODES = new Set([
+  "AE",
+  "BH",
+  "CY",
+  "EG",
+  "IL",
+  "IQ",
+  "IR",
+  "JO",
+  "KW",
+  "LB",
+  "OM",
+  "PS",
+  "QA",
+  "SA",
+  "SY",
+  "TR",
+  "YE",
+]);
+
+const AFRICA_CODES = new Set([
+  "AO",
+  "BF",
+  "BI",
+  "BJ",
+  "BW",
+  "CD",
+  "CF",
+  "CG",
+  "CI",
+  "CM",
+  "CV",
+  "DJ",
+  "DZ",
+  "EH",
+  "ER",
+  "ET",
+  "GA",
+  "GH",
+  "GM",
+  "GN",
+  "GQ",
+  "GW",
+  "KE",
+  "KM",
+  "LR",
+  "LS",
+  "LY",
+  "MA",
+  "MG",
+  "ML",
+  "MR",
+  "MU",
+  "MW",
+  "MZ",
+  "NA",
+  "NE",
+  "NG",
+  "RE",
+  "RW",
+  "SC",
+  "SD",
+  "SH",
+  "SL",
+  "SN",
+  "SO",
+  "SS",
+  "ST",
+  "SZ",
+  "TD",
+  "TG",
+  "TN",
+  "TZ",
+  "UG",
+  "YT",
+  "ZA",
+  "ZM",
+  "ZW",
+]);
+
 let countryCodeToLabelCache: Map<string, string> | null = null;
 let countryNameKeyToCodeCache: Map<string, string> | null = null;
 let countryNameKeyToCodeEntriesCache: Array<{ key: string; code: string }> | null = null;
@@ -241,9 +329,11 @@ function territoryFromCountryCode(code: string) {
   const upper = String(code || "").trim().toUpperCase();
   if (!upper) return "";
   if (NORTH_AMERICA_CODES.has(upper)) return "North America";
-  if (LATAM_CODES.has(upper)) return "LATAM";
-  if (APAC_CODES.has(upper)) return "APAC";
-  return "EMEA";
+  if (LATAM_CODES.has(upper)) return "Latin America";
+  if (APAC_CODES.has(upper)) return "Asia Pacific";
+  if (MIDDLE_EAST_CODES.has(upper)) return "Middle East";
+  if (AFRICA_CODES.has(upper)) return "Africa";
+  return "Europe";
 }
 
 export function countryCodeFromValue(value: string) {
@@ -294,9 +384,16 @@ export function canonicalTerritoryLabel(value: string) {
 }
 
 export function resolveTerritoryLabel(rawTerritory: string, country: string) {
+  const territoryKey = normalizeLookupKey(rawTerritory);
+  const inferredFromCountry = territoryFromCountry(country);
+  if (TERRITORY_KEYS_SPLIT_BY_COUNTRY.has(territoryKey) && inferredFromCountry) {
+    return inferredFromCountry;
+  }
   const explicit = canonicalTerritoryLabel(rawTerritory);
   if (explicit) return explicit;
-  return territoryFromCountry(country);
+  if (inferredFromCountry) return inferredFromCountry;
+  if (TERRITORY_KEYS_SPLIT_BY_COUNTRY.has(territoryKey)) return "Europe";
+  return "";
 }
 
 export function countryNameKeyToCodeEntries() {
