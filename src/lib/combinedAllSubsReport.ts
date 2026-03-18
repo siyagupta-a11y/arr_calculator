@@ -125,18 +125,6 @@ function normalizeStripeKey(value: string) {
   return String(value || "").trim().toLowerCase();
 }
 
-function parseStripeKeyTokens(raw: unknown) {
-  return Array.from(
-    new Set(
-      String(raw || "")
-        .replace(/[\n\r\t]/g, " ")
-        .split(/[,\s;|]+/)
-        .map((part) => normalizeStripeKey(part))
-        .filter(Boolean),
-    ),
-  );
-}
-
 function isCloudDeploymentType(value: string) {
   return String(value || "").trim().toLowerCase() === "cloud";
 }
@@ -147,28 +135,6 @@ function targetCurrency() {
     String(process.env.STRIPE_ARR_CORRECT_TARGET_CURRENCY || "").trim() ||
     "USD"
   );
-}
-
-function contactStripeIdProperties() {
-  const fromEnv = [
-    String(process.env.HUBSPOT_CONTACT_STRIPE_ID_PROPS || "").trim(),
-    String(process.env.HUBSPOT_CONTACT_STRIPE_ID_PROP || "").trim(),
-  ]
-    .flatMap((value) => value.split(","))
-    .map((value) => value.trim())
-    .filter(Boolean);
-
-  const defaults = [
-    "stripe_id",
-    "stripe_customer_id",
-    "stripe_customer_ids",
-    "stripeid",
-    "stripe_customerid",
-    "stripe",
-    "stripe_id__c",
-  ];
-
-  return Array.from(new Set([...fromEnv, ...defaults]));
 }
 
 function buildHubspotAccountMap(report: ReportResponse) {
@@ -239,9 +205,7 @@ async function attachStripeKeysFromHubspotContacts(
   );
   if (!allContactIds.length) return;
 
-  const stripeProps = contactStripeIdProperties();
-  const contactProperties = Array.from(new Set(["email", ...stripeProps]));
-  const contactsById = await batchReadContacts(allContactIds, contactProperties);
+  const contactsById = await batchReadContacts(allContactIds, ["email"]);
 
   const contactIdsByAccountKey = new Map<string, Set<string>>();
   for (const pair of companyContactPairs) {
@@ -262,14 +226,6 @@ async function attachStripeKeysFromHubspotContacts(
     for (const contactId of contactIdSet) {
       const contact = contactsById.get(contactId);
       const properties = (contact?.properties || {}) as Record<string, unknown>;
-
-      for (const prop of stripeProps) {
-        const raw = properties[prop];
-        if (raw == null) continue;
-        for (const token of parseStripeKeyTokens(raw)) {
-          account.stripeKeys.add(token);
-        }
-      }
 
       const email = normalizeStripeKey(String(properties.email || ""));
       if (email) account.stripeKeys.add(email);
@@ -295,13 +251,6 @@ function buildStripeCustomerMap(rows: StripeThroughMrrCustomerArrRow[]) {
 
     const bucket = customers.get(key)!;
     aliasesToCustomerKey.set(key, key);
-    for (const customerId of row.customerIds || []) {
-      const normalized = normalizeStripeKey(customerId);
-      if (!normalized) continue;
-      bucket.matchingKeys.add(normalized);
-      if (!aliasesToCustomerKey.has(normalized)) aliasesToCustomerKey.set(normalized, key);
-    }
-
     const periodKey = String(row.periodKey || "").trim();
     if (!periodKey) continue;
     const arr = round2(Number(row.arr || 0));

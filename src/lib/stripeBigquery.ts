@@ -2423,6 +2423,7 @@ export async function queryStripeThroughMrrCustomerArrFromBigQuery(
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
   const table = getStripeArrCorrectMrrChangeTable();
+  const customersTable = getStripeCustomersTable();
 
   const query = `
 WITH bounds AS (
@@ -2441,20 +2442,29 @@ buckets AS (
   FROM bounds b
   CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.first_bucket_start, b.last_bucket_start, INTERVAL 1 MONTH)) AS month_start
 ),
+customers_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS customer_id,
+    LOWER(COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '')) AS customer_email
+  FROM \`${customersTable}\`
+),
 events_base AS (
   SELECT
     event_timestamp,
     COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(blank)') AS customer_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_email')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer.email')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_details.email')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.billing_details.email')), ''),
+      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_email')), '')),
+      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer.email')), '')),
+      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_details.email')), '')),
+      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.billing_details.email')), '')),
+      cl.customer_email,
       NULLIF(TRIM(CAST(customer_id AS STRING)), ''),
       '(blank)'
     ) AS customer_key,
     CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
   FROM \`${table}\` AS t
+  LEFT JOIN customers_lookup cl
+    ON cl.customer_id = COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(blank)')
   CROSS JOIN bounds b
   WHERE
     LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency

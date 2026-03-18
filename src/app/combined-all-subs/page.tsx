@@ -253,7 +253,7 @@ export default function CombinedAllSubsPage() {
             <h1 className="stripe-ui__title">Combined All Subs</h1>
             <p className="stripe-ui__subtitle">
               Compare two views of the same dataset: Grouped mode matches Stripe customers to HubSpot accounts via
-              associated contact Stripe IDs, while Simple mode just appends HubSpot and Stripe rows without matching.
+              associated contact emails, while Simple mode just appends HubSpot and Stripe rows without matching.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -313,7 +313,7 @@ export default function CombinedAllSubsPage() {
               value={combineMode}
               onChange={(e) => setCombineMode(e.target.value as CombineMode)}
             >
-              <option value="grouped">Grouped (match HubSpot contacts to Stripe)</option>
+              <option value="grouped">Grouped (match HubSpot contact emails to Stripe emails)</option>
               <option value="simple">Simple (no matching; append HubSpot + Stripe)</option>
             </select>
           </div>
@@ -418,7 +418,7 @@ export default function CombinedAllSubsPage() {
                   <tr>
                     <th>Customer</th>
                     <th>Source</th>
-                    <th>Matched Stripe IDs</th>
+                    <th>Matched Stripe Emails</th>
                     <th className="stripe-ui__num">HubSpot ({lastKey || "latest"})</th>
                     <th className="stripe-ui__num">Stripe ({lastKey || "latest"})</th>
                     <th className="stripe-ui__num">Combined ({lastKey || "latest"})</th>
