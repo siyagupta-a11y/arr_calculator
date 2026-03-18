@@ -2539,6 +2539,9 @@ export default function CombinedBillingOverviewPage() {
             <Link href="/combined-all-subs" className="stripe-ui__hero-link">
               Open Combined All Subs
             </Link>
+            <Link href="/tofu" className="stripe-ui__hero-link">
+              Open TOFU
+            </Link>
             <Link href="/ai-spend" className="stripe-ui__hero-link">
               Open AI spend
             </Link>
