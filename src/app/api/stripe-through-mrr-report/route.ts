@@ -16,6 +16,7 @@ const STRIPE_THROUGH_MRR_OPTIONS: { profile: StripeBigQueryProfile } = {
 const GROUP_BY_VALUES = new Set<StripeThroughMrrGroupBy>([
   "none",
   "customer_id",
+  "country",
   "product_id",
   "price_id",
   "subscription_id",

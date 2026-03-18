@@ -6,6 +6,7 @@ import React, { useMemo, useState } from "react";
 type GroupBy =
   | "none"
   | "customer_id"
+  | "country"
   | "product_id"
   | "price_id"
   | "subscription_id"
@@ -29,6 +30,7 @@ type RawDetailRow = {
   eventType: string;
   mrrChange: number;
   customerId: string;
+  customerCountry: string;
   subscriptionId: string;
   subscriptionItemId: string;
   productId: string;
@@ -96,6 +98,7 @@ const DETAIL_METRIC_OPTIONS: Array<{ key: DetailMetricKey; label: string }> = [
 const GROUP_BY_OPTIONS: Array<{ key: GroupBy; label: string }> = [
   { key: "none", label: "No grouping (line items)" },
   { key: "customer_id", label: "Customer ID" },
+  { key: "country", label: "Country" },
   { key: "email", label: "Email" },
   { key: "product_id", label: "Product ID" },
   { key: "price_id", label: "Price ID" },
@@ -412,12 +415,25 @@ export default function StripeThroughMrrPage() {
         }
         return true;
       });
-      const headers = ["Event timestamp (UTC)", "Event type", "MRR change", "Customer ID", "Product ID", "Product description", "Price ID", "Price description", "Subscription Item ID", "Subscription ID"];
+      const headers = [
+        "Event timestamp (UTC)",
+        "Event type",
+        "MRR change",
+        "Customer ID",
+        "Customer country",
+        "Product ID",
+        "Product description",
+        "Price ID",
+        "Price description",
+        "Subscription Item ID",
+        "Subscription ID",
+      ];
       const rows = filtered.map((row) => [
         row.eventTimestampUtc,
         row.eventType || "(blank)",
         String(row.mrrChange),
         row.customerId || "(blank)",
+        row.customerCountry || "N/A",
         row.productId || "(blank)",
         row.productDescription || "",
         row.priceId || "(blank)",
@@ -881,6 +897,7 @@ export default function StripeThroughMrrPage() {
                       <th>Event type</th>
                       <th className="stripe-ui__num">MRR change</th>
                       <th>Customer</th>
+                      <th>Country</th>
                       <th>Product</th>
                       <th>Price</th>
                       <th>Subscription Item</th>
@@ -919,6 +936,7 @@ export default function StripeThroughMrrPage() {
                           {formatMoney(row.mrrChange, summaryCurrency)}
                         </td>
                         <td>{row.customerId || "(blank)"}</td>
+                        <td>{row.customerCountry || "N/A"}</td>
                         <td>{withDescription(row.productId, row.productDescription)}</td>
                         <td>{withDescription(row.priceId, row.priceDescription)}</td>
                         <td>{row.subscriptionItemId || "(blank)"}</td>

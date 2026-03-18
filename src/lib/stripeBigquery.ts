@@ -69,6 +69,7 @@ export type StripeBigQueryReportPageResult = StripeBigQueryReportBase & {
 export type StripeThroughMrrGroupBy =
   | "none"
   | "customer_id"
+  | "country"
   | "product_id"
   | "price_id"
   | "subscription_id"
@@ -92,6 +93,7 @@ export type StripeThroughMrrRawDetailRow = {
   eventType: string;
   mrrChange: number;
   customerId: string;
+  customerCountry: string;
   subscriptionId: string;
   subscriptionItemId: string;
   productId: string;
@@ -324,6 +326,8 @@ const STRIPE_ARR_CORRECT_MRR_CHANGE_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta";
 const STRIPE_PRODUCTS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.products";
 const STRIPE_CUSTOMERS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.customers";
+const STRIPE_CHARGES_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.charges";
+const STRIPE_PAYMENT_METHODS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.payment_methods";
 const STRIPE_UPCOMING_SNAPSHOTS_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.latest_upcoming_invoice_line_snapshots";
 const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
@@ -332,6 +336,8 @@ const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   BIGQUERY_PROJECT_ID: "BIGQUERY_STRIPE_ARR_CORRECT_PROJECT_ID",
   BIGQUERY_LOCATION: "BIGQUERY_STRIPE_ARR_CORRECT_LOCATION",
   BIGQUERY_STRIPE_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_TABLE",
+  BIGQUERY_STRIPE_CHARGES_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_CHARGES_TABLE",
+  BIGQUERY_STRIPE_PAYMENT_METHODS_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_PAYMENT_METHODS_TABLE",
   BIGQUERY_STRIPE_SERVING_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_SERVING_TABLE",
   BIGQUERY_SERVING_SCHEMA_MODE: "BIGQUERY_STRIPE_ARR_CORRECT_SERVING_SCHEMA_MODE",
   BIGQUERY_SCHEMA_MODE: "BIGQUERY_STRIPE_ARR_CORRECT_SCHEMA_MODE",
@@ -671,6 +677,24 @@ function getBigQuerySourceConfig(profile: StripeBigQueryProfile = "default"): Bi
 function getStripeCustomersTable() {
   const configured = String(process.env.BIGQUERY_STRIPE_CUSTOMERS_TABLE || "").trim();
   return configured || STRIPE_CUSTOMERS_DEFAULT_TABLE;
+}
+
+function getStripeChargesTable(profile: StripeBigQueryProfile = "default") {
+  const envName =
+    profile === "stripe_arr_correct"
+      ? "BIGQUERY_STRIPE_ARR_CORRECT_CHARGES_TABLE"
+      : "BIGQUERY_STRIPE_CHARGES_TABLE";
+  const configured = String(process.env[envName] || "").trim();
+  return configured || STRIPE_CHARGES_DEFAULT_TABLE;
+}
+
+function getStripePaymentMethodsTable(profile: StripeBigQueryProfile = "default") {
+  const envName =
+    profile === "stripe_arr_correct"
+      ? "BIGQUERY_STRIPE_ARR_CORRECT_PAYMENT_METHODS_TABLE"
+      : "BIGQUERY_STRIPE_PAYMENT_METHODS_TABLE";
+  const configured = String(process.env[envName] || "").trim();
+  return configured || STRIPE_PAYMENT_METHODS_DEFAULT_TABLE;
 }
 
 function getStripeArrCorrectMrrChangeTable() {
@@ -1598,6 +1622,10 @@ const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
     keyExpr: "customer_id",
     labelExpr: "customer_id",
   },
+  country: {
+    keyExpr: "COALESCE(NULLIF(TRIM(customer_country), ''), 'N/A')",
+    labelExpr: "COALESCE(NULLIF(TRIM(customer_country), ''), 'N/A')",
+  },
   product_id: {
     keyExpr: "product_id",
     labelExpr:
@@ -1694,7 +1722,13 @@ function stripeBillingOverviewGroupSql(groupBy: StripeBillingOverviewGroupBy): {
   return STRIPE_BILLING_OVERVIEW_GROUP_BY_SQL[groupBy];
 }
 
-function buildStripeThroughMrrDetailBaseCte(table: string, productsTable: string, customersTable: string) {
+function buildStripeThroughMrrDetailBaseCte(
+  table: string,
+  productsTable: string,
+  customersTable: string,
+  chargesTable: string,
+  paymentMethodsTable: string,
+) {
   return `
 WITH source AS (
   SELECT
@@ -1770,17 +1804,79 @@ customers_lookup AS (
   SELECT
     COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS customer_id,
     COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '') AS customer_email,
+    COALESCE(NULLIF(TRIM(CAST(address_country AS STRING)), ''), '') AS address_country,
+    COALESCE(NULLIF(TRIM(CAST(shipping_address_country AS STRING)), ''), '') AS shipping_address_country,
     created AS customer_created
   FROM \`${customersTable}\`
 ) ,
+customer_ids_in_scope AS (
+  SELECT DISTINCT customer_id FROM parsed
+  UNION DISTINCT
+  SELECT DISTINCT
+    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id
+  FROM \`${table}\` t
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp < TIMESTAMP(@detail_start_month_date)
+),
+payment_methods_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS payment_method_id,
+    COALESCE(NULLIF(TRIM(CAST(sepa_debit_country AS STRING)), ''), '') AS sepa_debit_country,
+    COALESCE(NULLIF(TRIM(CAST(sofort_country AS STRING)), ''), '') AS sofort_country
+  FROM \`${paymentMethodsTable}\`
+),
+charge_countries AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(c.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    c.created AS charge_created,
+    COALESCE(
+      NULLIF(TRIM(CAST(c.card_country AS STRING)), ''),
+      NULLIF(TRIM(pm.sepa_debit_country), ''),
+      NULLIF(TRIM(pm.sofort_country), ''),
+      NULLIF(TRIM(CAST(c.shipping_address_country AS STRING)), '')
+    ) AS charge_country
+  FROM \`${chargesTable}\` c
+  LEFT JOIN payment_methods_lookup pm
+    ON pm.payment_method_id = COALESCE(NULLIF(TRIM(CAST(c.payment_method_id AS STRING)), ''), '(blank)')
+  WHERE
+    COALESCE(NULLIF(TRIM(CAST(c.customer_id AS STRING)), ''), '(blank)') IN (SELECT customer_id FROM customer_ids_in_scope)
+    AND COALESCE(NULLIF(TRIM(CAST(c.customer_id AS STRING)), ''), '(blank)') <> '(blank)'
+),
+most_recent_charge_country_by_customer AS (
+  SELECT
+    customer_id,
+    ARRAY_AGG(charge_country IGNORE NULLS ORDER BY charge_created DESC LIMIT 1)[OFFSET(0)] AS most_recent_charge_country
+  FROM charge_countries
+  WHERE charge_country IS NOT NULL
+  GROUP BY customer_id
+),
+customer_countries AS (
+  SELECT
+    ids.customer_id,
+    COALESCE(
+      NULLIF(TRIM(cl.address_country), ''),
+      NULLIF(TRIM(cl.shipping_address_country), ''),
+      NULLIF(TRIM(mr.most_recent_charge_country), ''),
+      'N/A'
+    ) AS customer_country,
+    COALESCE(cl.customer_email, '') AS customer_email,
+    cl.customer_created AS customer_created
+  FROM customer_ids_in_scope ids
+  LEFT JOIN customers_lookup cl
+    ON cl.customer_id = ids.customer_id
+  LEFT JOIN most_recent_charge_country_by_customer mr
+    ON mr.customer_id = ids.customer_id
+),
 enriched AS (
   SELECT
     p.event_timestamp,
     p.event_type,
     p.mrr_change_major,
     p.customer_id,
-    COALESCE(cl.customer_email, '') AS customer_email,
-    cl.customer_created AS customer_created,
+    COALESCE(cc.customer_email, '') AS customer_email,
+    cc.customer_created AS customer_created,
+    COALESCE(cc.customer_country, 'N/A') AS customer_country,
     p.subscription_id,
     p.subscription_item_id,
     p.price_id,
@@ -1794,8 +1890,8 @@ enriched AS (
   FROM parsed p
   LEFT JOIN products_lookup pl
     ON pl.product_id = p.product_id
-  LEFT JOIN customers_lookup cl
-    ON cl.customer_id = p.customer_id
+  LEFT JOIN customer_countries cc
+    ON cc.customer_id = p.customer_id
 )`;
 }
 
@@ -1858,6 +1954,8 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const table = getStripeArrCorrectMrrChangeTable();
   const productsTable = getStripeProductsTable(profile);
   const customersTable = getStripeCustomersTable();
+  const chargesTable = getStripeChargesTable(profile);
+  const paymentMethodsTable = getStripePaymentMethodsTable(profile);
 
   const monthlySummaryQuery = `
 WITH bounds AS (
@@ -1967,16 +2065,24 @@ WHERE
   }));
   const totalMrr = asNumber((totalMrrRows[0] || {}).total_mrr);
 
-  const detailBaseCte = buildStripeThroughMrrDetailBaseCte(table, productsTable, customersTable);
+  const detailBaseCte = buildStripeThroughMrrDetailBaseCte(
+    table,
+    productsTable,
+    customersTable,
+    chargesTable,
+    paymentMethodsTable,
+  );
   const detailBaseParams: BigQueryNamedParameter[] = [
     { name: "target_currency", type: "STRING", value: targetCurrency },
     { name: "detail_range_start_date", type: "STRING", value: detailRangeStartDateIso },
     { name: "detail_end_exclusive_date", type: "STRING", value: detailEndExclusiveDateIso },
+    { name: "detail_start_month_date", type: "STRING", value: detailStartMonthDateIso },
   ];
   const groupedDetailBaseParams: BigQueryNamedParameter[] = [
     { name: "target_currency", type: "STRING", value: targetCurrency },
     { name: "detail_range_start_date", type: "STRING", value: detailStartMonthDateIso },
     { name: "detail_end_exclusive_date", type: "STRING", value: detailEndExclusiveDateIso },
+    { name: "detail_start_month_date", type: "STRING", value: detailStartMonthDateIso },
   ];
 
   let totalRows = 0;
@@ -1998,6 +2104,7 @@ SELECT
   event_type,
   ROUND(mrr_change_major, 2) AS mrr_change,
   customer_id,
+  customer_country,
   subscription_id,
   subscription_item_id,
   product_id,
@@ -2068,9 +2175,11 @@ history_source AS (
 history_enriched AS (
   SELECT
     hs.*,
-    COALESCE(cl.customer_email, '') AS customer_email
+    COALESCE(cc.customer_email, '') AS customer_email,
+    cc.customer_created AS customer_created,
+    COALESCE(cc.customer_country, 'N/A') AS customer_country
   FROM history_source hs
-  LEFT JOIN customers_lookup cl ON cl.customer_id = hs.customer_id
+  LEFT JOIN customer_countries cc ON cc.customer_id = hs.customer_id
 ),
 history_by_group AS (
   SELECT
@@ -2094,10 +2203,7 @@ all_group_totals AS (
 SELECT
   COUNT(*) AS total_rows
 FROM all_group_totals`;
-    const countRows = await runBigQueryQueryRows(accessToken, projectId, location, countQuery, [
-      ...groupedDetailBaseParams,
-      { name: "detail_start_month_date", type: "STRING", value: detailStartMonthDateIso },
-    ]);
+    const countRows = await runBigQueryQueryRows(accessToken, projectId, location, countQuery, groupedDetailBaseParams);
     totalRows = asInt((countRows[0] || {}).total_rows);
     const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
     const clampedPage = Math.min(page, totalPages);
@@ -2158,10 +2264,11 @@ history_source AS (
 history_enriched AS (
   SELECT
     hs.*,
-    COALESCE(cl.customer_email, '') AS customer_email,
-    cl.customer_created AS customer_created
+    COALESCE(cc.customer_email, '') AS customer_email,
+    cc.customer_created AS customer_created,
+    COALESCE(cc.customer_country, 'N/A') AS customer_country
   FROM history_source hs
-  LEFT JOIN customers_lookup cl ON cl.customer_id = hs.customer_id
+  LEFT JOIN customer_countries cc ON cc.customer_id = hs.customer_id
 ),
 history_by_group AS (
   SELECT
@@ -2290,7 +2397,6 @@ FROM group_monthly_with_base gmb
 ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_start ASC`;
       detailRowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, rowsQuery, [
         ...groupedDetailBaseParams,
-        { name: "detail_start_month_date", type: "STRING", value: detailStartMonthDateIso },
         { name: "limit_rows", type: "INT64", value: String(pageSize) },
         { name: "offset_rows", type: "INT64", value: String(offsetRows) },
       ]);
@@ -2307,6 +2413,7 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
           eventType: asString(row.event_type),
           mrrChange: asNumber(row.mrr_change),
           customerId: asString(row.customer_id),
+          customerCountry: asString(row.customer_country) || "N/A",
           subscriptionId: asString(row.subscription_id),
           subscriptionItemId: asString(row.subscription_item_id),
           productId: asString(row.product_id),
