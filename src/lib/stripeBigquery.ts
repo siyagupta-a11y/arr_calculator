@@ -2450,25 +2450,25 @@ customers_lookup AS (
 ),
 events_base AS (
   SELECT
-    event_timestamp,
-    COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    t.event_timestamp,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
     COALESCE(
       LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_email')), '')),
       LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer.email')), '')),
       LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_details.email')), '')),
       LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.billing_details.email')), '')),
       cl.customer_email,
-      NULLIF(TRIM(CAST(customer_id AS STRING)), ''),
+      NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''),
       '(blank)'
     ) AS customer_key,
-    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+    CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
   FROM \`${table}\` AS t
   LEFT JOIN customers_lookup cl
-    ON cl.customer_id = COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(blank)')
+    ON cl.customer_id = COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)')
   CROSS JOIN bounds b
   WHERE
-    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
-    AND event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+    LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+    AND t.event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
 ),
 customer_ids_by_key AS (
   SELECT
