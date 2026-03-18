@@ -55,6 +55,12 @@ function firstNonEmptyProp(properties: Record<string, unknown>, candidates: stri
   return "";
 }
 
+function candidatePropertyNames(primary: string, extras: string[] = []) {
+  const cleanPrimary = String(primary || "").trim();
+  const withSuffix = cleanPrimary && !cleanPrimary.endsWith("__c") ? `${cleanPrimary}__c` : "";
+  return Array.from(new Set([cleanPrimary, withSuffix, ...extras].map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
 function parsePrimaryCompanyId(raw: string) {
   return (
     raw
@@ -179,26 +185,45 @@ export async function generateReport(
   const COMPANY_CUSTOMER_SUPPORT_APPLICATION_PROP =
     process.env.COMPANY_CUSTOMER_SUPPORT_APPLICATION_PROP || DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP;
   const dealCountryProps = Array.from(new Set([COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]));
-  const dealCompanySegmentProps = Array.from(new Set([DEAL_COMPANY_SEGMENT_PROP, "company_segment"]));
-  const dealPrimaryProjectTypeProps = Array.from(new Set([DEAL_PRIMARY_PROJECT_TYPE_PROP, "primary_project_type"]));
-  const dealCustomerSupportApplicationProps = Array.from(
-    new Set([DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP, "customer_support_application"]),
-  );
+  const dealCompanySegmentProps = candidatePropertyNames(DEAL_COMPANY_SEGMENT_PROP, [
+    "company_segment",
+    "segment",
+  ]);
+  const dealPrimaryProjectTypeProps = candidatePropertyNames(DEAL_PRIMARY_PROJECT_TYPE_PROP, [
+    "primary_project_type",
+    "primaryprojecttype",
+    "project_type",
+    "hs_primary_project_type",
+  ]);
+  const dealCustomerSupportApplicationProps = candidatePropertyNames(DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP, [
+    "customer_support_application",
+    "customersupportapplication",
+    "support_application",
+    "support_app",
+  ]);
   const companyCountryProps = Array.from(
     new Set([COMPANY_COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]),
   );
   const companyNameProps = Array.from(new Set([COMPANY_NAME_PROP, "name", "hs_name"]));
-  const companySegmentProps = Array.from(new Set([COMPANY_SEGMENT_PROP, DEAL_COMPANY_SEGMENT_PROP, "company_segment"]));
-  const companyPrimaryProjectTypeProps = Array.from(
-    new Set([COMPANY_PRIMARY_PROJECT_TYPE_PROP, DEAL_PRIMARY_PROJECT_TYPE_PROP, "primary_project_type"]),
-  );
-  const companyCustomerSupportApplicationProps = Array.from(
-    new Set([
-      COMPANY_CUSTOMER_SUPPORT_APPLICATION_PROP,
-      DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP,
-      "customer_support_application",
-    ]),
-  );
+  const companySegmentProps = candidatePropertyNames(COMPANY_SEGMENT_PROP, [
+    DEAL_COMPANY_SEGMENT_PROP,
+    "company_segment",
+    "segment",
+  ]);
+  const companyPrimaryProjectTypeProps = candidatePropertyNames(COMPANY_PRIMARY_PROJECT_TYPE_PROP, [
+    DEAL_PRIMARY_PROJECT_TYPE_PROP,
+    "primary_project_type",
+    "primaryprojecttype",
+    "project_type",
+    "hs_primary_project_type",
+  ]);
+  const companyCustomerSupportApplicationProps = candidatePropertyNames(COMPANY_CUSTOMER_SUPPORT_APPLICATION_PROP, [
+    DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP,
+    "customer_support_application",
+    "customersupportapplication",
+    "support_application",
+    "support_app",
+  ]);
 
   const dealProps = [
     "dealname",
@@ -210,9 +235,9 @@ export async function generateReport(
     TERRITORY_PROP,
     COUNTRY_PROP,
     INDUSTRY_PROP,
-    DEAL_COMPANY_SEGMENT_PROP,
-    DEAL_PRIMARY_PROJECT_TYPE_PROP,
-    DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP,
+    ...dealCompanySegmentProps,
+    ...dealPrimaryProjectTypeProps,
+    ...dealCustomerSupportApplicationProps,
   ];
 
   const deals = await fetchDealsInStage(dealProps, includedStage);
