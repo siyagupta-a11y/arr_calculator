@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type CombineMode = "grouped" | "simple";
 
@@ -23,6 +23,7 @@ type CombinedAllSubsResponse = {
   endDate: string;
   combineMode: CombineMode;
   targetCurrency: string;
+  warnings?: string[];
   periods: Array<{ key: string; label: string }>;
   totalsByPeriod: Array<{ key: string; label: string; total: number }>;
   rows: CombinedAllSubsRow[];
@@ -105,8 +106,9 @@ export default function CombinedAllSubsPage() {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<CombinedAllSubsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const hasAutoRun = useRef(false);
 
-  async function run() {
+  const run = useCallback(async () => {
     setLoading(true);
     setError(null);
 
@@ -139,7 +141,13 @@ export default function CombinedAllSubsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [combineMode, endDate, startDate]);
+
+  useEffect(() => {
+    if (hasAutoRun.current) return;
+    hasAutoRun.current = true;
+    void run();
+  }, [run]);
 
   const currency = data?.targetCurrency || "USD";
   const effectiveCombineMode = data?.combineMode || combineMode;
@@ -355,6 +363,17 @@ export default function CombinedAllSubsPage() {
             </button>
           </div>
         </div>
+      )}
+
+      {!loading && !error && data?.warnings && data.warnings.length > 0 && (
+        <section className="stripe-ui__panel ui-reveal ui-reveal-1">
+          <h2 className="stripe-ui__panel-title">Warnings</h2>
+          <div className="stripe-ui__panel-subtitle">
+            {data.warnings.map((warning, idx) => (
+              <div key={`warning:${idx}`}>{warning}</div>
+            ))}
+          </div>
+        </section>
       )}
 
       {!loading && !error && hasRunResult(data) && (

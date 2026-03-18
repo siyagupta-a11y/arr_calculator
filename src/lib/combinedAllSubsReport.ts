@@ -33,6 +33,7 @@ export type CombinedAllSubsResponse = {
   endDate: string;
   combineMode: CombinedAllSubsCombineMode;
   targetCurrency: string;
+  warnings?: string[];
   periods: Array<{ key: string; label: string }>;
   totalsByPeriod: Array<{ key: string; label: string; total: number }>;
   rows: CombinedAllSubsRow[];
@@ -185,6 +186,11 @@ function buildHubspotAccountMap(report: ReportResponse) {
   }
 
   return { periods, accounts, companyIdToAccountKey };
+}
+
+function summarizeErrorMessage(error: unknown) {
+  if (error instanceof Error) return String(error.message || "Unknown error");
+  return "Unknown error";
 }
 
 async function attachStripeKeysFromHubspotContacts(
@@ -356,16 +362,25 @@ export async function generateCombinedAllSubsReport(
 
   const { periods, accounts, companyIdToAccountKey } = buildHubspotAccountMap(hubspotReport);
   const { customers: stripeCustomers, aliasesToCustomerKey } = buildStripeCustomerMap(stripeCustomerArr.rows || []);
+  const warnings: string[] = [];
+  let effectiveCombineMode: CombinedAllSubsCombineMode = combineMode;
   let matchedStripeCustomerKeys = new Set<string>();
 
   if (combineMode === "grouped") {
-    await attachStripeKeysFromHubspotContacts(accounts, companyIdToAccountKey);
-    matchedStripeCustomerKeys = mergeStripeIntoHubspotAccounts(
-      periods,
-      accounts,
-      stripeCustomers,
-      aliasesToCustomerKey,
-    );
+    try {
+      await attachStripeKeysFromHubspotContacts(accounts, companyIdToAccountKey);
+      matchedStripeCustomerKeys = mergeStripeIntoHubspotAccounts(
+        periods,
+        accounts,
+        stripeCustomers,
+        aliasesToCustomerKey,
+      );
+    } catch (error: unknown) {
+      effectiveCombineMode = "simple";
+      warnings.push(
+        `Grouped matching is temporarily unavailable. Showing Simple mode results instead. Cause: ${summarizeErrorMessage(error)}`,
+      );
+    }
   }
 
   const rows: CombinedAllSubsRow[] = [];
@@ -385,7 +400,7 @@ export async function generateCombinedAllSubsReport(
   }
 
   for (const [customerKey, stripeCustomer] of stripeCustomers.entries()) {
-    if (combineMode === "grouped" && matchedStripeCustomerKeys.has(customerKey)) continue;
+    if (effectiveCombineMode === "grouped" && matchedStripeCustomerKeys.has(customerKey)) continue;
 
     const valuesByPeriod: Record<string, number> = {};
     for (const period of periods) {
@@ -419,21 +434,22 @@ export async function generateCombinedAllSubsReport(
   return {
     startDate,
     endDate,
-    combineMode,
+    combineMode: effectiveCombineMode,
     targetCurrency: String(target || "USD").toUpperCase(),
+    warnings,
     periods,
     totalsByPeriod,
     rows: sortedRows,
     summary: {
       hubspotAccounts: sortedRows.filter((row) => row.source === "hubspot_account").length,
       hubspotAccountsWithStripeMatch:
-        combineMode === "grouped"
+        effectiveCombineMode === "grouped"
           ? sortedRows.filter((row) => row.source === "hubspot_account" && row.matchedStripeKeys.length > 0).length
           : 0,
       stripeCustomers: stripeCustomers.size,
-      stripeCustomersMatched: combineMode === "grouped" ? matchedStripeCustomerKeys.size : 0,
+      stripeCustomersMatched: effectiveCombineMode === "grouped" ? matchedStripeCustomerKeys.size : 0,
       stripeCustomersOnly:
-        combineMode === "grouped"
+        effectiveCombineMode === "grouped"
           ? sortedRows.filter((row) => row.source === "stripe_only_customer").length
           : stripeCustomers.size,
     },
