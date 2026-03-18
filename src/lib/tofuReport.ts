@@ -2,7 +2,6 @@ import {
   generateCombinedAllSubsReport,
   type CombinedAllSubsCombineMode,
   type CombinedAllSubsRequest,
-  type CombinedAllSubsRow,
 } from "@/lib/combinedAllSubsReport";
 
 export type TofuRequest = CombinedAllSubsRequest;
@@ -62,23 +61,6 @@ function monthBeforeRange(startDate: string) {
   };
 }
 
-function latestPeriodValueForRow(row: CombinedAllSubsRow, periodKeys: string[]) {
-  if (!periodKeys.length) return 0;
-  const latestKey = periodKeys[periodKeys.length - 1];
-  return round2(Number(row.valuesByPeriod[latestKey] || 0));
-}
-
-function baselineByRowId(
-  baselineRows: CombinedAllSubsRow[],
-  baselinePeriodKeys: string[],
-) {
-  const output = new Map<string, number>();
-  for (const row of baselineRows || []) {
-    output.set(row.id, latestPeriodValueForRow(row, baselinePeriodKeys));
-  }
-  return output;
-}
-
 export async function generateTofuReport(request: TofuRequest): Promise<TofuResponse> {
   const start = parseIsoDateOnly(request.startDate);
   const end = parseIsoDateOnly(request.endDate);
@@ -89,34 +71,26 @@ export async function generateTofuReport(request: TofuRequest): Promise<TofuResp
     throw new Error("endDate must be >= startDate");
   }
 
-  const [main, baseline] = await Promise.all([
-    generateCombinedAllSubsReport(request),
-    (async () => {
-      const prev = monthBeforeRange(request.startDate);
-      if (!prev) return null;
-      try {
-        return await generateCombinedAllSubsReport({
-          ...prev,
-          combineMode: request.combineMode,
-        });
-      } catch {
-        return null;
-      }
-    })(),
-  ]);
+  const prev = monthBeforeRange(request.startDate);
+  const expandedRequest: CombinedAllSubsRequest = {
+    startDate: prev?.startDate || request.startDate,
+    endDate: request.endDate,
+    combineMode: request.combineMode,
+  };
+  const expanded = await generateCombinedAllSubsReport(expandedRequest);
 
-  const baselineValues = baselineByRowId(
-    baseline?.rows || [],
-    (baseline?.periods || []).map((period) => String(period.key || "")),
-  );
-
-  const periods = (main.periods || []).map((period) => ({
+  const allPeriods = (expanded.periods || []).map((period) => ({
     key: String(period.key || ""),
     label: String(period.label || period.key || ""),
   }));
+  const selectedStartMonthKey = String(request.startDate || "").slice(0, 7);
+  const periods = allPeriods.filter((period) => period.key >= selectedStartMonthKey);
+  const allPeriodKeys = allPeriods.map((period) => period.key);
 
   const rows: TofuMonthRow[] = periods.map((period, idx) => {
-    const prevKey = idx > 0 ? periods[idx - 1].key : "";
+    const selectedPrevKey = idx > 0 ? periods[idx - 1].key : "";
+    const allIdx = allPeriodKeys.indexOf(period.key);
+    const prevKey = selectedPrevKey || (allIdx > 0 ? allPeriodKeys[allIdx - 1] : "");
 
     let beginningArr = 0;
     let newArr = 0;
@@ -125,12 +99,12 @@ export async function generateTofuReport(request: TofuRequest): Promise<TofuResp
     let churnArr = 0;
     let endingArr = 0;
 
-    for (const row of main.rows || []) {
+    for (const row of expanded.rows || []) {
       const curr = round2(Number(row.valuesByPeriod[period.key] || 0));
       const prev = round2(
-        idx === 0
-          ? Number(baselineValues.get(row.id) || 0)
-          : Number(row.valuesByPeriod[prevKey] || 0),
+        prevKey
+          ? Number(row.valuesByPeriod[prevKey] || 0)
+          : 0,
       );
 
       beginningArr = round2(beginningArr + prev);
@@ -169,10 +143,10 @@ export async function generateTofuReport(request: TofuRequest): Promise<TofuResp
   });
 
   return {
-    startDate: main.startDate,
-    endDate: main.endDate,
-    combineMode: main.combineMode,
-    targetCurrency: main.targetCurrency,
+    startDate: request.startDate,
+    endDate: request.endDate,
+    combineMode: expanded.combineMode,
+    targetCurrency: expanded.targetCurrency,
     rows,
   };
 }
