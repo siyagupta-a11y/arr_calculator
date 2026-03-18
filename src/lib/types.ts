@@ -15,6 +15,11 @@ export type HubspotCompany = {
   properties?: Record<string, unknown>;
 };
 
+export type HubspotContact = {
+  id: string;
+  properties?: Record<string, unknown>;
+};
+
 export type HubspotLineItem = {
   id: string;
   properties?: HubspotLineItemProps;

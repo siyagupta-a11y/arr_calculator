@@ -54,7 +54,7 @@ type GroupedDetailRow = {
   churnMrr: number;
   monthEndMrr: number;
   monthEndArr: number;
-  associatedCustomerId?: string;
+  associatedCustomerIds?: string[];
 };
 
 type ApiResponse = {
@@ -179,6 +179,19 @@ function downloadCsv(filename: string, headers: string[], rows: string[][]) {
   URL.revokeObjectURL(url);
 }
 
+function mergeStringLists(current: string[] | undefined, next: string[] | undefined) {
+  const seen = new Set<string>();
+  for (const value of current || []) {
+    const normalized = String(value || "").trim();
+    if (normalized) seen.add(normalized);
+  }
+  for (const value of next || []) {
+    const normalized = String(value || "").trim();
+    if (normalized) seen.add(normalized);
+  }
+  return Array.from(seen);
+}
+
 export default function StripeThroughMrrPage() {
   const defaults = useMemo(() => defaultDateRange(), []);
 
@@ -289,7 +302,7 @@ export default function StripeThroughMrrPage() {
     const groupedRows = detailRows.filter(isGroupedRow);
     const byGroup = new Map<
       string,
-      { groupKey: string; groupLabel: string; associatedCustomerId?: string; totalNet: number; byMonth: Map<string, GroupedDetailRow> }
+      { groupKey: string; groupLabel: string; associatedCustomerIds: string[]; totalNet: number; byMonth: Map<string, GroupedDetailRow> }
     >();
     for (const row of groupedRows) {
       const mapKey = `${row.groupKey}|${row.groupLabel}`;
@@ -297,12 +310,13 @@ export default function StripeThroughMrrPage() {
         byGroup.set(mapKey, {
           groupKey: row.groupKey,
           groupLabel: row.groupLabel || row.groupKey || "(blank)",
-          associatedCustomerId: row.associatedCustomerId,
+          associatedCustomerIds: row.associatedCustomerIds || [],
           totalNet: 0,
           byMonth: new Map(),
         });
       }
       const entry = byGroup.get(mapKey)!;
+      entry.associatedCustomerIds = mergeStringLists(entry.associatedCustomerIds, row.associatedCustomerIds);
       entry.byMonth.set(row.monthKey, row);
       entry.totalNet += row.netMrrChange;
     }
@@ -347,14 +361,14 @@ export default function StripeThroughMrrPage() {
     return groupedMatrixRows.filter(
       (g) =>
         String(g.groupLabel || g.groupKey || "").toLowerCase().includes(needle) ||
-        (g.associatedCustomerId && String(g.associatedCustomerId).toLowerCase().includes(needle)),
+        g.associatedCustomerIds.some((customerId) => customerId.toLowerCase().includes(needle)),
     );
   }, [groupedMatrixRows, filterGroupSearch]);
 
   function buildGroupMatrix(rows: GroupedDetailRow[]) {
     const byGroup = new Map<
       string,
-      { groupKey: string; groupLabel: string; associatedCustomerId?: string; byMonth: Map<string, GroupedDetailRow> }
+      { groupKey: string; groupLabel: string; associatedCustomerIds: string[]; byMonth: Map<string, GroupedDetailRow> }
     >();
     for (const row of rows) {
       const mapKey = `${row.groupKey}|${row.groupLabel}`;
@@ -362,11 +376,13 @@ export default function StripeThroughMrrPage() {
         byGroup.set(mapKey, {
           groupKey: row.groupKey,
           groupLabel: row.groupLabel || row.groupKey || "(blank)",
-          associatedCustomerId: row.associatedCustomerId,
+          associatedCustomerIds: row.associatedCustomerIds || [],
           byMonth: new Map(),
         });
       }
-      byGroup.get(mapKey)!.byMonth.set(row.monthKey, row);
+      const entry = byGroup.get(mapKey)!;
+      entry.associatedCustomerIds = mergeStringLists(entry.associatedCustomerIds, row.associatedCustomerIds);
+      entry.byMonth.set(row.monthKey, row);
     }
     return Array.from(byGroup.values());
   }
@@ -464,19 +480,19 @@ export default function StripeThroughMrrPage() {
         ? allMatrix.filter(
             (g) =>
               String(g.groupLabel || g.groupKey || "").toLowerCase().includes(needle) ||
-              (g.associatedCustomerId && String(g.associatedCustomerId).toLowerCase().includes(needle)),
+              g.associatedCustomerIds.some((customerId) => customerId.toLowerCase().includes(needle)),
           )
         : allMatrix;
       const metricHeaders = detailMonthsInRange.flatMap((month) =>
         selectedMetrics.map((metric) => `${month.monthLabel} - ${DETAIL_METRIC_OPTIONS.find((o) => o.key === metric)?.label || metric}`),
       );
-      const baseHeaders = groupBy === "email" ? ["Group", "Customer ID", ...metricHeaders] : ["Group", ...metricHeaders];
+      const baseHeaders = groupBy === "email" ? ["Group", "Customer IDs", ...metricHeaders] : ["Group", ...metricHeaders];
       const csvRows = filtered.map((group) => {
         const values = detailMonthsInRange.flatMap((month) =>
           selectedMetrics.map((metric) => String(metricValue(group.byMonth.get(month.monthKey), metric))),
         );
         return groupBy === "email"
-          ? [group.groupLabel || group.groupKey || "(blank)", group.associatedCustomerId || "", ...values]
+          ? [group.groupLabel || group.groupKey || "(blank)", group.associatedCustomerIds.join(" | "), ...values]
           : [group.groupLabel || group.groupKey || "(blank)", ...values];
       });
       downloadCsv("stripe-through-mrr-detail-grouped.csv", baseHeaders, csvRows);
@@ -913,7 +929,7 @@ export default function StripeThroughMrrPage() {
                     <>
                       <tr>
                         <th rowSpan={2}>Group</th>
-                        {groupBy === "email" && <th rowSpan={2}>Customer ID</th>}
+                        {groupBy === "email" && <th rowSpan={2}>Customer IDs</th>}
                         {detailMonthsInRange.map((month) => (
                           <th key={month.monthKey} className="stripe-ui__num" colSpan={selectedMetrics.length}>
                             {month.monthLabel}
@@ -953,7 +969,7 @@ export default function StripeThroughMrrPage() {
                     : filteredGroupedMatrixRows.map((group) => (
                         <tr key={`${group.groupKey}|${group.groupLabel}`}>
                           <td>{group.groupLabel || group.groupKey || "(blank)"}</td>
-                          {groupBy === "email" && <td>{group.associatedCustomerId || ""}</td>}
+                          {groupBy === "email" && <td>{group.associatedCustomerIds.join(", ")}</td>}
                           {detailMonthsInRange.flatMap((month) =>
                             selectedMetrics.map((metric) => {
                               const value = metricValue(group.byMonth.get(month.monthKey), metric);

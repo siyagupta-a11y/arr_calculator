@@ -5,12 +5,16 @@ This is a Next.js ARR dashboard.
 - `/` HubSpot ARR report
 - `/stripe` Stripe ARR report
 - `/stripe-arr-correct` Stripe ARR (Correct) report
+- `/combined-all-subs` Combined ARR by customer (HubSpot cloud C-ARR + Stripe through-MRR merge)
+- `/tofu` Monthly TOFU ARR bridge (Beginning/New/Expansion/Contraction/Churn/Ending)
 - `/quickbooks` QuickBooks OAuth + data access page
 - `POST /api/report` HubSpot report API
 - `GET|POST /api/stripe-report` Stripe report API
 - `GET /api/stripe-report/export` Stripe full CSV export API (all filtered/grouped rows)
 - `GET|POST /api/stripe-arr-correct-report` Stripe ARR (Correct) API (BigQuery profile)
 - `GET /api/stripe-arr-correct-report/export` Stripe ARR (Correct) CSV export API
+- `GET|POST /api/combined-all-subs-report` Combined HubSpot+Stripe customer ARR API
+- `GET|POST /api/tofu-report` Monthly TOFU ARR bridge API based on Combined All Subs
 - `GET|POST /api/stripe-sync` Stripe sync API
 - `GET /api/stripe-sync/status` Stripe sync health/status API
 - `GET|POST /api/stripe-bigquery-refresh` Rebuild Stripe external BigQuery tables from GCS bucket folders

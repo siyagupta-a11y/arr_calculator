@@ -1,5 +1,11 @@
 // lib/hubspot.ts
-import { HubspotCompany, HubspotDeal, HubspotLineItem, HubspotSearchResponse } from "./types";
+import {
+  HubspotCompany,
+  HubspotContact,
+  HubspotDeal,
+  HubspotLineItem,
+  HubspotSearchResponse,
+} from "./types";
 
 const HUBSPOT_BASE = "https://api.hubapi.com";
 const HUBSPOT_ASSOC_CONCURRENCY = 4;
@@ -13,7 +19,9 @@ type CacheEntry<T> = { value: T; expiresAt: number };
 
 const DEALS_CACHE = new Map<string, CacheEntry<HubspotDeal[]>>();
 const DEAL_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
+const COMPANY_CONTACT_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
 const COMPANY_CACHE = new Map<string, CacheEntry<HubspotCompany>>();
+const CONTACT_CACHE = new Map<string, CacheEntry<HubspotContact>>();
 const LINE_ITEM_CACHE = new Map<string, CacheEntry<HubspotLineItem>>();
 
 function getToken() {
@@ -103,6 +111,16 @@ type DealLineItemBatchAssociationResponse = {
   }>;
 };
 
+type CompanyContactAssociationResponse = {
+  results?: Array<{ id?: string | number }>;
+};
+
+type CompanyContactBatchAssociationResponse = {
+  results?: Array<{
+    from?: { id?: string | number };
+    to?: Array<{ toObjectId?: string | number; id?: string | number }>;
+  }>;
+};
 
 export type HubspotDealPropertyUpdate = {
   dealId: string;
@@ -244,6 +262,87 @@ export async function fetchLineItemIdsForDeals(dealIds: string[]) {
   return dealIds.map((dealId) => ({ dealId, ids: out.get(dealId) || [] }));
 }
 
+export async function fetchContactIdsForCompany(companyId: string) {
+  const cached = readCache(COMPANY_CONTACT_ASSOC_CACHE, companyId);
+  if (cached) return cached;
+
+  const url = `${HUBSPOT_BASE}/crm/v3/objects/companies/${companyId}/associations/contacts`;
+  const json = (await hsFetch(url)) as CompanyContactAssociationResponse;
+  const ids = (json.results || [])
+    .map((r) => String(r.id || ""))
+    .filter((id) => !!id);
+  writeCache(COMPANY_CONTACT_ASSOC_CACHE, companyId, ids);
+  return ids;
+}
+
+export async function fetchContactIdsForCompanies(companyIds: string[]) {
+  const dedupedCompanyIds = Array.from(new Set(companyIds.filter((id) => !!id)));
+  const out = new Map<string, string[]>();
+
+  const pending: string[] = [];
+  for (const companyId of dedupedCompanyIds) {
+    const cached = readCache(COMPANY_CONTACT_ASSOC_CACHE, companyId);
+    if (cached) out.set(companyId, cached);
+    else pending.push(companyId);
+  }
+
+  if (pending.length) {
+    let resolvedByBatch = false;
+    try {
+      const batchUrl = `${HUBSPOT_BASE}/crm/v4/associations/companies/contacts/batch/read`;
+      const chunkSize = 100;
+      const chunks: string[][] = [];
+      for (let i = 0; i < pending.length; i += chunkSize) chunks.push(pending.slice(i, i + chunkSize));
+
+      const chunkResults = await mapWithConcurrency(
+        chunks,
+        HUBSPOT_ASSOC_BATCH_CONCURRENCY,
+        async (chunk): Promise<CompanyContactBatchAssociationResponse> => {
+          const json = (await hsFetch(batchUrl, {
+            method: "POST",
+            body: JSON.stringify({ inputs: chunk.map((id) => ({ id })) }),
+          })) as CompanyContactBatchAssociationResponse;
+          return json;
+        },
+      );
+
+      const seenInBatch = new Set<string>();
+      for (const chunkResult of chunkResults) {
+        for (const assoc of chunkResult.results || []) {
+          const companyId = String(assoc.from?.id || "");
+          if (!companyId) continue;
+          seenInBatch.add(companyId);
+          const ids = (assoc.to || [])
+            .map((t) => String(t.toObjectId || t.id || ""))
+            .filter((id) => !!id);
+          out.set(companyId, ids);
+          writeCache(COMPANY_CONTACT_ASSOC_CACHE, companyId, ids);
+        }
+      }
+
+      for (const companyId of pending) {
+        if (!seenInBatch.has(companyId)) {
+          out.set(companyId, []);
+          writeCache(COMPANY_CONTACT_ASSOC_CACHE, companyId, []);
+        }
+      }
+      resolvedByBatch = true;
+    } catch {
+      resolvedByBatch = false;
+    }
+
+    if (!resolvedByBatch) {
+      const pairs = await mapWithConcurrency(pending, HUBSPOT_ASSOC_CONCURRENCY, async (companyId) => {
+        const ids = await fetchContactIdsForCompany(companyId);
+        return { companyId, ids };
+      });
+      for (const pair of pairs) out.set(pair.companyId, pair.ids);
+    }
+  }
+
+  return companyIds.map((companyId) => ({ companyId, ids: out.get(companyId) || [] }));
+}
+
 export async function batchReadLineItems(ids: string[], properties: string[]) {
   const url = `${HUBSPOT_BASE}/crm/v3/objects/line_items/batch/read`;
   const map = new Map<string, HubspotLineItem>();
@@ -321,6 +420,47 @@ export async function batchReadCompanies(ids: string[], properties: string[]) {
       const id = String(company.id);
       map.set(id, company);
       writeCache(COMPANY_CACHE, `${id}|${propsCacheKey}`, company);
+    });
+  }
+
+  return map;
+}
+
+export async function batchReadContacts(ids: string[], properties: string[]) {
+  const url = `${HUBSPOT_BASE}/crm/v3/objects/contacts/batch/read`;
+  const map = new Map<string, HubspotContact>();
+
+  const dedupedIds = Array.from(new Set(ids.filter((id) => !!id)));
+  const missingIds: string[] = [];
+
+  for (const id of dedupedIds) {
+    const cached = readCache(CONTACT_CACHE, id);
+    if (cached) map.set(id, cached);
+    else missingIds.push(id);
+  }
+
+  if (!missingIds.length) return map;
+
+  const chunkSize = 100;
+  const chunks: string[][] = [];
+  for (let i = 0; i < missingIds.length; i += chunkSize) chunks.push(missingIds.slice(i, i + chunkSize));
+
+  const chunkResults = await mapWithConcurrency(chunks, HUBSPOT_BATCH_READ_CONCURRENCY, async (chunk) => {
+    const json = await hsFetch(url, {
+      method: "POST",
+      body: JSON.stringify({
+        properties,
+        inputs: chunk.map((id) => ({ id })),
+      }),
+    });
+    return (json.results || []) as HubspotContact[];
+  });
+
+  for (const contacts of chunkResults) {
+    contacts.forEach((contact) => {
+      const id = String(contact.id);
+      map.set(id, contact);
+      writeCache(CONTACT_CACHE, id, contact);
     });
   }
 

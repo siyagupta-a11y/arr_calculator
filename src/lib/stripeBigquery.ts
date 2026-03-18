@@ -123,7 +123,7 @@ export type StripeThroughMrrGroupedDetailRow = {
   churnMrr: number;
   monthEndMrr: number;
   monthEndArr: number;
-  associatedCustomerId?: string;
+  associatedCustomerIds?: string[];
 };
 
 export type StripeThroughMrrReportRequest = {
@@ -156,6 +156,29 @@ export type StripeThroughMrrReportResult = {
     totalPages: number;
     hasMore: boolean;
   };
+};
+
+export type StripeThroughMrrCustomerArrRow = {
+  customerKey: string;
+  customerIds: string[];
+  periodKey: string;
+  periodLabel: string;
+  periodStart: string;
+  periodEnd: string;
+  arr: number;
+};
+
+export type StripeThroughMrrCustomerArrRequest = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+};
+
+export type StripeThroughMrrCustomerArrResult = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+  rows: StripeThroughMrrCustomerArrRow[];
 };
 
 export type StripeBillingOverviewGrain = "daily" | "weekly" | "monthly" | "quarterly";
@@ -468,6 +491,29 @@ async function getAccessToken(sa: ServiceAccount) {
 function asString(v: unknown) {
   if (v == null) return "";
   return String(v);
+}
+
+function asStringArray(v: unknown): string[] {
+  const values: string[] = [];
+  const pushValue = (raw: unknown) => {
+    if (raw == null) return;
+    if (Array.isArray(raw)) {
+      for (const item of raw) pushValue(item);
+      return;
+    }
+    if (typeof raw === "object") {
+      const record = raw as { v?: unknown };
+      if ("v" in record) {
+        pushValue(record.v);
+        return;
+      }
+    }
+    const text = asString(raw).trim();
+    if (!text || text === "(blank)") return;
+    values.push(text);
+  };
+  pushValue(v);
+  return Array.from(new Set(values));
 }
 
 function asNumber(v: unknown) {
@@ -1636,7 +1682,7 @@ WHERE
 
 const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
   Exclude<StripeThroughMrrGroupBy, "none">,
-  { keyExpr: string; labelExpr: string; customerIdExpr?: string }
+  { keyExpr: string; labelExpr: string; customerIdsExpr?: string }
 > = {
   customer_id: {
     keyExpr: "customer_id",
@@ -1675,7 +1721,8 @@ const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
   email: {
     keyExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
     labelExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
-    customerIdExpr: "ARRAY_AGG(customer_id ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)]",
+    customerIdsExpr:
+      "ARRAY_AGG(NULLIF(customer_id, '(blank)') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC)",
   },
 };
 
@@ -2211,6 +2258,7 @@ OFFSET @offset_rows`;
     }
   } else {
     const groupSql = STRIPE_THROUGH_MRR_GROUP_BY_SQL[groupBy];
+    const historyGroupFilterSql = groupBy === "email" ? "TRUE" : "hbg.base_mrr <> 0";
     const countQuery = `${detailBaseCte}
 , grouped_source AS (
   SELECT
@@ -2284,7 +2332,7 @@ all_group_totals AS (
   UNION ALL
   SELECT hbg.group_key, hbg.group_label
   FROM history_by_group hbg
-  WHERE hbg.base_mrr <> 0
+  WHERE ${historyGroupFilterSql}
     AND NOT EXISTS (
       SELECT 1 FROM group_totals gt
       WHERE gt.group_key = hbg.group_key AND gt.group_label = hbg.group_label
@@ -2316,7 +2364,7 @@ group_totals AS (
     group_key,
     group_label,
     ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
-    ${groupSql.customerIdExpr ?? "ANY_VALUE(customer_id)"} AS associated_customer_id
+    ${groupSql.customerIdsExpr ?? "ARRAY_AGG(NULLIF(customer_id, '(blank)') IGNORE NULLS LIMIT 1)"} AS associated_customer_ids
   FROM grouped_source
   GROUP BY group_key, group_label
 ),
@@ -2367,20 +2415,20 @@ history_by_group AS (
     ${groupSql.keyExpr} AS group_key,
     ${groupSql.labelExpr} AS group_label,
     COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr,
-    ${groupSql.customerIdExpr ?? "ANY_VALUE(customer_id)"} AS associated_customer_id
+    ${groupSql.customerIdsExpr ?? "ARRAY_AGG(NULLIF(customer_id, '(blank)') IGNORE NULLS LIMIT 1)"} AS associated_customer_ids
   FROM history_enriched
   GROUP BY group_key, group_label
 ),
 all_group_totals AS (
-  SELECT group_key, group_label, net_mrr_change, associated_customer_id FROM group_totals
+  SELECT group_key, group_label, net_mrr_change, associated_customer_ids FROM group_totals
   UNION ALL
   SELECT
     hbg.group_key,
     hbg.group_label,
     0.0 AS net_mrr_change,
-    hbg.associated_customer_id
+    hbg.associated_customer_ids
   FROM history_by_group hbg
-  WHERE hbg.base_mrr <> 0
+  WHERE ${historyGroupFilterSql}
     AND NOT EXISTS (
       SELECT 1 FROM group_totals gt
       WHERE gt.group_key = hbg.group_key AND gt.group_label = hbg.group_label
@@ -2391,7 +2439,7 @@ paged_groups AS (
     group_key,
     group_label,
     net_mrr_change,
-    associated_customer_id
+    associated_customer_ids
   FROM all_group_totals
   ORDER BY net_mrr_change DESC, group_label ASC
   LIMIT @limit_rows
@@ -2413,7 +2461,7 @@ group_monthly AS (
     pg.group_key,
     pg.group_label,
     pg.net_mrr_change AS group_total_net_mrr_change,
-    pg.associated_customer_id,
+    ANY_VALUE(pg.associated_customer_ids) AS associated_customer_ids,
     m.month_start,
     COUNT(gs.event_timestamp) AS event_count,
     COALESCE(SUM(gs.mrr_change_major), 0.0) AS net_mrr_change,
@@ -2430,7 +2478,6 @@ group_monthly AS (
   GROUP BY
     pg.group_key,
     pg.group_label,
-    pg.associated_customer_id,
     pg.net_mrr_change,
     m.month_start
 ),
@@ -2438,7 +2485,7 @@ group_monthly_with_base AS (
   SELECT
     gm.group_key,
     gm.group_label,
-    gm.associated_customer_id,
+    gm.associated_customer_ids,
     gm.group_total_net_mrr_change,
     gm.month_start,
     gm.event_count,
@@ -2456,7 +2503,7 @@ group_monthly_with_base AS (
 SELECT
   gmb.group_key,
   gmb.group_label,
-  gmb.associated_customer_id,
+  gmb.associated_customer_ids,
   FORMAT_DATE('%Y-%m', gmb.month_start) AS month_key,
   FORMAT_DATE('%b %Y', gmb.month_start) AS month_label,
   gmb.event_count,
@@ -2536,7 +2583,7 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
           churnMrr: asNumber(row.churn_mrr),
           monthEndMrr: asNumber(row.month_end_mrr),
           monthEndArr: asNumber(row.month_end_arr),
-          associatedCustomerId: asString(row.associated_customer_id) || undefined,
+          associatedCustomerIds: asStringArray(row.associated_customer_ids),
         }));
 
   return {
@@ -2558,6 +2605,180 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
       totalPages,
       hasMore: clampedPage < totalPages,
     },
+  };
+}
+
+export async function queryStripeThroughMrrCustomerArrFromBigQuery(
+  request: StripeThroughMrrCustomerArrRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeThroughMrrCustomerArrResult> {
+  const startDate = parseIsoDateUtc(request.startDate);
+  const endDate = parseIsoDateUtc(request.endDate);
+  if (!startDate || !endDate) {
+    throw new Error("Invalid startDate/endDate");
+  }
+  if (endDate.getTime() < startDate.getTime()) {
+    throw new Error("endDate must be >= startDate");
+  }
+
+  const startDateIso = startDate.toISOString().slice(0, 10);
+  const endDateIso = endDate.toISOString().slice(0, 10);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const table = getStripeArrCorrectMrrChangeTable();
+  const customersTable = getStripeCustomersTable();
+
+  const query = `
+WITH bounds AS (
+  SELECT
+    DATE(@start_date) AS requested_start_date,
+    DATE(@end_date) AS requested_end_date,
+    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS requested_end_exclusive_date,
+    DATE_TRUNC(DATE(@start_date), MONTH) AS first_bucket_start,
+    DATE_TRUNC(DATE(@end_date), MONTH) AS last_bucket_start
+),
+buckets AS (
+  SELECT
+    month_start AS bucket_start,
+    GREATEST(month_start, b.requested_start_date) AS effective_start,
+    LEAST(DATE_ADD(month_start, INTERVAL 1 MONTH), b.requested_end_exclusive_date) AS effective_end_exclusive
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.first_bucket_start, b.last_bucket_start, INTERVAL 1 MONTH)) AS month_start
+),
+customers_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS customer_id,
+    LOWER(COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '')) AS customer_email
+  FROM \`${customersTable}\`
+),
+events_base AS (
+  SELECT
+    t.event_timestamp,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    COALESCE(
+      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_email')), '')),
+      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer.email')), '')),
+      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_details.email')), '')),
+      LOWER(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.billing_details.email')), '')),
+      cl.customer_email,
+      NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''),
+      '(blank)'
+    ) AS customer_key,
+    CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` AS t
+  LEFT JOIN customers_lookup cl
+    ON cl.customer_id = COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)')
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+    AND t.event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+),
+customer_ids_by_key AS (
+  SELECT
+    customer_key,
+    ARRAY_AGG(DISTINCT customer_id IGNORE NULLS ORDER BY customer_id ASC) AS customer_ids
+  FROM events_base
+  WHERE customer_id <> '(blank)'
+  GROUP BY customer_key
+),
+customer_start_mrr AS (
+  SELECT
+    e.customer_key,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS start_mrr
+  FROM events_base e
+  CROSS JOIN bounds b
+  WHERE e.event_timestamp < TIMESTAMP(b.requested_start_date)
+  GROUP BY e.customer_key
+),
+bucket_deltas AS (
+  SELECT
+    b.bucket_start,
+    e.customer_key,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS delta_mrr
+  FROM buckets b
+  JOIN events_base e
+    ON e.event_timestamp >= TIMESTAMP(b.effective_start)
+    AND e.event_timestamp < TIMESTAMP(b.effective_end_exclusive)
+  GROUP BY b.bucket_start, e.customer_key
+),
+customers_in_scope AS (
+  SELECT customer_key
+  FROM customer_start_mrr
+  WHERE ABS(start_mrr) > 1e-9
+
+  UNION DISTINCT
+
+  SELECT customer_key
+  FROM bucket_deltas
+),
+customer_buckets AS (
+  SELECT
+    c.customer_key,
+    b.bucket_start,
+    b.effective_start,
+    b.effective_end_exclusive
+  FROM customers_in_scope c
+  CROSS JOIN buckets b
+),
+snapshot_rows AS (
+  SELECT
+    cb.customer_key,
+    cb.bucket_start,
+    cb.effective_start,
+    cb.effective_end_exclusive,
+    COALESCE(csm.start_mrr, 0.0)
+      + SUM(COALESCE(bd.delta_mrr, 0.0)) OVER (
+          PARTITION BY cb.customer_key
+          ORDER BY cb.bucket_start
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS mrr_end
+  FROM customer_buckets cb
+  LEFT JOIN customer_start_mrr csm
+    ON csm.customer_key = cb.customer_key
+  LEFT JOIN bucket_deltas bd
+    ON bd.customer_key = cb.customer_key
+    AND bd.bucket_start = cb.bucket_start
+)
+SELECT
+  sr.customer_key,
+  COALESCE(cik.customer_ids, ARRAY<STRING>[]) AS customer_ids,
+  FORMAT_DATE('%Y-%m', sr.bucket_start) AS period_key,
+  FORMAT_DATE('%b %Y', sr.bucket_start) AS period_label,
+  FORMAT_DATE('%Y-%m-%d', sr.effective_start) AS period_start,
+  FORMAT_DATE('%Y-%m-%d', DATE_SUB(sr.effective_end_exclusive, INTERVAL 1 DAY)) AS period_end,
+  ROUND(sr.mrr_end * 12.0, 2) AS arr
+FROM snapshot_rows sr
+LEFT JOIN customer_ids_by_key cik
+  ON cik.customer_key = sr.customer_key
+ORDER BY sr.customer_key ASC, sr.bucket_start ASC
+`;
+
+  const params: BigQueryNamedParameter[] = [
+    { name: "start_date", type: "STRING", value: startDateIso },
+    { name: "end_date", type: "STRING", value: endDateIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+  ];
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+
+  return {
+    startDate: startDateIso,
+    endDate: endDateIso,
+    targetCurrency: targetCurrency.toUpperCase(),
+    rows: rows.map((row) => ({
+      customerKey: asString(row.customer_key),
+      customerIds: asStringArray(row.customer_ids),
+      periodKey: asString(row.period_key),
+      periodLabel: asString(row.period_label),
+      periodStart: asString(row.period_start),
+      periodEnd: asString(row.period_end),
+      arr: asNumber(row.arr),
+    })),
   };
 }
 
