@@ -2063,6 +2063,7 @@ OFFSET @offset_rows`;
     }
   } else {
     const groupSql = STRIPE_THROUGH_MRR_GROUP_BY_SQL[groupBy];
+    const historyGroupFilterSql = groupBy === "email" ? "TRUE" : "hbg.base_mrr <> 0";
     const countQuery = `${detailBaseCte}
 , grouped_source AS (
   SELECT
@@ -2132,7 +2133,7 @@ all_group_totals AS (
   UNION ALL
   SELECT hbg.group_key, hbg.group_label
   FROM history_by_group hbg
-  WHERE hbg.base_mrr <> 0
+  WHERE ${historyGroupFilterSql}
     AND NOT EXISTS (
       SELECT 1 FROM group_totals gt
       WHERE gt.group_key = hbg.group_key AND gt.group_label = hbg.group_label
@@ -2228,7 +2229,7 @@ all_group_totals AS (
     0.0 AS net_mrr_change,
     hbg.associated_customer_ids
   FROM history_by_group hbg
-  WHERE hbg.base_mrr <> 0
+  WHERE ${historyGroupFilterSql}
     AND NOT EXISTS (
       SELECT 1 FROM group_totals gt
       WHERE gt.group_key = hbg.group_key AND gt.group_label = hbg.group_label
