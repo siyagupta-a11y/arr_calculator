@@ -26,10 +26,21 @@ type GroupField =
   | "territory"
   | "country"
   | "industry"
+  | "companySegment"
+  | "primaryProjectType"
+  | "customerSupportApplication"
   | "dealType"
   | "plan";
 
-type ChartGroupField = "none" | "deploymentType" | "territory" | "country" | "plan";
+type ChartGroupField =
+  | "none"
+  | "deploymentType"
+  | "territory"
+  | "country"
+  | "plan"
+  | "companySegment"
+  | "primaryProjectType"
+  | "customerSupportApplication";
 
 const GROUP_BY_OPTIONS: Array<{ key: GroupField; label: string }> = [
   { key: "dealName", label: "Deal Name" },
@@ -38,6 +49,9 @@ const GROUP_BY_OPTIONS: Array<{ key: GroupField; label: string }> = [
   { key: "territory", label: "Territory" },
   { key: "country", label: "Country" },
   { key: "industry", label: "Industry" },
+  { key: "companySegment", label: "Company Segment" },
+  { key: "primaryProjectType", label: "Primary Project Type" },
+  { key: "customerSupportApplication", label: "Customer Support Application" },
   { key: "dealType", label: "Deal Type" },
   { key: "plan", label: "Plan" },
 ];
@@ -48,6 +62,9 @@ const CHART_GROUP_OPTIONS: Array<{ key: ChartGroupField; label: string }> = [
   { key: "territory", label: "Territory" },
   { key: "deploymentType", label: "Deployment Type" },
   { key: "plan", label: "Plan" },
+  { key: "companySegment", label: "Company Segment" },
+  { key: "primaryProjectType", label: "Primary Project Type" },
+  { key: "customerSupportApplication", label: "Customer Support Application" },
 ];
 
 const GROUP_LINE_COLORS = [
@@ -61,6 +78,18 @@ const GROUP_LINE_COLORS = [
   "#22c55e",
 ];
 
+const MULTI_SELECT_GROUP_FIELDS = new Set<GroupField>(["primaryProjectType", "customerSupportApplication"]);
+
+function parseHubspotMultiSelectValues(value: string) {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  const values = raw
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return Array.from(new Set(values));
+}
+
 type UiRow = {
   dealName: string;
   dealId: string;
@@ -71,6 +100,9 @@ type UiRow = {
   territory?: string;
   country?: string;
   industry?: string;
+  companySegment?: string;
+  primaryProjectType?: string;
+  customerSupportApplication?: string;
   dealType?: string;
   plan?: HubspotPlan;
   groupValues: Partial<Record<GroupField, string>>;
@@ -78,6 +110,14 @@ type UiRow = {
 };
 
 function groupValueForRow(r: UiRow, field: GroupField) {
+  if (field === "primaryProjectType") {
+    const values = parseHubspotMultiSelectValues(String(r.primaryProjectType || "").trim());
+    return values.length ? values.join(" | ") : "(blank)";
+  }
+  if (field === "customerSupportApplication") {
+    const values = parseHubspotMultiSelectValues(String(r.customerSupportApplication || "").trim());
+    return values.length ? values.join(" | ") : "(blank)";
+  }
   if (field === "dealName") return r.dealName || "(blank)";
   if (field === "deploymentType") return r.deploymentType || "(blank)";
   if (field === "territory") {
@@ -89,6 +129,7 @@ function groupValueForRow(r: UiRow, field: GroupField) {
     return country ? canonicalCountryLabel(country) : "(blank)";
   }
   if (field === "industry") return r.industry || "(blank)";
+  if (field === "companySegment") return r.companySegment || "(blank)";
   if (field === "dealType") return r.dealType || "(blank)";
   if (field === "plan") return r.plan || "(blank)";
   const accountId = String(r.accountId || "").trim();
@@ -103,11 +144,59 @@ function normalizeCaseInsensitiveValue(value: string) {
   return String(value || "").trim().toLowerCase();
 }
 
+function groupValuesForRow(r: UiRow, field: GroupField) {
+  if (field === "primaryProjectType") {
+    const values = parseHubspotMultiSelectValues(String(r.primaryProjectType || "").trim());
+    return values.length ? values : ["(blank)"];
+  }
+  if (field === "customerSupportApplication") {
+    const values = parseHubspotMultiSelectValues(String(r.customerSupportApplication || "").trim());
+    return values.length ? values : ["(blank)"];
+  }
+  return [groupValueForRow(r, field)];
+}
+
 function normalizeGroupKeyValue(field: GroupField, value: string) {
   if (field === "country") return canonicalCountryKey(value);
   if (field === "territory") return normalizeCaseInsensitiveValue(canonicalTerritoryLabel(value));
+  if (field === "companySegment") return normalizeCaseInsensitiveValue(value);
+  if (field === "primaryProjectType") return normalizeCaseInsensitiveValue(value);
+  if (field === "customerSupportApplication") return normalizeCaseInsensitiveValue(value);
   if (field === "plan") return normalizeCaseInsensitiveValue(value);
   return String(value || "").trim();
+}
+
+function groupDescriptorsForRow(row: UiRow, fields: GroupField[]) {
+  let combos: Array<{ keyParts: string[]; groupValues: Partial<Record<GroupField, string>> }> = [
+    { keyParts: [], groupValues: {} },
+  ];
+
+  for (const field of fields) {
+    const values = groupValuesForRow(row, field);
+    const normalized = new Map<string, string>();
+    for (const value of values) {
+      const label = String(value || "").trim() || "(blank)";
+      const key = normalizeGroupKeyValue(field, label) || "(blank)";
+      if (!normalized.has(key)) normalized.set(key, label);
+    }
+    if (normalized.size === 0) normalized.set("(blank)", "(blank)");
+
+    const next: Array<{ keyParts: string[]; groupValues: Partial<Record<GroupField, string>> }> = [];
+    for (const combo of combos) {
+      for (const [normalizedKey, label] of normalized.entries()) {
+        next.push({
+          keyParts: [...combo.keyParts, `${field}:${normalizedKey}`],
+          groupValues: { ...combo.groupValues, [field]: label },
+        });
+      }
+    }
+    combos = next;
+  }
+
+  return combos.map((combo) => ({
+    key: combo.keyParts.join("|"),
+    groupValues: combo.groupValues,
+  }));
 }
 
 function isCloudDeploymentType(value: string) {
@@ -247,8 +336,40 @@ function chartGroupDescriptorForRow(row: UiRow, field: ChartGroupField): ChartGr
     const raw = String(row.plan || "").trim();
     return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
   }
+  if (field === "companySegment") {
+    const raw = String(row.companySegment || "").trim();
+    return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
+  }
+  if (field === "primaryProjectType") {
+    const raw = String(row.primaryProjectType || "").trim();
+    return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
+  }
+  if (field === "customerSupportApplication") {
+    const raw = String(row.customerSupportApplication || "").trim();
+    return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
+  }
   const raw = String(row.deploymentType || "").trim();
   return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
+}
+
+function chartGroupDescriptorsForRow(row: UiRow, field: ChartGroupField) {
+  if (field === "primaryProjectType") {
+    const values = parseHubspotMultiSelectValues(String(row.primaryProjectType || "").trim());
+    if (!values.length) return [{ key: "(blank)", label: "(blank)" }];
+    return values.map((value) => ({
+      key: normalizeCaseInsensitiveValue(value) || "(blank)",
+      label: value || "(blank)",
+    }));
+  }
+  if (field === "customerSupportApplication") {
+    const values = parseHubspotMultiSelectValues(String(row.customerSupportApplication || "").trim());
+    if (!values.length) return [{ key: "(blank)", label: "(blank)" }];
+    return values.map((value) => ({
+      key: normalizeCaseInsensitiveValue(value) || "(blank)",
+      label: value || "(blank)",
+    }));
+  }
+  return [chartGroupDescriptorForRow(row, field)];
 }
 
 function addAccountPeriodValues(
@@ -1432,6 +1553,9 @@ export default function Home() {
       country: canonicalCountryLabel(r.country || "") || "",
       territory: resolveTerritoryLabel(r.territory || "", r.country || ""),
       industry: r.industry || "",
+      companySegment: r.companySegment || "",
+      primaryProjectType: r.primaryProjectType || "",
+      customerSupportApplication: r.customerSupportApplication || "",
       dealType: r.dealType || "",
       plan: r.plan || "team",
       groupValues: {},
@@ -1502,35 +1626,32 @@ export default function Home() {
     const map = new Map<string, UiRow>();
 
     for (const r of filteredLineItemRows) {
-      const key = groupByFields
-        .map((field) => `${field}:${normalizeGroupKeyValue(field, groupValueForRow(r, field))}`)
-        .join("|");
-
-      if (!map.has(key)) {
-        const groupValues: Partial<Record<GroupField, string>> = {};
-        for (const field of groupByFields) {
-          groupValues[field] = groupValueForRow(r, field);
-        }
-
-        map.set(key, {
-          dealName: r.dealName,
-          dealId: r.dealId,
-          companyCountry: r.companyCountry,
-          deploymentType: r.deploymentType,
-          accountId: r.accountId,
-          accountName: r.accountName,
-          territory: r.territory,
-          country: r.country,
-          industry: r.industry,
-          dealType: r.dealType,
-          plan: r.plan,
-          groupValues,
-          valuesByPeriod: { ...r.valuesByPeriod },
-        });
-      } else {
-        const agg = map.get(key)!;
-        for (const p of Object.keys(r.valuesByPeriod || {})) {
-          agg.valuesByPeriod[p] = (agg.valuesByPeriod[p] || 0) + (r.valuesByPeriod[p] || 0);
+      const descriptors = groupDescriptorsForRow(r, groupByFields);
+      for (const descriptor of descriptors) {
+        if (!map.has(descriptor.key)) {
+          map.set(descriptor.key, {
+            dealName: r.dealName,
+            dealId: r.dealId,
+            companyCountry: r.companyCountry,
+            deploymentType: r.deploymentType,
+            accountId: r.accountId,
+            accountName: r.accountName,
+            territory: r.territory,
+            country: r.country,
+            industry: r.industry,
+            companySegment: r.companySegment,
+            primaryProjectType: r.primaryProjectType,
+            customerSupportApplication: r.customerSupportApplication,
+            dealType: r.dealType,
+            plan: r.plan,
+            groupValues: descriptor.groupValues,
+            valuesByPeriod: { ...r.valuesByPeriod },
+          });
+        } else {
+          const agg = map.get(descriptor.key)!;
+          for (const p of Object.keys(r.valuesByPeriod || {})) {
+            agg.valuesByPeriod[p] = (agg.valuesByPeriod[p] || 0) + (r.valuesByPeriod[p] || 0);
+          }
         }
       }
     }
@@ -1599,13 +1720,14 @@ export default function Home() {
     if (!chartPeriodOrder.length) return grouped;
 
     for (const row of filteredChartLineItemRows) {
-      const descriptor = chartGroupDescriptorForRow(row, chartGroupBy);
-      if (!grouped.has(descriptor.key)) {
-        grouped.set(descriptor.key, { label: descriptor.label, accounts: new Map() });
-      }
       const accountKey = accountGroupingKey(row);
       if (!accountKey) continue;
-      addAccountPeriodValues(grouped.get(descriptor.key)!.accounts, accountKey, row.valuesByPeriod || {}, chartPeriodOrder);
+      for (const descriptor of chartGroupDescriptorsForRow(row, chartGroupBy)) {
+        if (!grouped.has(descriptor.key)) {
+          grouped.set(descriptor.key, { label: descriptor.label, accounts: new Map() });
+        }
+        addAccountPeriodValues(grouped.get(descriptor.key)!.accounts, accountKey, row.valuesByPeriod || {}, chartPeriodOrder);
+      }
     }
 
     return grouped;
@@ -1618,16 +1740,17 @@ export default function Home() {
     if (!baselinePeriodKeys.length) return grouped;
 
     for (const row of filteredBaselineChartRows) {
-      const descriptor = chartGroupDescriptorForRow(row, chartGroupBy);
       const accountKey = accountGroupingKey(row);
       if (!accountKey) continue;
       const rowBaselineArr = round2(
         baselinePeriodKeys.reduce((acc, periodKey) => acc + (row.valuesByPeriod[periodKey] || 0), 0),
       );
       if (Math.abs(rowBaselineArr) < 1e-9) continue;
-      if (!grouped.has(descriptor.key)) grouped.set(descriptor.key, new Map());
-      const bucket = grouped.get(descriptor.key)!;
-      bucket.set(accountKey, round2((bucket.get(accountKey) || 0) + rowBaselineArr));
+      for (const descriptor of chartGroupDescriptorsForRow(row, chartGroupBy)) {
+        if (!grouped.has(descriptor.key)) grouped.set(descriptor.key, new Map());
+        const bucket = grouped.get(descriptor.key)!;
+        bucket.set(accountKey, round2((bucket.get(accountKey) || 0) + rowBaselineArr));
+      }
     }
 
     return grouped;
@@ -1730,6 +1853,9 @@ export default function Home() {
   }, [chartGroupBy, chartPoints, selectedBarSeriesList]);
   const chartGroupingLabel = CHART_GROUP_OPTIONS.find((opt) => opt.key === chartGroupBy)?.label || "Overall";
   const chartGroupingEnabled = chartGroupBy !== "none" && groupedChartSeries.length > 0;
+  const multiSelectChartGroupingEnabled =
+    chartGroupBy === "primaryProjectType" || chartGroupBy === "customerSupportApplication";
+  const multiSelectBreakdownGroupingEnabled = groupByFields.some((field) => MULTI_SELECT_GROUP_FIELDS.has(field));
 
   const showDealIdColumn = groupByFields.length === 0;
   const groupByLabel = groupByFields
@@ -2048,6 +2174,11 @@ export default function Home() {
             ))}
           </div>
         )}
+        {multiSelectBreakdownGroupingEnabled && (
+          <p className="stripe-ui__hint" style={{ marginTop: "0.75rem", marginBottom: 0 }}>
+            Multi-select group fields split each row into each selected value, so grouped totals can exceed overall totals.
+          </p>
+        )}
       </section>
 
       {error && (
@@ -2082,6 +2213,9 @@ export default function Home() {
                   <h2 className="stripe-ui__panel-title">Grouped Charts</h2>
                   <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
                     Line charts are split by {chartGroupingLabel.toLowerCase()}. Bar charts sum selected groups.
+                    {multiSelectChartGroupingEnabled
+                      ? " Multi-select values are split into separate groups."
+                      : ""}
                   </p>
                 </div>
                 <div className="stripe-ui__hint">{`${groupedChartSeries.length} groups shown`}</div>

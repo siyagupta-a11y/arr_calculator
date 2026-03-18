@@ -37,6 +37,9 @@ type DealMeta = {
   country: string;
   companyCountry: string;
   industry: string;
+  companySegment: string;
+  primaryProjectType: string;
+  customerSupportApplication: string;
   closeDate: Date | null;
   closeMonth: Date | null;
   closeDateInRange: boolean;
@@ -165,13 +168,37 @@ export async function generateReport(
   const TERRITORY_PROP = process.env.DEAL_TERRITORY_PROP || "territory";
   const COUNTRY_PROP = process.env.DEAL_COUNTRY_PROP || "country";
   const INDUSTRY_PROP = process.env.DEAL_INDUSTRY_PROP || "industry";
+  const DEAL_COMPANY_SEGMENT_PROP = process.env.DEAL_COMPANY_SEGMENT_PROP || "company_segment";
+  const DEAL_PRIMARY_PROJECT_TYPE_PROP = process.env.DEAL_PRIMARY_PROJECT_TYPE_PROP || "primary_project_type";
+  const DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP =
+    process.env.DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP || "customer_support_application";
   const COMPANY_COUNTRY_PROP = process.env.COMPANY_COUNTRY_PROP || "country";
   const COMPANY_NAME_PROP = process.env.COMPANY_NAME_PROP || "name";
+  const COMPANY_SEGMENT_PROP = process.env.COMPANY_SEGMENT_PROP || DEAL_COMPANY_SEGMENT_PROP;
+  const COMPANY_PRIMARY_PROJECT_TYPE_PROP = process.env.COMPANY_PRIMARY_PROJECT_TYPE_PROP || DEAL_PRIMARY_PROJECT_TYPE_PROP;
+  const COMPANY_CUSTOMER_SUPPORT_APPLICATION_PROP =
+    process.env.COMPANY_CUSTOMER_SUPPORT_APPLICATION_PROP || DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP;
   const dealCountryProps = Array.from(new Set([COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]));
+  const dealCompanySegmentProps = Array.from(new Set([DEAL_COMPANY_SEGMENT_PROP, "company_segment"]));
+  const dealPrimaryProjectTypeProps = Array.from(new Set([DEAL_PRIMARY_PROJECT_TYPE_PROP, "primary_project_type"]));
+  const dealCustomerSupportApplicationProps = Array.from(
+    new Set([DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP, "customer_support_application"]),
+  );
   const companyCountryProps = Array.from(
     new Set([COMPANY_COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]),
   );
   const companyNameProps = Array.from(new Set([COMPANY_NAME_PROP, "name", "hs_name"]));
+  const companySegmentProps = Array.from(new Set([COMPANY_SEGMENT_PROP, DEAL_COMPANY_SEGMENT_PROP, "company_segment"]));
+  const companyPrimaryProjectTypeProps = Array.from(
+    new Set([COMPANY_PRIMARY_PROJECT_TYPE_PROP, DEAL_PRIMARY_PROJECT_TYPE_PROP, "primary_project_type"]),
+  );
+  const companyCustomerSupportApplicationProps = Array.from(
+    new Set([
+      COMPANY_CUSTOMER_SUPPORT_APPLICATION_PROP,
+      DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP,
+      "customer_support_application",
+    ]),
+  );
 
   const dealProps = [
     "dealname",
@@ -183,6 +210,9 @@ export async function generateReport(
     TERRITORY_PROP,
     COUNTRY_PROP,
     INDUSTRY_PROP,
+    DEAL_COMPANY_SEGMENT_PROP,
+    DEAL_PRIMARY_PROJECT_TYPE_PROP,
+    DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP,
   ];
 
   const deals = await fetchDealsInStage(dealProps, includedStage);
@@ -209,6 +239,9 @@ export async function generateReport(
       country: firstNonEmptyProp(pDeal, dealCountryProps),
       companyCountry: "",
       industry: String(pDeal[INDUSTRY_PROP] || ""),
+      companySegment: firstNonEmptyProp(pDeal, dealCompanySegmentProps),
+      primaryProjectType: firstNonEmptyProp(pDeal, dealPrimaryProjectTypeProps),
+      customerSupportApplication: firstNonEmptyProp(pDeal, dealCustomerSupportApplicationProps),
       closeDate,
       closeMonth,
       closeDateInRange,
@@ -228,7 +261,18 @@ export async function generateReport(
 
   if (companyIds.length) {
     try {
-      companiesById = await batchReadCompanies(companyIds, Array.from(new Set([...companyCountryProps, ...companyNameProps])));
+      companiesById = await batchReadCompanies(
+        companyIds,
+        Array.from(
+          new Set([
+            ...companyCountryProps,
+            ...companyNameProps,
+            ...companySegmentProps,
+            ...companyPrimaryProjectTypeProps,
+            ...companyCustomerSupportApplicationProps,
+          ]),
+        ),
+      );
     } catch (err) {
       if (!isCompanyScopesError(err)) throw err;
       console.warn("Skipping company-country enrichment: missing HubSpot company read scopes.");
@@ -242,7 +286,15 @@ export async function generateReport(
     const companyProps = (company?.properties || {}) as Record<string, unknown>;
     const companyName = firstNonEmptyProp(companyProps, companyNameProps);
     const companyCountry = firstNonEmptyProp(companyProps, companyCountryProps);
+    const companySegment = firstNonEmptyProp(companyProps, companySegmentProps);
+    const primaryProjectType = firstNonEmptyProp(companyProps, companyPrimaryProjectTypeProps);
+    const customerSupportApplication = firstNonEmptyProp(companyProps, companyCustomerSupportApplicationProps);
     if (companyName) meta.accountName = companyName;
+    if (!meta.companySegment && companySegment) meta.companySegment = companySegment;
+    if (!meta.primaryProjectType && primaryProjectType) meta.primaryProjectType = primaryProjectType;
+    if (!meta.customerSupportApplication && customerSupportApplication) {
+      meta.customerSupportApplication = customerSupportApplication;
+    }
     if (!companyCountry) continue;
     meta.companyCountry = companyCountry;
     if (!meta.country) meta.country = companyCountry;
@@ -296,6 +348,9 @@ export async function generateReport(
       country,
       companyCountry,
       industry,
+      companySegment,
+      primaryProjectType,
+      customerSupportApplication,
       closeDate,
       closeMonth,
       dealCurrency,
@@ -453,6 +508,9 @@ export async function generateReport(
         country,
         companyCountry,
         industry,
+        companySegment,
+        primaryProjectType,
+        customerSupportApplication,
       });
     }
   }

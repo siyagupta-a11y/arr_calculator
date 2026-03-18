@@ -83,6 +83,9 @@ export type ReportRow = {
   country?: string;
   companyCountry?: string;
   industry?: string;
+  companySegment?: string;
+  primaryProjectType?: string;
+  customerSupportApplication?: string;
   lineItemDescription?: string;
   groupValues?: Record<string, string>;
 
