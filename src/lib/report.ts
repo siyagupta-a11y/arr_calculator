@@ -180,6 +180,7 @@ export async function generateReport(
     process.env.DEAL_CUSTOMER_SUPPORT_APPLICATION_PROP || "customer_support_application";
   const COMPANY_COUNTRY_PROP = process.env.COMPANY_COUNTRY_PROP || "country";
   const COMPANY_NAME_PROP = process.env.COMPANY_NAME_PROP || "name";
+  const COMPANY_INDUSTRY_PROP = process.env.COMPANY_INDUSTRY_PROP || INDUSTRY_PROP;
   const COMPANY_SEGMENT_PROP = process.env.COMPANY_SEGMENT_PROP || DEAL_COMPANY_SEGMENT_PROP;
   const COMPANY_PRIMARY_PROJECT_TYPE_PROP = process.env.COMPANY_PRIMARY_PROJECT_TYPE_PROP || DEAL_PRIMARY_PROJECT_TYPE_PROP;
   const COMPANY_CUSTOMER_SUPPORT_APPLICATION_PROP =
@@ -205,6 +206,10 @@ export async function generateReport(
     new Set([COMPANY_COUNTRY_PROP, "country", "hs_country_region", "hs_country_region_code"]),
   );
   const companyNameProps = Array.from(new Set([COMPANY_NAME_PROP, "name", "hs_name"]));
+  const companyIndustryProps = candidatePropertyNames(COMPANY_INDUSTRY_PROP, [
+    INDUSTRY_PROP,
+    "industry",
+  ]);
   const companySegmentProps = candidatePropertyNames(COMPANY_SEGMENT_PROP, [
     DEAL_COMPANY_SEGMENT_PROP,
     "company_segment",
@@ -292,6 +297,7 @@ export async function generateReport(
           new Set([
             ...companyCountryProps,
             ...companyNameProps,
+            ...companyIndustryProps,
             ...companySegmentProps,
             ...companyPrimaryProjectTypeProps,
             ...companyCustomerSupportApplicationProps,
@@ -311,10 +317,12 @@ export async function generateReport(
     const companyProps = (company?.properties || {}) as Record<string, unknown>;
     const companyName = firstNonEmptyProp(companyProps, companyNameProps);
     const companyCountry = firstNonEmptyProp(companyProps, companyCountryProps);
+    const companyIndustry = firstNonEmptyProp(companyProps, companyIndustryProps);
     const companySegment = firstNonEmptyProp(companyProps, companySegmentProps);
     const primaryProjectType = firstNonEmptyProp(companyProps, companyPrimaryProjectTypeProps);
     const customerSupportApplication = firstNonEmptyProp(companyProps, companyCustomerSupportApplicationProps);
     if (companyName) meta.accountName = companyName;
+    if (!meta.industry && companyIndustry) meta.industry = companyIndustry;
     if (!meta.companySegment && companySegment) meta.companySegment = companySegment;
     if (!meta.primaryProjectType && primaryProjectType) meta.primaryProjectType = primaryProjectType;
     if (!meta.customerSupportApplication && customerSupportApplication) {

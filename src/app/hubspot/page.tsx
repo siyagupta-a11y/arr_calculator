@@ -37,6 +37,7 @@ type ChartGroupField =
   | "deploymentType"
   | "territory"
   | "country"
+  | "industry"
   | "plan"
   | "companySegment"
   | "primaryProjectType"
@@ -60,6 +61,7 @@ const CHART_GROUP_OPTIONS: Array<{ key: ChartGroupField; label: string }> = [
   { key: "none", label: "Overall" },
   { key: "country", label: "Country" },
   { key: "territory", label: "Territory" },
+  { key: "industry", label: "Industry" },
   { key: "deploymentType", label: "Deployment Type" },
   { key: "plan", label: "Plan" },
   { key: "companySegment", label: "Company Segment" },
@@ -338,6 +340,10 @@ function chartGroupDescriptorForRow(row: UiRow, field: ChartGroupField): ChartGr
   }
   if (field === "companySegment") {
     const raw = String(row.companySegment || "").trim();
+    return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
+  }
+  if (field === "industry") {
+    const raw = String(row.industry || "").trim();
     return { key: normalizeCaseInsensitiveValue(raw) || "(blank)", label: raw || "(blank)" };
   }
   if (field === "primaryProjectType") {
