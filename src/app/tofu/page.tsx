@@ -4,6 +4,7 @@ import Link from "next/link";
 import React, { useMemo, useState } from "react";
 
 type CombineMode = "grouped" | "simple";
+type TofuDetailMetric = "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "endingArr";
 
 type TofuMonthRow = {
   periodKey: string;
@@ -22,6 +23,47 @@ type TofuResponse = {
   combineMode: CombineMode;
   targetCurrency: string;
   rows: TofuMonthRow[];
+};
+
+type TofuDetailRow = {
+  customerId: string;
+  customerLabel: string;
+  source: "hubspot_account" | "stripe_only_customer";
+  previousArr: number;
+  currentArr: number;
+  deltaArr: number;
+  previousMrr: number;
+  currentMrr: number;
+  deltaMrr: number;
+  contributionArr: number;
+  contributionMrr: number;
+};
+
+type TofuDetailResponse = {
+  startDate: string;
+  endDate: string;
+  combineMode: CombineMode;
+  targetCurrency: string;
+  detailPeriodKey: string;
+  detailPeriodLabel: string;
+  detailPreviousPeriodKey: string;
+  detailPreviousPeriodLabel: string;
+  detailMetric: TofuDetailMetric;
+  rows: TofuDetailRow[];
+  summary: {
+    rowCount: number;
+    totalArr: number;
+    totalMrr: number;
+  };
+};
+
+const METRIC_LABELS: Record<TofuDetailMetric, string> = {
+  beginningArr: "Beginning ARR",
+  newArr: "New ARR",
+  expansionArr: "Expansion ARR",
+  contractionArr: "Contraction ARR",
+  churnArr: "Churn ARR",
+  endingArr: "Ending ARR",
 };
 
 function defaultDateRange() {
@@ -54,6 +96,26 @@ function sumField(rows: TofuMonthRow[], key: keyof TofuMonthRow) {
   return rows.reduce((sum, row) => sum + Number(row[key] || 0), 0);
 }
 
+async function parseApiResponse(res: Response) {
+  const text = await res.text();
+  let json: unknown = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  if (!res.ok) {
+    if (json && typeof json === "object" && "error" in json) {
+      throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+    }
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+
+  if (!json || typeof json !== "object") throw new Error("Invalid API response");
+  return json;
+}
+
 export default function TofuPage() {
   const defaults = useMemo(() => defaultDateRange(), []);
 
@@ -64,10 +126,15 @@ export default function TofuPage() {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<TofuResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailData, setDetailData] = useState<TofuDetailResponse | null>(null);
 
   async function run() {
     setLoading(true);
     setError(null);
+    setDetailData(null);
+    setDetailError(null);
 
     try {
       const res = await fetch("/api/tofu-report", {
@@ -75,23 +142,7 @@ export default function TofuPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ startDate, endDate, combineMode }),
       });
-
-      const text = await res.text();
-      let json: unknown = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
-      }
-
-      if (!res.ok) {
-        if (json && typeof json === "object" && "error" in json) {
-          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
-        }
-        throw new Error(text || `HTTP ${res.status}`);
-      }
-
-      if (!json || typeof json !== "object") throw new Error("Invalid API response");
+      const json = await parseApiResponse(res);
       setData(json as TofuResponse);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -100,9 +151,51 @@ export default function TofuPage() {
     }
   }
 
+  async function openDetail(periodKey: string, metric: TofuDetailMetric) {
+    setDetailLoading(true);
+    setDetailError(null);
+    setDetailData(null);
+
+    try {
+      const res = await fetch("/api/tofu-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startDate,
+          endDate,
+          combineMode: effectiveCombineMode,
+          detailPeriodKey: periodKey,
+          detailMetric: metric,
+        }),
+      });
+      const json = await parseApiResponse(res);
+      setDetailData(json as TofuDetailResponse);
+    } catch (err: unknown) {
+      setDetailData(null);
+      setDetailError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
   const currency = data?.targetCurrency || "USD";
   const effectiveCombineMode = data?.combineMode || combineMode;
   const rows = data?.rows || [];
+
+  function renderDrillCell(row: TofuMonthRow, metric: TofuDetailMetric, value: number) {
+    return (
+      <button
+        type="button"
+        className="stripe-ui__btn stripe-ui__btn--ghost"
+        style={{ minHeight: 0, height: "auto", padding: 0, width: "100%", justifyContent: "flex-end" }}
+        onClick={() => void openDetail(row.periodKey, metric)}
+        disabled={detailLoading}
+        title={`Show ${METRIC_LABELS[metric]} contributors for ${row.periodLabel}`}
+      >
+        {formatMoney(value, currency)}
+      </button>
+    );
+  }
 
   return (
     <div className="stripe-ui">
@@ -251,6 +344,9 @@ export default function TofuPage() {
               Contraction and Churn are shown as negative ARR movement so each month follows:
               Ending = Beginning + New + Expansion + Contraction + Churn.
             </p>
+            <p className="stripe-ui__panel-subtitle" style={{ marginTop: "-0.2rem" }}>
+              Click any ARR value to see the customer rows used for that month/metric, including previous and current MRR.
+            </p>
 
             <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
               <table className="stripe-ui__table" aria-label="TOFU monthly ARR bridge table">
@@ -269,21 +365,77 @@ export default function TofuPage() {
                   {rows.map((row) => (
                     <tr key={row.periodKey}>
                       <td>{row.periodLabel}</td>
-                      <td className="stripe-ui__num">{formatMoney(row.beginningArr, currency)}</td>
-                      <td className="stripe-ui__num">{formatMoney(row.newArr, currency)}</td>
-                      <td className="stripe-ui__num">{formatMoney(row.expansionArr, currency)}</td>
+                      <td className="stripe-ui__num">{renderDrillCell(row, "beginningArr", row.beginningArr)}</td>
+                      <td className="stripe-ui__num">{renderDrillCell(row, "newArr", row.newArr)}</td>
+                      <td className="stripe-ui__num">{renderDrillCell(row, "expansionArr", row.expansionArr)}</td>
                       <td className={`stripe-ui__num ${row.contractionArr < 0 ? "stripe-ui__money--negative" : ""}`}>
-                        {formatMoney(row.contractionArr, currency)}
+                        {renderDrillCell(row, "contractionArr", row.contractionArr)}
                       </td>
                       <td className={`stripe-ui__num ${row.churnArr < 0 ? "stripe-ui__money--negative" : ""}`}>
-                        {formatMoney(row.churnArr, currency)}
+                        {renderDrillCell(row, "churnArr", row.churnArr)}
                       </td>
-                      <td className="stripe-ui__num">{formatMoney(row.endingArr, currency)}</td>
+                      <td className="stripe-ui__num">{renderDrillCell(row, "endingArr", row.endingArr)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+
+            {detailLoading && (
+              <div style={{ marginTop: "0.8rem" }} className="stripe-ui__panel-subtitle">
+                Loading detail rows...
+              </div>
+            )}
+
+            {detailError && (
+              <div className="stripe-ui__error" style={{ marginTop: "0.8rem" }} role="alert" aria-live="assertive">
+                {detailError}
+              </div>
+            )}
+
+            {detailData && !detailLoading && !detailError && (
+              <div style={{ marginTop: "1rem" }}>
+                <h3 className="stripe-ui__panel-title" style={{ fontSize: "1rem" }}>
+                  {METRIC_LABELS[detailData.detailMetric]} detail - {detailData.detailPeriodLabel}
+                </h3>
+                <p className="stripe-ui__panel-subtitle" style={{ marginBottom: "0.5rem" }}>
+                  {detailData.summary.rowCount} rows. Total {METRIC_LABELS[detailData.detailMetric]}:{" "}
+                  {formatMoney(detailData.summary.totalArr, currency)} ({formatMoney(detailData.summary.totalMrr, currency)} MRR)
+                </p>
+                <div className="stripe-ui__table-wrap">
+                  <table className="stripe-ui__table" aria-label="TOFU metric detail table">
+                    <thead>
+                      <tr>
+                        <th>Customer</th>
+                        <th>Source</th>
+                        <th className="stripe-ui__num">
+                          Previous MRR ({detailData.detailPreviousPeriodLabel || "N/A"})
+                        </th>
+                        <th className="stripe-ui__num">Current MRR ({detailData.detailPeriodLabel})</th>
+                        <th className="stripe-ui__num">Delta MRR</th>
+                        <th className="stripe-ui__num">Contribution MRR</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detailData.rows.map((row) => (
+                        <tr key={`${detailData.detailMetric}:${detailData.detailPeriodKey}:${row.customerId}`}>
+                          <td>{row.customerLabel}</td>
+                          <td>{row.source === "hubspot_account" ? "HubSpot account" : "Stripe only"}</td>
+                          <td className="stripe-ui__num">{formatMoney(row.previousMrr, currency)}</td>
+                          <td className="stripe-ui__num">{formatMoney(row.currentMrr, currency)}</td>
+                          <td className={`stripe-ui__num ${row.deltaMrr < 0 ? "stripe-ui__money--negative" : ""}`}>
+                            {formatMoney(row.deltaMrr, currency)}
+                          </td>
+                          <td className={`stripe-ui__num ${row.contributionMrr < 0 ? "stripe-ui__money--negative" : ""}`}>
+                            {formatMoney(row.contributionMrr, currency)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </section>
         </>
       )}
