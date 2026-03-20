@@ -87,6 +87,8 @@ type DetailMetricKey =
   | "netMrrChange"
   | "eventCount";
 
+type GroupedSortMode = "latest_arr_desc" | "range_arr_sum_desc";
+
 const DETAIL_METRIC_OPTIONS: Array<{ key: DetailMetricKey; label: string }> = [
   { key: "monthEndArr", label: "ARR (month end)" },
   { key: "newMrr", label: "New" },
@@ -216,6 +218,7 @@ export default function StripeThroughMrrPage() {
   const [filterCustomerId, setFilterCustomerId] = useState("");
   const [filterProductSearch, setFilterProductSearch] = useState("");
   const [filterGroupSearch, setFilterGroupSearch] = useState("");
+  const [groupedSortMode, setGroupedSortMode] = useState<GroupedSortMode>("range_arr_sum_desc");
 
   async function run(targetPage = 1) {
     setHasRunOnce(true);
@@ -321,7 +324,15 @@ export default function StripeThroughMrrPage() {
       entry.totalNet += row.netMrrChange;
     }
     const latestMonthKey = detailMonthsInRange.length ? detailMonthsInRange[detailMonthsInRange.length - 1].monthKey : "";
+    const arrSumInRange = (entry: { byMonth: Map<string, GroupedDetailRow> }) =>
+      detailMonthsInRange.reduce((sum, month) => sum + metricValue(entry.byMonth.get(month.monthKey), "monthEndArr"), 0);
     return Array.from(byGroup.values()).sort((a, b) => {
+      if (groupedSortMode === "range_arr_sum_desc") {
+        const aRangeArr = arrSumInRange(a);
+        const bRangeArr = arrSumInRange(b);
+        const rangeDiff = bRangeArr - aRangeArr;
+        if (Math.abs(rangeDiff) > 1e-9) return rangeDiff;
+      }
       const aLatestArr = latestMonthKey ? metricValue(a.byMonth.get(latestMonthKey), "monthEndArr") : 0;
       const bLatestArr = latestMonthKey ? metricValue(b.byMonth.get(latestMonthKey), "monthEndArr") : 0;
       const arrDiff = bLatestArr - aLatestArr;
@@ -330,7 +341,7 @@ export default function StripeThroughMrrPage() {
       if (Math.abs(diff) > 1e-9) return diff;
       return a.groupLabel.localeCompare(b.groupLabel);
     });
-  }, [detailMode, detailRows, detailMonthsInRange]);
+  }, [detailMode, detailRows, detailMonthsInRange, groupedSortMode]);
 
   const eventTypeOptions = useMemo(() => {
     const types = new Set(
@@ -816,17 +827,31 @@ export default function StripeThroughMrrPage() {
                   </div>
                 </>
               ) : (
-                <div className="stripe-ui__field">
-                  <label className="stripe-ui__field-label" htmlFor="filter-group">Filter Group</label>
-                  <input
-                    id="filter-group"
-                    className="stripe-ui__control"
-                    type="text"
-                    value={filterGroupSearch}
-                    onChange={(e) => setFilterGroupSearch(e.target.value)}
-                    placeholder="contains..."
-                  />
-                </div>
+                <>
+                  <div className="stripe-ui__field">
+                    <label className="stripe-ui__field-label" htmlFor="filter-group">Filter Group</label>
+                    <input
+                      id="filter-group"
+                      className="stripe-ui__control"
+                      type="text"
+                      value={filterGroupSearch}
+                      onChange={(e) => setFilterGroupSearch(e.target.value)}
+                      placeholder="contains..."
+                    />
+                  </div>
+                  <div className="stripe-ui__field">
+                    <label className="stripe-ui__field-label" htmlFor="grouped-sort-mode">Group sort</label>
+                    <select
+                      id="grouped-sort-mode"
+                      className="stripe-ui__control"
+                      value={groupedSortMode}
+                      onChange={(e) => setGroupedSortMode(e.target.value as GroupedSortMode)}
+                    >
+                      <option value="range_arr_sum_desc">Sum of ARR in selected range (desc)</option>
+                      <option value="latest_arr_desc">Latest month ARR (desc)</option>
+                    </select>
+                  </div>
+                </>
               )}
             </div>
 
