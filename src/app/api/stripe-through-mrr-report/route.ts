@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   queryStripeThroughMrrReportFromBigQuery,
   type StripeBigQueryProfile,
+  type StripeThroughMrrGrain,
   type StripeThroughMrrGroupBy,
   type StripeThroughMrrReportRequest,
 } from "@/lib/stripeBigquery";
@@ -23,6 +24,7 @@ const GROUP_BY_VALUES = new Set<StripeThroughMrrGroupBy>([
   "event_type",
   "email",
 ]);
+const GRAIN_VALUES = new Set<StripeThroughMrrGrain>(["monthly", "daily"]);
 
 const DEFAULT_PAGE_SIZE = 1000;
 
@@ -44,6 +46,7 @@ type ApiBody = {
   detailStartMonth?: string;
   detailEndMonth?: string;
   detailMonth?: string;
+  grain?: string;
   groupBy?: string;
   page?: number;
   pageSize?: number;
@@ -61,6 +64,8 @@ function parsePayload(raw: Partial<ApiBody>): StripeThroughMrrReportRequest {
   const detailEndMonthRaw = String(raw.detailEndMonth || detailMonthFallbackRaw || "").trim();
   const detailStartMonth = isIsoMonth(detailStartMonthRaw) ? detailStartMonthRaw : monthFromDate(startDate);
   const detailEndMonth = isIsoMonth(detailEndMonthRaw) ? detailEndMonthRaw : monthFromDate(endDate);
+  const grainRaw = String(raw.grain || "monthly").trim().toLowerCase() as StripeThroughMrrGrain;
+  const grain = GRAIN_VALUES.has(grainRaw) ? grainRaw : "monthly";
 
   const groupByRaw = String(raw.groupBy || "none").trim() as StripeThroughMrrGroupBy;
   const groupBy = GROUP_BY_VALUES.has(groupByRaw) ? groupByRaw : "none";
@@ -81,6 +86,7 @@ function parsePayload(raw: Partial<ApiBody>): StripeThroughMrrReportRequest {
     endDate,
     detailStartMonth,
     detailEndMonth,
+    grain,
     groupBy,
     page,
     pageSize,
@@ -119,6 +125,7 @@ export async function GET(req: Request) {
       detailStartMonth: searchParams.get("detailStartMonth") || "",
       detailEndMonth: searchParams.get("detailEndMonth") || "",
       detailMonth: searchParams.get("detailMonth") || "",
+      grain: searchParams.get("grain") || "monthly",
       groupBy: searchParams.get("groupBy") || "none",
       page: Number(searchParams.get("page") || 1),
       pageSize: Number(searchParams.get("pageSize") || DEFAULT_PAGE_SIZE),

@@ -12,6 +12,7 @@ type GroupBy =
   | "subscription_item_id"
   | "event_type"
   | "email";
+type Grain = "monthly" | "daily";
 
 type MonthlyRow = {
   monthKey: string;
@@ -58,6 +59,7 @@ type ApiResponse = {
   endDate: string;
   detailStartMonth: string;
   detailEndMonth: string;
+  grain: Grain;
   groupBy: GroupBy;
   targetCurrency: string;
   totalMrr: number;
@@ -102,6 +104,10 @@ const GROUP_BY_OPTIONS: Array<{ key: GroupBy; label: string }> = [
   { key: "subscription_id", label: "Subscription ID" },
   { key: "subscription_item_id", label: "Subscription Item ID" },
   { key: "event_type", label: "Event Type" },
+];
+const GRAIN_OPTIONS: Array<{ key: Grain; label: string }> = [
+  { key: "monthly", label: "Monthly" },
+  { key: "daily", label: "Daily" },
 ];
 
 const PAGE_SIZE = 1000;
@@ -193,6 +199,7 @@ export default function StripeThroughMrrPage() {
   const [endDate, setEndDate] = useState(defaults.endDate);
   const [detailStartMonth, setDetailStartMonth] = useState(defaults.startMonth);
   const [detailEndMonth, setDetailEndMonth] = useState(defaults.endMonth);
+  const [grain, setGrain] = useState<Grain>("monthly");
   const [groupBy, setGroupBy] = useState<GroupBy>("none");
   const [selectedMetrics, setSelectedMetrics] = useState<DetailMetricKey[]>(["monthEndArr"]);
 
@@ -224,6 +231,7 @@ export default function StripeThroughMrrPage() {
           endDate,
           detailStartMonth,
           detailEndMonth,
+          grain,
           groupBy,
           page: targetPage,
           pageSize: PAGE_SIZE,
@@ -252,6 +260,7 @@ export default function StripeThroughMrrPage() {
       setPageJumpInput(String(report.pagination.page));
       setDetailStartMonth(report.detailStartMonth);
       setDetailEndMonth(report.detailEndMonth);
+      setGrain(report.grain || "monthly");
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
       setError(message);
@@ -279,17 +288,28 @@ export default function StripeThroughMrrPage() {
   }
 
   const summaryCurrency = data?.targetCurrency || "USD";
+  const effectiveGrain = data?.grain || grain;
+  const periodLabel = effectiveGrain === "daily" ? "Day" : "Month";
   const detailMode = data?.detailMode || (groupBy === "none" ? "raw" : "grouped");
   const months = useMemo(() => data?.months || [], [data]);
   const detailRows = useMemo(() => data?.detailRows || [], [data]);
   const effectiveDetailStartMonth = data?.detailStartMonth || detailStartMonth;
   const effectiveDetailEndMonth = data?.detailEndMonth || detailEndMonth;
 
-  const detailMonthsInRange = useMemo(
-    () =>
-      months.filter((month) => month.monthKey >= effectiveDetailStartMonth && month.monthKey <= effectiveDetailEndMonth),
-    [months, effectiveDetailStartMonth, effectiveDetailEndMonth],
-  );
+  const detailMonthsInRange = useMemo(() => {
+    const groupedRows = detailRows.filter(isGroupedRow);
+    if (groupedRows.length) {
+      const byKey = new Map<string, string>();
+      for (const row of groupedRows) {
+        byKey.set(row.monthKey, row.monthLabel || row.monthKey);
+      }
+      return Array.from(byKey.entries())
+        .map(([monthKey, monthLabel]) => ({ monthKey, monthLabel }))
+        .filter((month) => month.monthKey >= effectiveDetailStartMonth && month.monthKey <= effectiveDetailEndMonth)
+        .sort((a, b) => a.monthKey.localeCompare(b.monthKey));
+    }
+    return months.filter((month) => month.monthKey >= effectiveDetailStartMonth && month.monthKey <= effectiveDetailEndMonth);
+  }, [detailRows, months, effectiveDetailStartMonth, effectiveDetailEndMonth]);
 
   const groupedMatrixRows = useMemo(() => {
     if (detailMode !== "grouped") return [];
@@ -382,7 +402,7 @@ export default function StripeThroughMrrPage() {
   }
 
   function exportMonthlyCsv() {
-    const headers = ["Month", "MRR (month end)", "New", "Expansion", "Contraction", "Churn", "Net change"];
+    const headers = [periodLabel, "MRR (period end)", "New", "Expansion", "Contraction", "Churn", "Net change"];
     const rows = months.map((row) => [
       row.monthLabel,
       String(row.monthEndMrr),
@@ -392,7 +412,7 @@ export default function StripeThroughMrrPage() {
       String(row.churnMrr),
       String(row.netMrrChange),
     ]);
-    downloadCsv("stripe-through-mrr-monthly.csv", headers, rows);
+    downloadCsv(`stripe-through-mrr-${effectiveGrain}.csv`, headers, rows);
   }
 
   async function fetchAllDetailRows(): Promise<ApiResponse["detailRows"]> {
@@ -406,7 +426,16 @@ export default function StripeThroughMrrPage() {
         fetch("/api/stripe-through-mrr-report", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ startDate, endDate, detailStartMonth, detailEndMonth, groupBy, page: p, pageSize: PAGE_SIZE }),
+          body: JSON.stringify({
+            startDate,
+            endDate,
+            detailStartMonth,
+            detailEndMonth,
+            grain,
+            groupBy,
+            page: p,
+            pageSize: PAGE_SIZE,
+          }),
         }).then((r) => r.json() as Promise<ApiResponse>),
       ),
     );
@@ -574,6 +603,24 @@ export default function StripeThroughMrrPage() {
           </div>
 
           <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="stripe-through-mrr-grain">
+              Time grain
+            </label>
+            <select
+              id="stripe-through-mrr-grain"
+              className="stripe-ui__control"
+              value={grain}
+              onChange={(e) => setGrain(e.target.value as Grain)}
+            >
+              {GRAIN_OPTIONS.map((opt) => (
+                <option key={opt.key} value={opt.key}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="stripe-ui__field">
             <label className="stripe-ui__field-label" htmlFor="stripe-through-mrr-detail-start-month">
               Detail start month
             </label>
@@ -640,7 +687,7 @@ export default function StripeThroughMrrPage() {
       {loading && (
         <section className="stripe-ui__panel stripe-ui__loading-panel ui-reveal ui-reveal-2" aria-live="polite" aria-busy="true">
           <h2 className="stripe-ui__panel-title">Loading report...</h2>
-          <p className="stripe-ui__panel-subtitle">Computing monthly MRR and loading detail rows.</p>
+          <p className="stripe-ui__panel-subtitle">Computing {grain} MRR and loading detail rows.</p>
           <div className="stripe-ui__skeleton-grid">
             <div className="stripe-ui__skeleton-row" />
             <div className="stripe-ui__skeleton-row" />
@@ -669,7 +716,7 @@ export default function StripeThroughMrrPage() {
                 <p className="stripe-ui__stat-value">{formatMoney(data.totalMrr, summaryCurrency)}</p>
               </div>
               <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Months in range</p>
+                <p className="stripe-ui__stat-label">Periods in range</p>
                 <p className="stripe-ui__stat-value">{months.length}</p>
               </div>
               <div className="stripe-ui__stat">
@@ -682,7 +729,7 @@ export default function StripeThroughMrrPage() {
           <section className="stripe-ui__panel ui-reveal ui-reveal-3">
             <div className="stripe-ui__section-head">
               <div>
-                <h2 className="stripe-ui__panel-title">Monthly MRR movement</h2>
+                <h2 className="stripe-ui__panel-title">{effectiveGrain === "daily" ? "Daily MRR movement" : "Monthly MRR movement"}</h2>
                 <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
                   New = `ACTIVE_START`, Expansion = `ACTIVE_UPGRADE`, Contraction = `ACTIVE_DOWNGRADE`, Churn =
                   `ACTIVE_END`.
@@ -693,11 +740,11 @@ export default function StripeThroughMrrPage() {
               </button>
             </div>
             <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
-              <table className="stripe-ui__table" aria-label="Stripe through MRR monthly summary table">
+              <table className="stripe-ui__table" aria-label="Stripe through MRR summary table">
                 <thead>
                   <tr>
-                    <th>Month</th>
-                    <th className="stripe-ui__num">MRR (month end)</th>
+                    <th>{periodLabel}</th>
+                    <th className="stripe-ui__num">MRR (period end)</th>
                     <th className="stripe-ui__num">New</th>
                     <th className="stripe-ui__num">Expansion</th>
                     <th className="stripe-ui__num">Contraction</th>
