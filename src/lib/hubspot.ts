@@ -11,6 +11,7 @@ const HUBSPOT_BASE = "https://api.hubapi.com";
 const HUBSPOT_ASSOC_CONCURRENCY = 4;
 const HUBSPOT_ASSOC_BATCH_CONCURRENCY = 2;
 const HUBSPOT_BATCH_READ_CONCURRENCY = 2;
+const HUBSPOT_CONTACT_SEARCH_CONCURRENCY = 4;
 const HUBSPOT_MAX_RETRIES = 6;
 const HUBSPOT_BASE_BACKOFF_MS = 400;
 const HUBSPOT_CACHE_TTL_MS = Number(process.env.HUBSPOT_CACHE_TTL_MS || "120000");
@@ -20,6 +21,8 @@ type CacheEntry<T> = { value: T; expiresAt: number };
 const DEALS_CACHE = new Map<string, CacheEntry<HubspotDeal[]>>();
 const DEAL_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
 const COMPANY_CONTACT_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
+const CONTACT_COMPANY_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
+const CONTACT_EMAIL_SEARCH_CACHE = new Map<string, CacheEntry<string[]>>();
 const COMPANY_CACHE = new Map<string, CacheEntry<HubspotCompany>>();
 const CONTACT_CACHE = new Map<string, CacheEntry<HubspotContact>>();
 const LINE_ITEM_CACHE = new Map<string, CacheEntry<HubspotLineItem>>();
@@ -120,6 +123,29 @@ type CompanyContactBatchAssociationResponse = {
     from?: { id?: string | number };
     to?: Array<{ toObjectId?: string | number; id?: string | number }>;
   }>;
+};
+
+type ContactCompanyAssociationResponse = {
+  results?: Array<{ id?: string | number }>;
+};
+
+type ContactCompanyBatchAssociationResponse = {
+  results?: Array<{
+    from?: { id?: string | number };
+    to?: Array<{ toObjectId?: string | number; id?: string | number }>;
+  }>;
+};
+
+type ContactSearchPayload = {
+  filterGroups: Array<{
+    filters: Array<
+      | { propertyName: string; operator: "EQ"; value: string }
+      | { propertyName: string; operator: "IN"; values: string[] }
+    >;
+  }>;
+  properties: string[];
+  limit: number;
+  after?: string;
 };
 
 export type HubspotDealPropertyUpdate = {
@@ -341,6 +367,272 @@ export async function fetchContactIdsForCompanies(companyIds: string[]) {
   }
 
   return companyIds.map((companyId) => ({ companyId, ids: out.get(companyId) || [] }));
+}
+
+function normalizeEmail(value: string) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function uniqueEmails(values: string[]) {
+  return Array.from(
+    new Set(
+      (values || [])
+        .map((value) => normalizeEmail(value))
+        .filter((value) => value.includes("@")),
+    ),
+  );
+}
+
+async function searchContactIdsByEmailEq(email: string) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return [];
+
+  const cached = readCache(CONTACT_EMAIL_SEARCH_CACHE, normalizedEmail);
+  if (cached) return cached;
+
+  const url = `${HUBSPOT_BASE}/crm/v3/objects/contacts/search`;
+  const ids: string[] = [];
+  let after: string | null = null;
+
+  while (true) {
+    const payload: ContactSearchPayload = {
+      filterGroups: [
+        {
+          filters: [{ propertyName: "email", operator: "EQ", value: normalizedEmail }],
+        },
+      ],
+      properties: ["email"],
+      limit: 100,
+    };
+    if (after) payload.after = after;
+
+    const json: HubspotSearchResponse<HubspotContact> = await hsFetch(url, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    for (const contact of json.results || []) {
+      const id = String(contact.id || "").trim();
+      if (id) ids.push(id);
+    }
+    after = json.paging?.next?.after ?? null;
+    if (!after) break;
+  }
+
+  const deduped = Array.from(new Set(ids));
+  writeCache(CONTACT_EMAIL_SEARCH_CACHE, normalizedEmail, deduped);
+  return deduped;
+}
+
+async function searchContactIdsByEmails(emails: string[]) {
+  const normalizedEmails = uniqueEmails(emails);
+  const emailToContactIds = new Map<string, string[]>();
+  if (!normalizedEmails.length) return emailToContactIds;
+
+  const pending: string[] = [];
+  for (const email of normalizedEmails) {
+    const cached = readCache(CONTACT_EMAIL_SEARCH_CACHE, email);
+    if (cached) {
+      emailToContactIds.set(email, cached);
+    } else {
+      pending.push(email);
+    }
+  }
+
+  if (pending.length) {
+    let usedInOperator = false;
+    try {
+      const url = `${HUBSPOT_BASE}/crm/v3/objects/contacts/search`;
+      const chunkSize = 50;
+      const chunks: string[][] = [];
+      for (let i = 0; i < pending.length; i += chunkSize) chunks.push(pending.slice(i, i + chunkSize));
+
+      const chunkResults = await mapWithConcurrency(
+        chunks,
+        HUBSPOT_CONTACT_SEARCH_CONCURRENCY,
+        async (chunk) => {
+          let after: string | null = null;
+          const found = new Map<string, Set<string>>();
+          for (const email of chunk) found.set(email, new Set<string>());
+
+          while (true) {
+            const payload: ContactSearchPayload = {
+              filterGroups: [
+                {
+                  filters: [{ propertyName: "email", operator: "IN", values: chunk }],
+                },
+              ],
+              properties: ["email"],
+              limit: 100,
+            };
+            if (after) payload.after = after;
+
+            const json: HubspotSearchResponse<HubspotContact> = await hsFetch(url, {
+              method: "POST",
+              body: JSON.stringify(payload),
+            });
+
+            for (const contact of json.results || []) {
+              const id = String(contact.id || "").trim();
+              const email = normalizeEmail(String(contact.properties?.email || ""));
+              if (!id || !email) continue;
+              if (!found.has(email)) continue;
+              found.get(email)!.add(id);
+            }
+
+            after = json.paging?.next?.after ?? null;
+            if (!after) break;
+          }
+
+          return found;
+        },
+      );
+
+      for (const chunkResult of chunkResults) {
+        for (const [email, idsSet] of chunkResult.entries()) {
+          const ids = Array.from(idsSet);
+          emailToContactIds.set(email, ids);
+          writeCache(CONTACT_EMAIL_SEARCH_CACHE, email, ids);
+        }
+      }
+      usedInOperator = true;
+    } catch {
+      usedInOperator = false;
+    }
+
+    if (!usedInOperator) {
+      const pairs = await mapWithConcurrency(pending, HUBSPOT_CONTACT_SEARCH_CONCURRENCY, async (email) => {
+        const ids = await searchContactIdsByEmailEq(email);
+        return { email, ids };
+      });
+      for (const pair of pairs) {
+        emailToContactIds.set(pair.email, pair.ids);
+      }
+    }
+  }
+
+  for (const email of normalizedEmails) {
+    if (!emailToContactIds.has(email)) {
+      emailToContactIds.set(email, []);
+      writeCache(CONTACT_EMAIL_SEARCH_CACHE, email, []);
+    }
+  }
+
+  return emailToContactIds;
+}
+
+async function fetchCompanyIdsForContact(contactId: string) {
+  const cached = readCache(CONTACT_COMPANY_ASSOC_CACHE, contactId);
+  if (cached) return cached;
+
+  const url = `${HUBSPOT_BASE}/crm/v3/objects/contacts/${contactId}/associations/companies`;
+  const json = (await hsFetch(url)) as ContactCompanyAssociationResponse;
+  const ids = (json.results || [])
+    .map((r) => String(r.id || ""))
+    .filter((id) => !!id);
+  writeCache(CONTACT_COMPANY_ASSOC_CACHE, contactId, ids);
+  return ids;
+}
+
+async function fetchCompanyIdsForContacts(contactIds: string[]) {
+  const dedupedContactIds = Array.from(new Set(contactIds.filter((id) => !!id)));
+  const out = new Map<string, string[]>();
+
+  const pending: string[] = [];
+  for (const contactId of dedupedContactIds) {
+    const cached = readCache(CONTACT_COMPANY_ASSOC_CACHE, contactId);
+    if (cached) out.set(contactId, cached);
+    else pending.push(contactId);
+  }
+
+  if (pending.length) {
+    let resolvedByBatch = false;
+    try {
+      const batchUrl = `${HUBSPOT_BASE}/crm/v4/associations/contacts/companies/batch/read`;
+      const chunkSize = 100;
+      const chunks: string[][] = [];
+      for (let i = 0; i < pending.length; i += chunkSize) chunks.push(pending.slice(i, i + chunkSize));
+
+      const chunkResults = await mapWithConcurrency(
+        chunks,
+        HUBSPOT_ASSOC_BATCH_CONCURRENCY,
+        async (chunk): Promise<ContactCompanyBatchAssociationResponse> => {
+          const json = (await hsFetch(batchUrl, {
+            method: "POST",
+            body: JSON.stringify({ inputs: chunk.map((id) => ({ id })) }),
+          })) as ContactCompanyBatchAssociationResponse;
+          return json;
+        },
+      );
+
+      const seenInBatch = new Set<string>();
+      for (const chunkResult of chunkResults) {
+        for (const assoc of chunkResult.results || []) {
+          const contactId = String(assoc.from?.id || "");
+          if (!contactId) continue;
+          seenInBatch.add(contactId);
+          const ids = (assoc.to || [])
+            .map((t) => String(t.toObjectId || t.id || ""))
+            .filter((id) => !!id);
+          out.set(contactId, ids);
+          writeCache(CONTACT_COMPANY_ASSOC_CACHE, contactId, ids);
+        }
+      }
+
+      for (const contactId of pending) {
+        if (!seenInBatch.has(contactId)) {
+          out.set(contactId, []);
+          writeCache(CONTACT_COMPANY_ASSOC_CACHE, contactId, []);
+        }
+      }
+      resolvedByBatch = true;
+    } catch {
+      resolvedByBatch = false;
+    }
+
+    if (!resolvedByBatch) {
+      const pairs = await mapWithConcurrency(pending, HUBSPOT_ASSOC_CONCURRENCY, async (contactId) => {
+        const ids = await fetchCompanyIdsForContact(contactId);
+        return { contactId, ids };
+      });
+      for (const pair of pairs) out.set(pair.contactId, pair.ids);
+    }
+  }
+
+  return contactIds.map((contactId) => ({ contactId, ids: out.get(contactId) || [] }));
+}
+
+export async function fetchCompanyIdsForContactEmails(emails: string[]) {
+  const normalizedEmails = uniqueEmails(emails);
+  const result = new Map<string, Set<string>>();
+  if (!normalizedEmails.length) return result;
+
+  const emailToContactIds = await searchContactIdsByEmails(normalizedEmails);
+  const allContactIds = Array.from(
+    new Set(
+      normalizedEmails.flatMap((email) => emailToContactIds.get(email) || []),
+    ),
+  );
+  if (!allContactIds.length) return result;
+
+  const companyIdsByContact = new Map<string, string[]>();
+  for (const pair of await fetchCompanyIdsForContacts(allContactIds)) {
+    companyIdsByContact.set(pair.contactId, pair.ids || []);
+  }
+
+  for (const email of normalizedEmails) {
+    const contactIds = emailToContactIds.get(email) || [];
+    for (const contactId of contactIds) {
+      const companyIds = companyIdsByContact.get(contactId) || [];
+      for (const companyId of companyIds) {
+        const normalizedCompanyId = String(companyId || "").trim();
+        if (!normalizedCompanyId) continue;
+        if (!result.has(normalizedCompanyId)) result.set(normalizedCompanyId, new Set<string>());
+        result.get(normalizedCompanyId)!.add(email);
+      }
+    }
+  }
+
+  return result;
 }
 
 export async function batchReadLineItems(ids: string[], properties: string[]) {

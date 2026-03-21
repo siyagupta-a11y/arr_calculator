@@ -1,4 +1,4 @@
-import { batchReadContacts, fetchContactIdsForCompanies } from "@/lib/hubspot";
+import { fetchCompanyIdsForContactEmails } from "@/lib/hubspot";
 import { generateReport } from "@/lib/report";
 import {
   queryStripeThroughMrrCustomerArrFromBigQuery,
@@ -196,45 +196,20 @@ function summarizeErrorMessage(error: unknown) {
 async function attachStripeKeysFromHubspotContacts(
   accounts: Map<string, HubspotAccountAggregate>,
   companyIdToAccountKey: Map<string, string>,
+  stripeCustomers: Map<string, StripeCustomerAggregate>,
 ) {
-  const companyIds = Array.from(companyIdToAccountKey.keys());
-  if (!companyIds.length) return;
+  const candidateEmails = Array.from(stripeCustomers.keys()).filter((key) => key.includes("@"));
+  if (!candidateEmails.length) return;
 
-  const companyContactPairs = await fetchContactIdsForCompanies(companyIds);
-  const allContactIds = Array.from(
-    new Set(
-      companyContactPairs
-        .flatMap((pair) => pair.ids || [])
-        .map((id) => String(id || "").trim())
-        .filter(Boolean),
-    ),
-  );
-  if (!allContactIds.length) return;
-
-  const contactsById = await batchReadContacts(allContactIds, ["email"]);
-
-  const contactIdsByAccountKey = new Map<string, Set<string>>();
-  for (const pair of companyContactPairs) {
-    const accountKey = companyIdToAccountKey.get(String(pair.companyId || ""));
+  const companyEmails = await fetchCompanyIdsForContactEmails(candidateEmails);
+  for (const [companyId, emails] of companyEmails.entries()) {
+    const accountKey = companyIdToAccountKey.get(String(companyId || "").trim());
     if (!accountKey) continue;
-    if (!contactIdsByAccountKey.has(accountKey)) contactIdsByAccountKey.set(accountKey, new Set<string>());
-    const bucket = contactIdsByAccountKey.get(accountKey)!;
-    for (const contactId of pair.ids || []) {
-      const normalized = String(contactId || "").trim();
-      if (normalized) bucket.add(normalized);
-    }
-  }
-
-  for (const [accountKey, contactIdSet] of contactIdsByAccountKey.entries()) {
     const account = accounts.get(accountKey);
     if (!account) continue;
-
-    for (const contactId of contactIdSet) {
-      const contact = contactsById.get(contactId);
-      const properties = (contact?.properties || {}) as Record<string, unknown>;
-
-      const email = normalizeStripeKey(String(properties.email || ""));
-      if (email) account.stripeKeys.add(email);
+    for (const email of emails) {
+      const normalized = normalizeStripeKey(email);
+      if (normalized) account.stripeKeys.add(normalized);
     }
   }
 }
@@ -368,7 +343,7 @@ export async function generateCombinedAllSubsReport(
 
   if (combineMode === "grouped") {
     try {
-      await attachStripeKeysFromHubspotContacts(accounts, companyIdToAccountKey);
+      await attachStripeKeysFromHubspotContacts(accounts, companyIdToAccountKey, stripeCustomers);
       matchedStripeCustomerKeys = mergeStripeIntoHubspotAccounts(
         periods,
         accounts,

@@ -83,6 +83,7 @@ export type StripeThroughMrrGroupBy =
   | "subscription_item_id"
   | "event_type"
   | "email";
+export type StripeThroughMrrGrain = "monthly" | "daily";
 
 export type StripeThroughMrrMonthlyRow = {
   monthKey: string;
@@ -131,6 +132,7 @@ export type StripeThroughMrrReportRequest = {
   endDate: string;
   detailStartMonth: string;
   detailEndMonth: string;
+  grain?: StripeThroughMrrGrain;
   groupBy: StripeThroughMrrGroupBy;
   page: number;
   pageSize: number;
@@ -142,6 +144,7 @@ export type StripeThroughMrrReportResult = {
   endDate: string;
   detailStartMonth: string;
   detailEndMonth: string;
+  grain: StripeThroughMrrGrain;
   groupBy: StripeThroughMrrGroupBy;
   targetCurrency: string;
   totalMrr: number;
@@ -1735,6 +1738,11 @@ function normalizeStripeThroughMrrGroupBy(groupBy: string | undefined): StripeTh
   return "none";
 }
 
+function normalizeStripeThroughMrrGrain(grain: string | undefined): StripeThroughMrrGrain {
+  const candidate = String(grain || "").trim().toLowerCase();
+  return candidate === "daily" ? "daily" : "monthly";
+}
+
 function normalizeStripeBillingOverviewGrain(grain: string | undefined): StripeBillingOverviewGrain {
   const candidate = String(grain || "").trim().toLowerCase();
   if (candidate === "daily") return "daily";
@@ -2108,6 +2116,7 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const detailEndExclusiveDateIso = detailEndExclusiveDate.toISOString().slice(0, 10);
   const detailStartMonth = isoMonthFromDateUtc(detailStartMonthDate);
   const detailEndMonth = isoMonthFromDateUtc(detailEndMonthDate);
+  const grain = normalizeStripeThroughMrrGrain(request.grain);
   const groupBy = normalizeStripeThroughMrrGroupBy(request.groupBy);
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
   const pageSize = Math.max(1, Math.min(5000, Math.floor(asNumber(request.pageSize) || 1000)));
@@ -2125,7 +2134,79 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const chargesTable = getStripeChargesTable(profile);
   const paymentMethodsTable = getStripePaymentMethodsTable(profile);
 
-  const monthlySummaryQuery = `
+  const summaryQuery =
+    grain === "daily"
+      ? `
+WITH bounds AS (
+  SELECT
+    DATE(@start_date) AS range_start_date,
+    DATE(@end_date) AS range_end_date,
+    DATE(@end_exclusive_date) AS range_end_exclusive_date
+),
+days AS (
+  SELECT
+    day_date
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.range_start_date, b.range_end_date, INTERVAL 1 DAY)) AS day_date
+),
+base_before_first_day AS (
+  SELECT
+    COALESCE(SUM(CAST(COALESCE(mrr_change, 0) AS FLOAT64)) / 100.0, 0.0) AS base_mrr
+  FROM \`${table}\` t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp < TIMESTAMP(b.range_start_date)
+),
+daily_net AS (
+  SELECT
+    DATE(event_timestamp) AS day_date,
+    COALESCE(SUM(CAST(COALESCE(mrr_change, 0) AS FLOAT64)) / 100.0, 0.0) AS net_mrr_change
+  FROM \`${table}\` t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp >= TIMESTAMP(b.range_start_date)
+    AND event_timestamp < TIMESTAMP(b.range_end_exclusive_date)
+  GROUP BY day_date
+),
+daily_flow AS (
+  SELECT
+    DATE(event_timestamp) AS day_date,
+    COALESCE(SUM(IF(UPPER(CAST(event_type AS STRING)) = 'ACTIVE_START', CAST(COALESCE(mrr_change, 0) AS FLOAT64), 0.0)) / 100.0, 0.0) AS new_mrr,
+    COALESCE(SUM(IF(UPPER(CAST(event_type AS STRING)) = 'ACTIVE_UPGRADE', CAST(COALESCE(mrr_change, 0) AS FLOAT64), 0.0)) / 100.0, 0.0) AS expansion_mrr,
+    COALESCE(SUM(IF(UPPER(CAST(event_type AS STRING)) = 'ACTIVE_DOWNGRADE', CAST(COALESCE(mrr_change, 0) AS FLOAT64), 0.0)) / 100.0, 0.0) AS contraction_mrr,
+    COALESCE(SUM(IF(UPPER(CAST(event_type AS STRING)) = 'ACTIVE_END', CAST(COALESCE(mrr_change, 0) AS FLOAT64), 0.0)) / 100.0, 0.0) AS churn_mrr,
+    COALESCE(SUM(CAST(COALESCE(mrr_change, 0) AS FLOAT64)) / 100.0, 0.0) AS net_mrr_change
+  FROM \`${table}\` t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp >= TIMESTAMP(b.range_start_date)
+    AND event_timestamp < TIMESTAMP(b.range_end_exclusive_date)
+  GROUP BY day_date
+)
+SELECT
+  FORMAT_DATE('%Y-%m-%d', d.day_date) AS month_key,
+  FORMAT_DATE('%Y-%m-%d', d.day_date) AS month_label,
+  ROUND(
+    b.base_mrr + SUM(COALESCE(n.net_mrr_change, 0.0)) OVER (ORDER BY d.day_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+    2
+  ) AS month_end_mrr,
+  ROUND(COALESCE(f.new_mrr, 0.0), 2) AS new_mrr,
+  ROUND(COALESCE(f.expansion_mrr, 0.0), 2) AS expansion_mrr,
+  ROUND(COALESCE(f.contraction_mrr, 0.0), 2) AS contraction_mrr,
+  ROUND(COALESCE(f.churn_mrr, 0.0), 2) AS churn_mrr,
+  ROUND(COALESCE(f.net_mrr_change, 0.0), 2) AS net_mrr_change
+FROM days d
+CROSS JOIN base_before_first_day b
+LEFT JOIN daily_net n
+  ON n.day_date = d.day_date
+LEFT JOIN daily_flow f
+  ON f.day_date = d.day_date
+ORDER BY d.day_date
+`
+      : `
 WITH bounds AS (
   SELECT
     DATE(@start_date) AS range_start_date,
@@ -2213,15 +2294,15 @@ WHERE
     { name: "end_exclusive_date", type: "STRING", value: endExclusiveDateIso },
   ];
 
-  const [monthlySummaryRows, totalMrrRows] = await Promise.all([
-    runBigQueryQueryRows(accessToken, projectId, location, monthlySummaryQuery, baseParams),
+  const [summaryRows, totalMrrRows] = await Promise.all([
+    runBigQueryQueryRows(accessToken, projectId, location, summaryQuery, baseParams),
     runBigQueryQueryRows(accessToken, projectId, location, totalMrrQuery, [
       { name: "target_currency", type: "STRING", value: targetCurrency },
       { name: "end_exclusive_date", type: "STRING", value: endExclusiveDateIso },
     ]),
   ]);
 
-  const months: StripeThroughMrrMonthlyRow[] = monthlySummaryRows.map((row) => ({
+  const months: StripeThroughMrrMonthlyRow[] = summaryRows.map((row) => ({
     monthKey: asString(row.month_key),
     monthLabel: asString(row.month_label),
     monthEndMrr: asNumber(row.month_end_mrr),
@@ -2626,6 +2707,7 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
     endDate: endDateIso,
     detailStartMonth,
     detailEndMonth,
+    grain,
     groupBy,
     targetCurrency: targetCurrency.toUpperCase(),
     totalMrr,
