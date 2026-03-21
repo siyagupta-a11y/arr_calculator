@@ -15,6 +15,7 @@ This is a Next.js ARR dashboard.
 - `GET /api/stripe-arr-correct-report/export` Stripe ARR (Correct) CSV export API
 - `GET|POST /api/combined-all-subs-report` Combined HubSpot+Stripe customer ARR API
 - `GET|POST /api/tofu-report` Monthly TOFU ARR bridge API based on Combined All Subs
+- `GET|POST /api/hubspot-current-metrics-sync` Push current ARR/contracted ARR values into HubSpot deal properties
 - `GET|POST /api/stripe-sync` Stripe sync API
 - `GET /api/stripe-sync/status` Stripe sync health/status API
 - `GET|POST /api/stripe-bigquery-refresh` Rebuild Stripe external BigQuery tables from GCS bucket folders
@@ -32,6 +33,7 @@ Vercel cron runs Stripe sync automatically every 5 minutes:
 
 - `*/5 * * * *` (`/api/stripe-sync`)
 - `0 * * * *` (`/api/stripe-bigquery-refresh`) hourly refresh of bucket-backed external Stripe tables
+- `5 * * * *` (`/api/hubspot-current-metrics-sync`) hourly HubSpot deal metric property update
 - `0 */6 * * *` (`/api/quickbooks/keepalive`) QuickBooks OAuth token keepalive
 
 `/api/stripe-sync` accepts:
@@ -65,6 +67,25 @@ Use `/api/stripe-sync/status` to verify live progress. It returns:
 ```
 
 The route is cron-authenticated with `CRON_SECRET` (same pattern as `/api/stripe-sync`) and can also be triggered manually.
+
+`/api/hubspot-current-metrics-sync` accepts:
+
+```json
+{
+  "asOfDate": "2026-03-21",
+  "dryRun": false,
+  "contractedArrField": "contracted_arr",
+  "currentArrField": "current_arr",
+  "syncedAtField": "arr_sync_date"
+}
+```
+
+Notes:
+
+- `contractedArrField` defaults to `contracted_arr` (or `HUBSPOT_CONTRACTED_ARR_FIELD`)
+- `currentArrField` is optional (`HUBSPOT_CURRENT_ARR_FIELD`)
+- `syncedAtField` is optional (`HUBSPOT_ARR_SYNC_DATE_FIELD`)
+- Uses the same `INCLUDED_DEALSTAGE` filter as HubSpot report calculations
 
 ## Persistence Across Redeployments
 
@@ -240,6 +261,9 @@ HubSpot:
 - `HUBSPOT_PRIVATE_APP_TOKEN`
 - `INCLUDED_DEALSTAGE`
 - `FX_TARGET_CURRENCY`
+- `HUBSPOT_CONTRACTED_ARR_FIELD` (optional, default `contracted_arr`)
+- `HUBSPOT_CURRENT_ARR_FIELD` (optional)
+- `HUBSPOT_ARR_SYNC_DATE_FIELD` (optional)
 
 Stripe:
 
