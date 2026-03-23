@@ -1,4 +1,10 @@
-import { fetchDealsInStage, fetchLineItemIdsForDeals, batchReadCompanies, batchReadLineItems } from "@/lib/hubspot";
+import {
+  fetchDealsInStage,
+  fetchDealStageIdToLabelMap,
+  fetchLineItemIdsForDeals,
+  batchReadCompanies,
+  batchReadLineItems,
+} from "@/lib/hubspot";
 import { getMonthlyAverageFxRateForCloseMonth } from "@/lib/fx";
 import {
   LI_PROPS,
@@ -101,6 +107,12 @@ function isUnknownPropertyError(err: unknown) {
       msg.includes("no property found") ||
       msg.includes("not a valid property"))
   );
+}
+
+function mapStageIdToLabel(value: string, stageIdToLabel: Map<string, string>) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return stageIdToLabel.get(raw) || raw;
 }
 
 function formatDayKey(d: Date) {
@@ -254,6 +266,21 @@ export async function generateReport(
       dealType: String(pDeal.dealtype || "").trim(),
     };
   });
+
+  try {
+    const stageIdToLabel = await fetchDealStageIdToLabelMap();
+    if (stageIdToLabel.size > 0) {
+      for (const meta of allDealMeta) {
+        meta.deliveryStage = mapStageIdToLabel(meta.deliveryStage, stageIdToLabel);
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `Failed to resolve HubSpot delivery stage labels from pipelines: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 
   const COMPANY_WORKSPACE_ID_PROP = String(process.env.COMPANY_WORKSPACE_ID_PROP || "workspace_id").trim();
   const companyWorkspaceProps = Array.from(new Set([COMPANY_WORKSPACE_ID_PROP, "workspace_id"])).filter(Boolean);
