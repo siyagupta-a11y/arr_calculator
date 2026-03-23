@@ -96,6 +96,27 @@ function sumField(rows: TofuMonthRow[], key: keyof TofuMonthRow) {
   return rows.reduce((sum, row) => sum + Number(row[key] || 0), 0);
 }
 
+function csvCell(value: unknown) {
+  const raw = value == null ? "" : String(value);
+  if (/[",\n\r]/.test(raw)) return `"${raw.replace(/"/g, "\"\"")}"`;
+  return raw;
+}
+
+function downloadCsv(filename: string, header: string[], rows: Array<Array<unknown>>) {
+  const lines = [header, ...rows].map((row) => row.map(csvCell).join(","));
+  const csv = `${lines.join("\n")}\n`;
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 async function parseApiResponse(res: Response) {
   const text = await res.text();
   let json: unknown = null;
@@ -181,6 +202,47 @@ export default function TofuPage() {
   const currency = data?.targetCurrency || "USD";
   const effectiveCombineMode = data?.combineMode || combineMode;
   const rows = data?.rows || [];
+
+  function exportDetailCsv(payload: TofuDetailResponse) {
+    const filename = `tofu-detail-${payload.detailMetric}-${payload.detailPeriodKey}-${payload.combineMode}.csv`;
+    const header = [
+      "period_key",
+      "period_label",
+      "previous_period_key",
+      "previous_period_label",
+      "metric",
+      "customer_id",
+      "customer_label",
+      "source",
+      "previous_arr",
+      "current_arr",
+      "delta_arr",
+      "contribution_arr",
+      "previous_mrr",
+      "current_mrr",
+      "delta_mrr",
+      "contribution_mrr",
+    ];
+    const csvRows = payload.rows.map((row) => [
+      payload.detailPeriodKey,
+      payload.detailPeriodLabel,
+      payload.detailPreviousPeriodKey,
+      payload.detailPreviousPeriodLabel,
+      payload.detailMetric,
+      row.customerId,
+      row.customerLabel,
+      row.source === "hubspot_account" ? "hubspot_account" : "stripe_only_customer",
+      row.previousArr,
+      row.currentArr,
+      row.deltaArr,
+      row.contributionArr,
+      row.previousMrr,
+      row.currentMrr,
+      row.deltaMrr,
+      row.contributionMrr,
+    ]);
+    downloadCsv(filename, header, csvRows);
+  }
 
   function renderDrillCell(row: TofuMonthRow, metric: TofuDetailMetric, value: number) {
     return (
@@ -398,10 +460,19 @@ export default function TofuPage() {
                 <h3 className="stripe-ui__panel-title" style={{ fontSize: "1rem" }}>
                   {METRIC_LABELS[detailData.detailMetric]} detail - {detailData.detailPeriodLabel}
                 </h3>
-                <p className="stripe-ui__panel-subtitle" style={{ marginBottom: "0.5rem" }}>
-                  {detailData.summary.rowCount} rows. Total {METRIC_LABELS[detailData.detailMetric]}:{" "}
-                  {formatMoney(detailData.summary.totalArr, currency)} ({formatMoney(detailData.summary.totalMrr, currency)} MRR)
-                </p>
+                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginBottom: "0.5rem" }}>
+                  <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                    {detailData.summary.rowCount} rows. Total {METRIC_LABELS[detailData.detailMetric]}:{" "}
+                    {formatMoney(detailData.summary.totalArr, currency)} ({formatMoney(detailData.summary.totalMrr, currency)} MRR)
+                  </p>
+                  <button
+                    type="button"
+                    className="stripe-ui__btn stripe-ui__btn--secondary"
+                    onClick={() => exportDetailCsv(detailData)}
+                  >
+                    Download detail CSV
+                  </button>
+                </div>
                 <div className="stripe-ui__table-wrap">
                   <table className="stripe-ui__table" aria-label="TOFU metric detail table">
                     <thead>
