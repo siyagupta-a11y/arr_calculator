@@ -33,6 +33,8 @@ type DealMeta = {
   deploymentType: string;
   accountId: string;
   accountName: string;
+  workspaceId: string;
+  deliveryStage: string;
   territory: string;
   country: string;
   companyCountry: string;
@@ -87,6 +89,17 @@ function isCompanyScopesError(err: unknown) {
     (msg.includes("\"category\":\"MISSING_SCOPES\"") ||
       msg.includes("requiredGranularScopes") ||
       msg.includes("crm.objects.companies"))
+  );
+}
+
+function isUnknownPropertyError(err: unknown) {
+  if (!(err instanceof Error)) return false;
+  const msg = String(err.message || "").toLowerCase();
+  return (
+    msg.includes("property") &&
+    (msg.includes("does not exist") ||
+      msg.includes("no property found") ||
+      msg.includes("not a valid property"))
   );
 }
 
@@ -162,6 +175,8 @@ export async function generateReport(
 
   const DEPLOYMENT_TYPE_PROP = "deployment_type__c";
   const ACCOUNT_ID_PROP = "hs_primary_associated_company";
+  const DEAL_WORKSPACE_ID_PROP = String(process.env.DEAL_WORKSPACE_ID_PROP || "workspace_id").trim();
+  const DEAL_DELIVERY_STAGE_PROP = String(process.env.DEAL_DELIVERY_STAGE_PROP || "delivery_stage").trim();
   const TERRITORY_PROP = process.env.DEAL_TERRITORY_PROP || "territory";
   const COUNTRY_PROP = process.env.DEAL_COUNTRY_PROP || "country";
   const INDUSTRY_PROP = process.env.DEAL_INDUSTRY_PROP || "industry";
@@ -173,7 +188,7 @@ export async function generateReport(
   );
   const companyNameProps = Array.from(new Set([COMPANY_NAME_PROP, "name", "hs_name"]));
 
-  const dealProps = [
+  const baseDealProps = [
     "dealname",
     "dealtype",
     "deal_currency_code",
@@ -183,9 +198,30 @@ export async function generateReport(
     TERRITORY_PROP,
     COUNTRY_PROP,
     INDUSTRY_PROP,
+    "dealstage",
   ];
+  const optionalDealProps = Array.from(new Set([DEAL_WORKSPACE_ID_PROP, DEAL_DELIVERY_STAGE_PROP])).filter(Boolean);
+  const dealProps = Array.from(new Set([...baseDealProps, ...optionalDealProps]));
 
-  const deals = await fetchDealsInStage(dealProps, includedStage);
+  let deals = [] as Awaited<ReturnType<typeof fetchDealsInStage>>;
+  try {
+    deals = await fetchDealsInStage(dealProps, includedStage);
+  } catch (err) {
+    if (optionalDealProps.length > 0 && isUnknownPropertyError(err)) {
+      console.warn(
+        `Retrying HubSpot deal fetch without optional properties (${optionalDealProps.join(",")}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      deals = await fetchDealsInStage(baseDealProps, includedStage);
+    } else {
+      throw err;
+    }
+  }
+
+  const dealWorkspaceProps = Array.from(new Set([DEAL_WORKSPACE_ID_PROP, "workspace_id"])).filter(Boolean);
+  const deliveryStageProps = Array.from(new Set([DEAL_DELIVERY_STAGE_PROP, "delivery_stage", "dealstage"])).filter(Boolean);
+
   if (!deals.length) {
     return { periods: outputPeriods, totalsByPeriod: [], rows: [] };
   }
@@ -205,6 +241,8 @@ export async function generateReport(
       deploymentType: String(pDeal[DEPLOYMENT_TYPE_PROP] || ""),
       accountId: String(pDeal[ACCOUNT_ID_PROP] || ""),
       accountName: "",
+      workspaceId: firstNonEmptyProp(pDeal, dealWorkspaceProps),
+      deliveryStage: firstNonEmptyProp(pDeal, deliveryStageProps),
       territory: String(pDeal[TERRITORY_PROP] || ""),
       country: firstNonEmptyProp(pDeal, dealCountryProps),
       companyCountry: "",
@@ -217,6 +255,13 @@ export async function generateReport(
     };
   });
 
+  const COMPANY_WORKSPACE_ID_PROP = String(process.env.COMPANY_WORKSPACE_ID_PROP || "workspace_id").trim();
+  const companyWorkspaceProps = Array.from(new Set([COMPANY_WORKSPACE_ID_PROP, "workspace_id"])).filter(Boolean);
+
+  const companyPropsToRead = Array.from(
+    new Set([...companyCountryProps, ...companyNameProps, ...companyWorkspaceProps]),
+  );
+
   const companyIds = Array.from(
     new Set(
       allDealMeta
@@ -228,10 +273,21 @@ export async function generateReport(
 
   if (companyIds.length) {
     try {
-      companiesById = await batchReadCompanies(companyIds, Array.from(new Set([...companyCountryProps, ...companyNameProps])));
+      companiesById = await batchReadCompanies(companyIds, companyPropsToRead);
     } catch (err) {
-      if (!isCompanyScopesError(err)) throw err;
-      console.warn("Skipping company-country enrichment: missing HubSpot company read scopes.");
+      if (isUnknownPropertyError(err)) {
+        const fallbackProps = Array.from(new Set([...companyCountryProps, ...companyNameProps]));
+        console.warn(
+          `Retrying HubSpot company batch read without optional workspace property (${COMPANY_WORKSPACE_ID_PROP}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        companiesById = await batchReadCompanies(companyIds, fallbackProps);
+      } else if (!isCompanyScopesError(err)) {
+        throw err;
+      } else {
+        console.warn("Skipping company-country enrichment: missing HubSpot company read scopes.");
+      }
     }
   }
 
@@ -242,7 +298,9 @@ export async function generateReport(
     const companyProps = (company?.properties || {}) as Record<string, unknown>;
     const companyName = firstNonEmptyProp(companyProps, companyNameProps);
     const companyCountry = firstNonEmptyProp(companyProps, companyCountryProps);
+    const companyWorkspaceId = firstNonEmptyProp(companyProps, companyWorkspaceProps);
     if (companyName) meta.accountName = companyName;
+    if (!meta.workspaceId && companyWorkspaceId) meta.workspaceId = companyWorkspaceId;
     if (!companyCountry) continue;
     meta.companyCountry = companyCountry;
     if (!meta.country) meta.country = companyCountry;
@@ -292,6 +350,8 @@ export async function generateReport(
       deploymentType,
       accountId,
       accountName,
+      workspaceId,
+      deliveryStage,
       territory,
       country,
       companyCountry,
@@ -449,6 +509,8 @@ export async function generateReport(
         deploymentType,
         accountId,
         accountName,
+        workspaceId,
+        deliveryStage,
         territory,
         country,
         companyCountry,
