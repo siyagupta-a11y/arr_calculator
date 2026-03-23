@@ -2,6 +2,7 @@ import { BlobNotFoundError, head, put } from "@vercel/blob";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { blobAccessMode, blobFetchHeaders, blobReadWriteToken, hasBlobToken } from "@/lib/blobConfig";
 
 export type QuickBooksStorageKind = "vercel_blob" | "local_tmp";
 
@@ -30,25 +31,21 @@ type EncryptedConnectionEnvelope = {
 };
 
 function canUseBlobStorage() {
-  return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
-}
-
-function readFirstEnv(...names: string[]) {
-  for (const name of names) {
-    const value = String(process.env[name] || "").trim();
-    if (value) return value;
-  }
-  return "";
+  return hasBlobToken();
 }
 
 function quickBooksEncryptionSecret() {
-  return readFirstEnv(
+  for (const name of [
     "QUICKBOOKS_TOKEN_ENCRYPTION_KEY",
     "QUICKBOOKS_CLIENT_SECRET",
     "INTUIT_CLIENT_SECRET",
     "QB_CLIENT_SECRET",
     "CLIENT_SECRET",
-  );
+  ]) {
+    const value = String(process.env[name] || "").trim();
+    if (value) return value;
+  }
+  return "";
 }
 
 function deriveEncryptionKey(): Buffer | null {
@@ -150,10 +147,15 @@ function parseConnection(raw: string): QuickBooksConnection | null {
 
 async function loadConnectionFromBlob() {
   try {
-    const meta = await head(STORE_BLOB_PATH);
+    const token = blobReadWriteToken();
+    if (!token) return null;
+    const meta = await head(STORE_BLOB_PATH, { token });
     if (!meta?.url) return null;
 
-    const res = await fetch(meta.url, { cache: "no-store" });
+    const res = await fetch(meta.url, {
+      cache: "no-store",
+      headers: blobFetchHeaders(),
+    });
     if (!res.ok) return null;
     const text = await res.text();
     return parseConnection(text);
@@ -168,8 +170,11 @@ async function loadConnectionFromBlob() {
 }
 
 async function saveConnectionToBlob(connection: QuickBooksConnection | null) {
+  const token = blobReadWriteToken();
+  if (!token) throw new Error("Missing blob read/write token");
   await put(STORE_BLOB_PATH, encodeConnection(connection, true), {
-    access: "public",
+    token,
+    access: blobAccessMode(),
     allowOverwrite: true,
     addRandomSuffix: false,
     contentType: "application/json",

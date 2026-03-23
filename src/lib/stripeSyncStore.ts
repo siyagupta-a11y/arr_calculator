@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
 import { BlobNotFoundError, head, put } from "@vercel/blob";
+import { blobAccessMode, blobFetchHeaders, blobReadWriteToken, hasBlobToken } from "@/lib/blobConfig";
 import { parseDate } from "@/lib/logic";
 import { listInvoiceBatchWithLineItems, type StripeInvoiceLineItem } from "@/lib/stripe";
 
@@ -86,13 +87,18 @@ function parseStore(raw: string | null | undefined): SyncStore {
 }
 
 function hasBlobConfig() {
-  return !!process.env.BLOB_READ_WRITE_TOKEN;
+  return hasBlobToken();
 }
 
 async function readStoreBlob(): Promise<SyncStore> {
   try {
-    const meta = await head(STORE_BLOB_PATH);
-    const res = await fetch(meta.url, { cache: "no-store" });
+    const token = blobReadWriteToken();
+    if (!token) return emptyStore();
+    const meta = await head(STORE_BLOB_PATH, { token });
+    const res = await fetch(meta.url, {
+      cache: "no-store",
+      headers: blobFetchHeaders(),
+    });
     if (!res.ok) return emptyStore();
     const raw = await res.text();
     return parseStore(raw);
@@ -103,8 +109,11 @@ async function readStoreBlob(): Promise<SyncStore> {
 }
 
 async function writeStoreBlob(store: SyncStore) {
+  const token = blobReadWriteToken();
+  if (!token) throw new Error("Missing blob read/write token");
   await put(STORE_BLOB_PATH, JSON.stringify(store), {
-    access: "public",
+    token,
+    access: blobAccessMode(),
     allowOverwrite: true,
     addRandomSuffix: false,
     contentType: "application/json",
