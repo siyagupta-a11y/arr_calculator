@@ -234,6 +234,24 @@ export type StripeBillingOverviewGroupedSeries = {
   points: StripeBillingOverviewPoint[];
 };
 
+export type StripeBillingOverviewCurrentMonthProjectionPoint = {
+  date: string;
+  label: string;
+  dayOfMonth: number;
+  mrrActual: number | null;
+  mrrProjected: number;
+};
+
+export type StripeBillingOverviewCurrentMonthProjection = {
+  monthStart: string;
+  monthEnd: string;
+  observedThrough: string;
+  historicalMonthsUsed: number;
+  projectedEndMrr: number;
+  model: "shape";
+  points: StripeBillingOverviewCurrentMonthProjectionPoint[];
+};
+
 export type StripeBillingOverviewResult = {
   startDate: string;
   endDate: string;
@@ -248,6 +266,7 @@ export type StripeBillingOverviewResult = {
   stripeExactPoints: StripeBillingOverviewPoint[];
   groupedSeries: StripeBillingOverviewGroupedSeries[];
   customerArrRows: StripeBillingOverviewCustomerArrRow[];
+  currentMonthProjection: StripeBillingOverviewCurrentMonthProjection | null;
 };
 
 export type StripeAiSpendGrain = "daily" | "weekly" | "monthly" | "quarterly";
@@ -967,6 +986,165 @@ function isoMonthFromDateUtc(d: Date) {
   const year = d.getUTCFullYear();
   const month = String(d.getUTCMonth() + 1).padStart(2, "0");
   return `${year}-${month}`;
+}
+
+function isoDateFromUtcDate(d: Date) {
+  return d.toISOString().slice(0, 10);
+}
+
+function startOfMonthUtc(d: Date) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+function endOfMonthUtc(d: Date) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0, 0, 0, 0, 0));
+}
+
+function addMonthsUtc(d: Date, months: number) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, 1, 0, 0, 0, 0));
+}
+
+function minIsoDate(...values: string[]) {
+  const filtered = values.filter((value) => !!value);
+  if (!filtered.length) return "";
+  return filtered.reduce((best, value) => (value < best ? value : best), filtered[0]);
+}
+
+type StripeDailyMrrPoint = {
+  date: string;
+  mrrEnd: number;
+};
+
+type StripeMonthlyShape = {
+  days: number;
+  progresses: number[];
+};
+
+function interpolateShapeProgress(shape: StripeMonthlyShape, frac: number) {
+  if (!shape.progresses.length) return frac;
+  if (shape.progresses.length === 1) return shape.progresses[0];
+  const clamped = Math.max(0, Math.min(1, frac));
+  const pos = clamped * (shape.progresses.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.min(shape.progresses.length - 1, Math.ceil(pos));
+  if (lo === hi) return shape.progresses[lo];
+  const t = pos - lo;
+  const loValue = shape.progresses[lo];
+  const hiValue = shape.progresses[hi];
+  return loValue + (hiValue - loValue) * t;
+}
+
+function buildStripeCurrentMonthProjection(params: {
+  dailyPoints: StripeDailyMrrPoint[];
+  requestedEndDateIso: string;
+  todayUtc?: Date;
+}): StripeBillingOverviewCurrentMonthProjection | null {
+  const today = params.todayUtc || new Date();
+  const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 0, 0, 0, 0));
+  const monthStartDate = startOfMonthUtc(todayUtc);
+  const monthEndDate = endOfMonthUtc(todayUtc);
+  const monthStartIso = isoDateFromUtcDate(monthStartDate);
+  const monthEndIso = isoDateFromUtcDate(monthEndDate);
+  if (params.requestedEndDateIso < monthStartIso) return null;
+
+  const observedThroughTargetIso = minIsoDate(isoDateFromUtcDate(todayUtc), params.requestedEndDateIso, monthEndIso);
+  const dailyByDate = new Map<string, number>();
+  for (const point of params.dailyPoints) {
+    if (!point.date) continue;
+    dailyByDate.set(point.date, point.mrrEnd);
+  }
+
+  const monthDates: string[] = [];
+  const monthActualValues: Array<number | null> = [];
+  for (let day = 1; day <= monthEndDate.getUTCDate(); day++) {
+    const dayIso = isoDateFromUtcDate(new Date(Date.UTC(todayUtc.getUTCFullYear(), todayUtc.getUTCMonth(), day, 0, 0, 0, 0)));
+    monthDates.push(dayIso);
+    monthActualValues.push(dailyByDate.has(dayIso) ? (dailyByDate.get(dayIso) as number) : null);
+  }
+
+  let observedIndex = -1;
+  for (let idx = 0; idx < monthDates.length; idx++) {
+    if (monthDates[idx] > observedThroughTargetIso) continue;
+    if (monthActualValues[idx] == null) continue;
+    observedIndex = idx;
+  }
+  if (observedIndex < 0) return null;
+  const observedThroughIso = monthDates[observedIndex];
+  const monthStartMrr = monthActualValues[0];
+  if (monthStartMrr == null) return null;
+  const observedMrr = monthActualValues[observedIndex];
+  if (observedMrr == null) return null;
+
+  const historicalShapes: StripeMonthlyShape[] = [];
+  for (let offset = 12; offset >= 1; offset--) {
+    const shapeMonthStart = addMonthsUtc(monthStartDate, -offset);
+    const shapeMonthEnd = endOfMonthUtc(shapeMonthStart);
+    const daysInMonth = shapeMonthEnd.getUTCDate();
+    const values: number[] = [];
+    let complete = true;
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dayIso = isoDateFromUtcDate(
+        new Date(Date.UTC(shapeMonthStart.getUTCFullYear(), shapeMonthStart.getUTCMonth(), day, 0, 0, 0, 0)),
+      );
+      const value = dailyByDate.get(dayIso);
+      if (value == null) {
+        complete = false;
+        break;
+      }
+      values.push(value);
+    }
+    if (!complete || values.length < 2) continue;
+    const delta = values[values.length - 1] - values[0];
+    if (Math.abs(delta) < 1e-9) continue;
+    const progresses = values.map((value) => (value - values[0]) / delta);
+    historicalShapes.push({ days: daysInMonth, progresses });
+  }
+
+  const monthDays = monthDates.length;
+  const sameLengthShapes = historicalShapes.filter((shape) => shape.days === monthDays);
+  const shapePool = sameLengthShapes.length >= 3 ? sameLengthShapes : historicalShapes;
+  const expectedProgressAt = (dayIndex: number) => {
+    const frac = monthDays <= 1 ? 1 : dayIndex / (monthDays - 1);
+    if (!shapePool.length) return frac;
+    const values = shapePool
+      .map((shape) => interpolateShapeProgress(shape, frac))
+      .filter((value) => Number.isFinite(value));
+    if (!values.length) return frac;
+    const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+    return Number.isFinite(avg) ? avg : frac;
+  };
+
+  const fallbackObservedProgress = monthDays <= 1 ? 1 : observedIndex / (monthDays - 1);
+  let observedExpectedProgress = expectedProgressAt(observedIndex);
+  if (!Number.isFinite(observedExpectedProgress) || Math.abs(observedExpectedProgress) < 0.05) {
+    observedExpectedProgress = Math.max(fallbackObservedProgress, 0.05);
+  }
+
+  const deltaEstimate = (observedMrr - monthStartMrr) / observedExpectedProgress;
+  const projectedEndMrr = round2(monthStartMrr + deltaEstimate);
+
+  const points: StripeBillingOverviewCurrentMonthProjectionPoint[] = monthDates.map((date, idx) => {
+    const actual = monthActualValues[idx];
+    const modeled = monthStartMrr + deltaEstimate * expectedProgressAt(idx);
+    const projected = idx <= observedIndex && actual != null ? actual : modeled;
+    return {
+      date,
+      label: date,
+      dayOfMonth: idx + 1,
+      mrrActual: idx <= observedIndex ? actual : null,
+      mrrProjected: round2(projected),
+    };
+  });
+
+  return {
+    monthStart: monthStartIso,
+    monthEnd: monthEndIso,
+    observedThrough: observedThroughIso,
+    historicalMonthsUsed: shapePool.length,
+    projectedEndMrr,
+    model: "shape",
+    points,
+  };
 }
 
 async function fetchBigQueryResultsPage(
@@ -2916,6 +3094,12 @@ export async function queryStripeBillingOverviewFromBigQuery(
   const grain = normalizeStripeBillingOverviewGrain(request.grain);
   const groupBy = normalizeStripeBillingOverviewGroupBy(request.groupBy);
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const todayUtc = new Date();
+  const currentMonthStartUtc = startOfMonthUtc(todayUtc);
+  const currentMonthEndUtc = endOfMonthUtc(todayUtc);
+  const projectionLookbackStartUtc = addMonthsUtc(currentMonthStartUtc, -12);
+  const projectionLookbackStartIso = isoDateFromUtcDate(projectionLookbackStartUtc);
+  const projectionCurrentMonthEndIso = isoDateFromUtcDate(currentMonthEndUtc);
 
   const profile = normalizeProfile(options?.profile);
   const sa = getServiceAccount(profile);
@@ -4081,10 +4265,83 @@ JOIN requested_buckets rb
 ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
 `;
 
+  const currentMonthProjectionDailyQuery = `
+WITH bounds AS (
+  SELECT
+    DATE(@projection_start_date) AS projection_start_date,
+    DATE(@projection_end_date) AS projection_end_date,
+    DATE_ADD(DATE(@projection_end_date), INTERVAL 1 DAY) AS projection_end_exclusive_date
+),
+events_base AS (
+  SELECT
+    local_event_timestamp,
+    COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` AS t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND local_event_timestamp < TIMESTAMP(b.projection_end_exclusive_date)
+),
+grouped_sub_item_events AS (
+  SELECT
+    local_event_timestamp,
+    customer_id,
+    COALESCE(SUM(mrr_change_major), 0.0) AS mrr_change_major
+  FROM events_base
+  GROUP BY
+    local_event_timestamp,
+    customer_id
+),
+daily_customer_events AS (
+  SELECT
+    DATE(local_event_timestamp) AS local_event_date,
+    COALESCE(SUM(mrr_change_major), 0.0) AS net_mrr_change
+  FROM grouped_sub_item_events
+  GROUP BY local_event_date
+),
+series_dates AS (
+  SELECT
+    d AS local_date
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.projection_start_date, b.projection_end_date, INTERVAL 1 DAY)) AS d
+),
+base_before_series_total AS (
+  SELECT
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS base_mrr
+  FROM grouped_sub_item_events e
+  CROSS JOIN bounds b
+  WHERE e.local_event_timestamp < TIMESTAMP(b.projection_start_date)
+),
+daily_series AS (
+  SELECT
+    sd.local_date,
+    base.base_mrr
+      + SUM(COALESCE(dce.net_mrr_change, 0.0)) OVER (
+        ORDER BY sd.local_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      ) AS mrr_end
+  FROM series_dates sd
+  LEFT JOIN daily_customer_events dce
+    ON dce.local_event_date = sd.local_date
+  CROSS JOIN base_before_series_total base
+)
+SELECT
+  FORMAT_DATE('%Y-%m-%d', local_date) AS period_start,
+  ROUND(mrr_end, 2) AS mrr_end
+FROM daily_series
+ORDER BY local_date ASC
+`;
+
   const params: BigQueryNamedParameter[] = [
     { name: "start_date", type: "STRING", value: startDateIso },
     { name: "end_date", type: "STRING", value: endDateIso },
     { name: "grain", type: "STRING", value: grain },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+  ];
+  const projectionParams: BigQueryNamedParameter[] = [
+    { name: "projection_start_date", type: "STRING", value: projectionLookbackStartIso },
+    { name: "projection_end_date", type: "STRING", value: projectionCurrentMonthEndIso },
     { name: "target_currency", type: "STRING", value: targetCurrency },
   ];
   const groupedParams: BigQueryNamedParameter[] = [
@@ -4092,13 +4349,14 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
     { name: "group_limit", type: "INT64", value: "8" },
   ];
 
-  const [pointRows, stripeExactPointRows, customerArrRawRows, groupedSeriesRawRows] = await Promise.all([
+  const [pointRows, stripeExactPointRows, customerArrRawRows, groupedSeriesRawRows, projectionDailyRows] = await Promise.all([
     runBigQueryQueryRows(accessToken, projectId, location, pointsQuery, params),
     runBigQueryQueryRows(accessToken, projectId, location, stripeExactPointsQuery, params),
     runBigQueryQueryRows(accessToken, projectId, location, customerArrQuery, params),
     groupedSeriesQuery
       ? runBigQueryQueryRows(accessToken, projectId, location, groupedSeriesQuery, groupedParams)
       : Promise.resolve([] as Record<string, unknown>[]),
+    runBigQueryQueryRows(accessToken, projectId, location, currentMonthProjectionDailyQuery, projectionParams),
   ]);
 
   const allPoints: StripeBillingOverviewPoint[] = pointRows.map((row) => ({
@@ -4178,6 +4436,15 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
     periodEnd: asString(row.period_end),
     arr: asNumber(row.arr),
   }));
+  const projectionDailyPoints: StripeDailyMrrPoint[] = projectionDailyRows.map((row) => ({
+    date: asString(row.period_start),
+    mrrEnd: asNumber(row.mrr_end),
+  }));
+  const currentMonthProjection = buildStripeCurrentMonthProjection({
+    dailyPoints: projectionDailyPoints,
+    requestedEndDateIso: endDateIso,
+    todayUtc,
+  });
 
   const historyPoints = allPoints.filter((point) => point.periodStart < startDateIso);
   const points = allPoints.filter((point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso);
@@ -4214,6 +4481,7 @@ ORDER BY cbt.customer_id ASC, cbt.bucket_start ASC
     stripeExactPoints,
     groupedSeries,
     customerArrRows,
+    currentMonthProjection,
   };
 }
 

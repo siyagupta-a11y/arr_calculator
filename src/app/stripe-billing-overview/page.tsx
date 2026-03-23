@@ -60,6 +60,24 @@ type OverviewGroupedSeries = {
   points: OverviewPoint[];
 };
 
+type OverviewCurrentMonthProjectionPoint = {
+  date: string;
+  label: string;
+  dayOfMonth: number;
+  mrrActual: number | null;
+  mrrProjected: number;
+};
+
+type OverviewCurrentMonthProjection = {
+  monthStart: string;
+  monthEnd: string;
+  observedThrough: string;
+  historicalMonthsUsed: number;
+  projectedEndMrr: number;
+  model: "shape";
+  points: OverviewCurrentMonthProjectionPoint[];
+};
+
 type OverviewResponse = {
   startDate: string;
   endDate: string;
@@ -74,6 +92,7 @@ type OverviewResponse = {
   stripeExactPoints?: OverviewPoint[];
   groupedSeries?: OverviewGroupedSeries[];
   customerArrRows?: OverviewCustomerArrRow[];
+  currentMonthProjection?: OverviewCurrentMonthProjection | null;
 };
 
 function defaultDateRange() {
@@ -1264,6 +1283,26 @@ export default function StripeBillingOverviewPage() {
     () => points.map((point) => ({ key: point.key, label: point.label })),
     [points],
   );
+  const currentMonthProjection = useMemo(() => data?.currentMonthProjection || null, [data]);
+  const currentMonthProjectionChartPoints = useMemo(() => {
+    if (!currentMonthProjection?.points?.length) return [] as OverviewPoint[];
+    return currentMonthProjection.points.map((point) => ({
+      key: point.date,
+      label: point.label,
+      periodStart: point.date,
+      periodEnd: point.date,
+      mrrEnd: point.mrrProjected,
+      newMrr: 0,
+      reactivationMrr: 0,
+      expansionMrr: 0,
+      contractionMrr: 0,
+      churnMrr: 0,
+      netMrrChange: 0,
+      mrrGrowthRatePct: 0,
+      arr: point.mrrProjected * 12,
+      arrGrowth: 0,
+    }));
+  }, [currentMonthProjection]);
   useEffect(() => {
     if (!chartGroupingEnabled) {
       if (selectedBarGroupKeys.length > 0) setSelectedBarGroupKeys([]);
@@ -1568,6 +1607,29 @@ export default function StripeBillingOverviewPage() {
                 valueFormatter={(v) => formatMoney(v, currency)}
                 stroke="#4f8df9"
               />
+            )}
+
+            {currentMonthProjection && currentMonthProjectionChartPoints.length > 0 ? (
+              <LineChartCard
+                title="Projected MRR in current month"
+                subtitle={`Observed through ${currentMonthProjection.observedThrough}. Projected month-end MRR: ${formatMoney(
+                  currentMonthProjection.projectedEndMrr,
+                  currency,
+                )} (${currentMonthProjection.historicalMonthsUsed} historical month${
+                  currentMonthProjection.historicalMonthsUsed === 1 ? "" : "s"
+                } used).`}
+                points={currentMonthProjectionChartPoints}
+                valueAccessor={(p) => p.mrrEnd}
+                valueFormatter={(v) => formatMoney(v, currency)}
+                stroke="#22c55e"
+              />
+            ) : (
+              <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+                <h2 className="stripe-ui__panel-title">Projected MRR in current month</h2>
+                <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                  No current-month projection available for the selected range.
+                </p>
+              </section>
             )}
 
             <GrowthBreakdownChart
