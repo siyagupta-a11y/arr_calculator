@@ -1020,18 +1020,65 @@ type StripeMonthlyShape = {
   progresses: number[];
 };
 
-function interpolateShapeProgress(shape: StripeMonthlyShape, frac: number) {
-  if (!shape.progresses.length) return frac;
-  if (shape.progresses.length === 1) return shape.progresses[0];
+function median(values: number[]) {
+  const clean = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (!clean.length) return 0;
+  const mid = Math.floor(clean.length / 2);
+  if (clean.length % 2 === 1) return clean[mid];
+  return (clean[mid - 1] + clean[mid]) / 2;
+}
+
+function average(values: number[]) {
+  const clean = values.filter((v) => Number.isFinite(v));
+  if (!clean.length) return 0;
+  return clean.reduce((sum, value) => sum + value, 0) / clean.length;
+}
+
+function dayFraction(dayIndex: number, monthDays: number) {
+  if (monthDays <= 1) return 1;
+  return dayIndex / (monthDays - 1);
+}
+
+function normalizeWindowDays(monthDays: number, startDay: number, endDay: number) {
+  const start = Math.max(1, Math.min(monthDays, startDay));
+  const end = Math.max(start, Math.min(monthDays, endDay));
+  return { start, end };
+}
+
+function linearInterpolation(start: number, end: number, frac: number) {
+  return start + (end - start) * frac;
+}
+
+function averageSlice(values: number[], startDay: number, endDay: number) {
+  if (!values.length) return 0;
+  const monthDays = values.length;
+  const window = normalizeWindowDays(monthDays, startDay, endDay);
+  const startIdx = window.start - 1;
+  const endIdx = window.end - 1;
+  if (startIdx > endIdx) return 0;
+  return average(values.slice(startIdx, endIdx + 1));
+}
+
+function dipAdjustmentForFraction(
+  frac: number,
+  dipStartFrac: number,
+  dipMidFrac: number,
+  dipEndFrac: number,
+  dipDepth: number,
+  postDipLevel: number,
+) {
   const clamped = Math.max(0, Math.min(1, frac));
-  const pos = clamped * (shape.progresses.length - 1);
-  const lo = Math.floor(pos);
-  const hi = Math.min(shape.progresses.length - 1, Math.ceil(pos));
-  if (lo === hi) return shape.progresses[lo];
-  const t = pos - lo;
-  const loValue = shape.progresses[lo];
-  const hiValue = shape.progresses[hi];
-  return loValue + (hiValue - loValue) * t;
+  if (clamped <= dipStartFrac) return 0;
+  if (clamped <= dipMidFrac) {
+    const t = (clamped - dipStartFrac) / Math.max(dipMidFrac - dipStartFrac, 1e-9);
+    return linearInterpolation(0, dipDepth, t);
+  }
+  if (clamped <= dipEndFrac) {
+    const t = (clamped - dipMidFrac) / Math.max(dipEndFrac - dipMidFrac, 1e-9);
+    return linearInterpolation(dipDepth, postDipLevel, t);
+  }
+  const t = (clamped - dipEndFrac) / Math.max(1 - dipEndFrac, 1e-9);
+  return linearInterpolation(postDipLevel, 0, t);
 }
 
 function buildStripeCurrentMonthProjection(params: {
@@ -1076,6 +1123,12 @@ function buildStripeCurrentMonthProjection(params: {
   if (observedMrr == null) return null;
 
   const historicalShapes: StripeMonthlyShape[] = [];
+  const historicalPerDaySlopes: number[] = [];
+  const historicalDipDepthAbs: number[] = [];
+  const historicalDipDepthPct: number[] = [];
+  const historicalPostDipLevelAbs: number[] = [];
+  const historicalRecoveryShare: number[] = [];
+
   for (let offset = 12; offset >= 1; offset--) {
     const shapeMonthStart = addMonthsUtc(monthStartDate, -offset);
     const shapeMonthEnd = endOfMonthUtc(shapeMonthStart);
@@ -1094,38 +1147,62 @@ function buildStripeCurrentMonthProjection(params: {
       values.push(value);
     }
     if (!complete || values.length < 2) continue;
-    const delta = values[values.length - 1] - values[0];
-    if (Math.abs(delta) < 1e-9) continue;
-    const progresses = values.map((value) => (value - values[0]) / delta);
-    historicalShapes.push({ days: daysInMonth, progresses });
+    const start = values[0];
+    const end = values[values.length - 1];
+    const slope = (end - start) / Math.max(daysInMonth - 1, 1);
+    historicalPerDaySlopes.push(slope);
+
+    const baseline = values.map((_, idx) => linearInterpolation(start, end, dayFraction(idx, daysInMonth)));
+    const residuals = values.map((value, idx) => value - baseline[idx]);
+    const dipResidual = averageSlice(residuals, 15, 21);
+    const tailResidual = averageSlice(residuals, Math.max(daysInMonth - 4, 1), daysInMonth);
+    const dipDepth = Math.min(dipResidual, 0);
+    const postDip = Math.min(tailResidual, 0);
+    historicalDipDepthAbs.push(dipDepth);
+    historicalDipDepthPct.push(Math.abs(start) > 1e-9 ? dipDepth / start : 0);
+    historicalPostDipLevelAbs.push(postDip);
+    if (Math.abs(dipDepth) > 1e-9) {
+      const recoveryShare = Math.max(0, Math.min(1, (postDip - dipDepth) / Math.abs(dipDepth)));
+      historicalRecoveryShare.push(recoveryShare);
+    }
+
+    const delta = end - start;
+    if (Math.abs(delta) >= 1e-9) {
+      const progresses = values.map((value) => (value - start) / delta);
+      historicalShapes.push({ days: daysInMonth, progresses });
+    }
   }
 
   const monthDays = monthDates.length;
-  const sameLengthShapes = historicalShapes.filter((shape) => shape.days === monthDays);
-  const shapePool = sameLengthShapes.length >= 3 ? sameLengthShapes : historicalShapes;
-  const expectedProgressAt = (dayIndex: number) => {
-    const frac = monthDays <= 1 ? 1 : dayIndex / (monthDays - 1);
-    if (!shapePool.length) return frac;
-    const values = shapePool
-      .map((shape) => interpolateShapeProgress(shape, frac))
-      .filter((value) => Number.isFinite(value));
-    if (!values.length) return frac;
-    const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
-    return Number.isFinite(avg) ? avg : frac;
-  };
+  const currentObservedSlope =
+    observedIndex > 0 ? (observedMrr - monthStartMrr) / Math.max(observedIndex, 1) : 0;
+  const historicalSlope = median(historicalPerDaySlopes);
+  const monthProgress = dayFraction(observedIndex, monthDays);
+  const currentWeight = Math.max(0.2, Math.min(0.9, monthProgress));
+  const blendedSlope = currentObservedSlope * currentWeight + historicalSlope * (1 - currentWeight);
+  const projectedLinearEnd = monthStartMrr + blendedSlope * Math.max(monthDays - 1, 0);
 
-  const fallbackObservedProgress = monthDays <= 1 ? 1 : observedIndex / (monthDays - 1);
-  let observedExpectedProgress = expectedProgressAt(observedIndex);
-  if (!Number.isFinite(observedExpectedProgress) || Math.abs(observedExpectedProgress) < 0.05) {
-    observedExpectedProgress = Math.max(fallbackObservedProgress, 0.05);
-  }
+  const dipDepthAbs = median(historicalDipDepthAbs);
+  const dipDepthPct = median(historicalDipDepthPct) * monthStartMrr;
+  const dipDepth = Math.min((dipDepthAbs + dipDepthPct) / 2, 0);
+  const recoveryShare = Math.max(0, Math.min(1, median(historicalRecoveryShare)));
+  const postDipLevel = dipDepth * (1 - recoveryShare);
 
-  const deltaEstimate = (observedMrr - monthStartMrr) / observedExpectedProgress;
-  const projectedEndMrr = round2(monthStartMrr + deltaEstimate);
+  const dipWindow = normalizeWindowDays(monthDays, 15, 21);
+  const dipStartFrac = dayFraction(dipWindow.start - 1, monthDays);
+  const dipEndFrac = dayFraction(dipWindow.end - 1, monthDays);
+  const dipMidFrac = (dipStartFrac + dipEndFrac) / 2;
+
+  const modeledObserved = linearInterpolation(monthStartMrr, projectedLinearEnd, monthProgress)
+    + dipAdjustmentForFraction(monthProgress, dipStartFrac, dipMidFrac, dipEndFrac, dipDepth, postDipLevel);
+  const anchorOffset = observedMrr - modeledObserved;
 
   const points: StripeBillingOverviewCurrentMonthProjectionPoint[] = monthDates.map((date, idx) => {
     const actual = monthActualValues[idx];
-    const modeled = monthStartMrr + deltaEstimate * expectedProgressAt(idx);
+    const frac = dayFraction(idx, monthDays);
+    const baseline = linearInterpolation(monthStartMrr, projectedLinearEnd, frac);
+    const dipAdj = dipAdjustmentForFraction(frac, dipStartFrac, dipMidFrac, dipEndFrac, dipDepth, postDipLevel);
+    const modeled = baseline + dipAdj + anchorOffset;
     const projected = idx <= observedIndex && actual != null ? actual : modeled;
     return {
       date,
@@ -1135,12 +1212,13 @@ function buildStripeCurrentMonthProjection(params: {
       mrrProjected: round2(projected),
     };
   });
+  const projectedEndMrr = points.length ? round2(points[points.length - 1].mrrProjected) : round2(observedMrr);
 
   return {
     monthStart: monthStartIso,
     monthEnd: monthEndIso,
     observedThrough: observedThroughIso,
-    historicalMonthsUsed: shapePool.length,
+    historicalMonthsUsed: historicalPerDaySlopes.length,
     projectedEndMrr,
     model: "shape",
     points,
