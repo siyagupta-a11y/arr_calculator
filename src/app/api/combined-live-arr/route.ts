@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { generateReport } from "@/lib/report";
 import {
+  queryStripeAiSpendFromBigQuery,
   queryStripeBillingOverviewFromBigQuery,
   queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQuery,
   type StripeBillingOverviewResult,
@@ -88,6 +89,9 @@ async function buildLiveArrPayload() {
   const monthStartUtc = new Date(
     Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), 1, 0, 0, 0, 0),
   );
+  const lastMonthStartUtc = new Date(
+    Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() - 1, 1, 0, 0, 0, 0),
+  );
   const nextMonthStartUtc = new Date(
     Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1, 1, 0, 0, 0, 0),
   );
@@ -96,13 +100,15 @@ async function buildLiveArrPayload() {
   );
 
   const monthStartDate = toIsoDateOnlyUtc(monthStartUtc);
+  const lastMonthStartDate = toIsoDateOnlyUtc(lastMonthStartUtc);
+  const lastMonthEndDate = toIsoDateOnlyUtc(new Date(monthStartUtc.getTime() - 24 * 60 * 60 * 1000));
   const monthEndDate = toIsoDateOnlyUtc(monthEndUtc);
   const nextMonthStartDate = toIsoDateOnlyUtc(nextMonthStartUtc);
   const targetCurrency = pickTargetCurrency();
 
   const todayDate = toIsoDateOnlyUtc(nowUtc);
 
-  const [hubspotTodayReport, stripeReport, aiSpendUpcoming] = await Promise.all([
+  const [hubspotTodayReport, stripeReport, aiSpendUpcoming, aiSpendLastMonth] = await Promise.all([
     generateReport({
       startDate: todayDate,
       endDate: todayDate,
@@ -128,6 +134,17 @@ async function buildLiveArrPayload() {
       },
       { profile: "stripe_arr_correct" },
     ),
+    queryStripeAiSpendFromBigQuery(
+      {
+        startDate: lastMonthStartDate,
+        endDate: lastMonthEndDate,
+        grain: "monthly",
+        targetCurrency,
+        topLimit: 1,
+        detailLimit: 1,
+      },
+      { profile: "stripe_arr_correct" },
+    ),
   ]);
 
   const hubspotCurrentArr = computeHubspotCurrentArr(hubspotTodayReport);
@@ -145,6 +162,25 @@ async function buildLiveArrPayload() {
   const selfserveProjectedArr = round2((stripeReport.currentMonthProjection?.projectedEndMrr || 0) * 12);
   const salesledCurrentArr = round2(hubspotCurrentArr);
   const projectedArr = round2(aiSpendAnnualizedProjection + selfserveProjectedArr + salesledCurrentArr);
+  const aiSpendLastCalendarMonth = round2(aiSpendLastMonth.totalRevenue);
+  const daysInLastMonth = Math.max(
+    1,
+    (monthStartUtc.getTime() - lastMonthStartUtc.getTime()) / 86_400_000,
+  );
+  const daysInCurrentMonth = Math.max(
+    1,
+    (nextMonthStartUtc.getTime() - monthStartUtc.getTime()) / 86_400_000,
+  );
+  const aiSpendFlatAdjustedAnnualized = round2(
+    (aiSpendLastCalendarMonth / daysInLastMonth) * daysInCurrentMonth * 12,
+  );
+  const aiSpendFlatFlatAnnualized = round2(aiSpendLastCalendarMonth * 12);
+  const projectedArrEomFlatAdjusted = round2(
+    selfserveProjectedArr + salesledCurrentArr + aiSpendFlatAdjustedAnnualized,
+  );
+  const projectedArrEomFlatFlat = round2(
+    selfserveProjectedArr + salesledCurrentArr + aiSpendFlatFlatAnnualized,
+  );
   const liveArr = round2(currentMonthArr + upcomingAnnualizedProjection);
 
   return {
@@ -171,6 +207,8 @@ async function buildLiveArrPayload() {
       selfserveProjectedArr,
       salesledCurrentArr,
     },
+    projectedArrEomFlatAdjusted,
+    projectedArrEomFlatFlat,
     liveArr,
   };
 }

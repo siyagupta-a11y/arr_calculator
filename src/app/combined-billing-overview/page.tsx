@@ -130,6 +130,8 @@ type CombinedLiveArrResponse = {
     selfserveProjectedArr: number;
     salesledCurrentArr: number;
   };
+  projectedArrEomFlatAdjusted: number;
+  projectedArrEomFlatFlat: number;
 };
 
 type HubspotChartRow = {
@@ -171,6 +173,8 @@ type CombinedOverviewData = {
     selfserveProjectedArr: number;
     salesledCurrentArr: number;
   };
+  projectedArrEomFlatAdjusted: number;
+  projectedArrEomFlatFlat: number;
   points: CombinedPoint[];
   retentionPoints: RetentionSeriesPoint[];
   cacPoints: CacPoint[];
@@ -2508,6 +2512,8 @@ export default function CombinedBillingOverviewPage() {
           selfserveProjectedArr: round2(liveArrData.projectedArrBreakdown?.selfserveProjectedArr || 0),
           salesledCurrentArr: round2(liveArrData.projectedArrBreakdown?.salesledCurrentArr || 0),
         },
+        projectedArrEomFlatAdjusted: round2(liveArrData.projectedArrEomFlatAdjusted || 0),
+        projectedArrEomFlatFlat: round2(liveArrData.projectedArrEomFlatFlat || 0),
         points: combinedPoints,
         retentionPoints,
         cacPoints,
@@ -2718,6 +2724,14 @@ export default function CombinedBillingOverviewPage() {
                     </div>
                   </div>
                 )}
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Projected ARR EOM Flat Adjusted</p>
+                <p className="stripe-ui__stat-value">{formatMoney(data.projectedArrEomFlatAdjusted, currency)}</p>
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Projected ARR EOM Flat Flat</p>
+                <p className="stripe-ui__stat-value">{formatMoney(data.projectedArrEomFlatFlat, currency)}</p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Points</p>
