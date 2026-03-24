@@ -6,9 +6,11 @@ import {
   type StripeBillingOverviewGroupBy,
   type StripeBillingOverviewRequest,
 } from "@/lib/stripeBigquery";
+import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
+const CACHE_TTL_MS = readTtlMs("API_STRIPE_BILLING_OVERVIEW_CACHE_TTL_MS", 60_000);
 
 const STRIPE_BILLING_OVERVIEW_OPTIONS: { profile: StripeBigQueryProfile } = {
   profile: "stripe_arr_correct",
@@ -70,7 +72,10 @@ function parsePayload(raw: Partial<ApiBody>): StripeBillingOverviewRequest {
 
 async function validateAndRun(body: Partial<ApiBody>) {
   const payload = parsePayload(body);
-  return queryStripeBillingOverviewFromBigQuery(payload, STRIPE_BILLING_OVERVIEW_OPTIONS);
+  const key = `api:stripe-billing-overview:${stableStringify(payload)}`;
+  return getOrSetCache(key, CACHE_TTL_MS, () =>
+    queryStripeBillingOverviewFromBigQuery(payload, STRIPE_BILLING_OVERVIEW_OPTIONS),
+  );
 }
 
 export async function POST(req: Request) {

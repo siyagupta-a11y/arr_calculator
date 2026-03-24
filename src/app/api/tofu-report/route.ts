@@ -7,9 +7,11 @@ import {
   type TofuRequest,
 } from "@/lib/tofuReport";
 import type { CombinedAllSubsCombineMode } from "@/lib/combinedAllSubsReport";
+import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
+const CACHE_TTL_MS = readTtlMs("API_TOFU_REPORT_CACHE_TTL_MS", 60_000);
 
 type TofuApiRequest = Partial<TofuRequest> & {
   detailPeriodKey?: string;
@@ -31,10 +33,12 @@ function validateAndRun(body: TofuApiRequest) {
       detailPeriodKey,
       detailMetric: detailMetric as TofuDetailMetric,
     };
-    return generateTofuDetailReport(detailPayload);
+    const key = `api:tofu-report:detail:${stableStringify(detailPayload)}`;
+    return getOrSetCache(key, CACHE_TTL_MS, () => generateTofuDetailReport(detailPayload));
   }
 
-  return generateTofuReport(basePayload);
+  const key = `api:tofu-report:base:${stableStringify(basePayload)}`;
+  return getOrSetCache(key, CACHE_TTL_MS, () => generateTofuReport(basePayload));
 }
 
 export async function POST(req: Request) {

@@ -5,10 +5,12 @@ import {
   queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQuery,
   type StripeBillingOverviewResult,
 } from "@/lib/stripeBigquery";
+import { getOrSetCache, readTtlMs } from "@/lib/serverResponseCache";
 import type { ReportResponse, ReportRow } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
+const CACHE_TTL_MS = readTtlMs("API_COMBINED_LIVE_ARR_CACHE_TTL_MS", 30_000);
 
 function round2(v: number) {
   return Math.round((Number(v) || 0) * 100) / 100;
@@ -175,7 +177,8 @@ async function buildLiveArrPayload() {
 
 export async function GET() {
   try {
-    return NextResponse.json(await buildLiveArrPayload());
+    const payload = await getOrSetCache("api:combined-live-arr", CACHE_TTL_MS, () => buildLiveArrPayload());
+    return NextResponse.json(payload);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
@@ -184,7 +187,8 @@ export async function GET() {
 
 export async function POST() {
   try {
-    return NextResponse.json(await buildLiveArrPayload());
+    const payload = await getOrSetCache("api:combined-live-arr", CACHE_TTL_MS, () => buildLiveArrPayload());
+    return NextResponse.json(payload);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });

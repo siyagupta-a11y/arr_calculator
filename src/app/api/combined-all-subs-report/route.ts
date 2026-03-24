@@ -4,9 +4,11 @@ import {
   type CombinedAllSubsCombineMode,
   type CombinedAllSubsRequest,
 } from "@/lib/combinedAllSubsReport";
+import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
+const CACHE_TTL_MS = readTtlMs("API_COMBINED_ALL_SUBS_CACHE_TTL_MS", 60_000);
 
 function validateAndRun(body: Partial<CombinedAllSubsRequest>) {
   const payload: CombinedAllSubsRequest = {
@@ -14,7 +16,8 @@ function validateAndRun(body: Partial<CombinedAllSubsRequest>) {
     endDate: String(body.endDate || ""),
     combineMode: String(body.combineMode || "grouped") as CombinedAllSubsCombineMode,
   };
-  return generateCombinedAllSubsReport(payload);
+  const key = `api:combined-all-subs:${stableStringify(payload)}`;
+  return getOrSetCache(key, CACHE_TTL_MS, () => generateCombinedAllSubsReport(payload));
 }
 
 export async function POST(req: Request) {

@@ -6,9 +6,11 @@ import {
   type StripeThroughMrrGroupBy,
   type StripeThroughMrrReportRequest,
 } from "@/lib/stripeBigquery";
+import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
+const CACHE_TTL_MS = readTtlMs("API_STRIPE_THROUGH_MRR_CACHE_TTL_MS", 60_000);
 
 const STRIPE_THROUGH_MRR_OPTIONS: { profile: StripeBigQueryProfile } = {
   profile: "stripe_arr_correct",
@@ -98,7 +100,10 @@ function parsePayload(raw: Partial<ApiBody>): StripeThroughMrrReportRequest {
 
 async function validateAndRun(body: Partial<ApiBody>) {
   const payload = parsePayload(body);
-  return queryStripeThroughMrrReportFromBigQuery(payload, STRIPE_THROUGH_MRR_OPTIONS);
+  const key = `api:stripe-through-mrr:${stableStringify(payload)}`;
+  return getOrSetCache(key, CACHE_TTL_MS, () =>
+    queryStripeThroughMrrReportFromBigQuery(payload, STRIPE_THROUGH_MRR_OPTIONS),
+  );
 }
 
 export async function POST(req: Request) {
