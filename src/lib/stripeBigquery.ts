@@ -2188,7 +2188,26 @@ history_source AS (
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.id')), ''),
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product')), ''),
       '(blank)'
-    ) AS product_id
+    ) AS product_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.lookup_key')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.product_name')), ''),
+      '(blank)'
+    ) AS price_description,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.nickname')), ''),
+      ''
+    ) AS product_description_event
   FROM \`${table}\` t
   WHERE
     LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
@@ -2197,8 +2216,14 @@ history_source AS (
 history_enriched AS (
   SELECT
     hs.*,
-    COALESCE(cl.customer_email, '') AS customer_email
+    COALESCE(cl.customer_email, '') AS customer_email,
+    COALESCE(
+      NULLIF(TRIM(pl.product_description_table), ''),
+      NULLIF(TRIM(hs.product_description_event), ''),
+      '(blank)'
+    ) AS product_description
   FROM history_source hs
+  LEFT JOIN products_lookup pl ON pl.product_id = hs.product_id
   LEFT JOIN customers_lookup cl ON cl.customer_id = hs.customer_id
 ),
 history_by_group AS (
@@ -2278,7 +2303,26 @@ history_source AS (
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.id')), ''),
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product')), ''),
       '(blank)'
-    ) AS product_id
+    ) AS product_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.lookup_key')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.product_name')), ''),
+      '(blank)'
+    ) AS price_description,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.nickname')), ''),
+      ''
+    ) AS product_description_event
   FROM \`${table}\` t
   WHERE
     LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
@@ -2288,8 +2332,14 @@ history_enriched AS (
   SELECT
     hs.*,
     COALESCE(cl.customer_email, '') AS customer_email,
-    cl.customer_created AS customer_created
+    cl.customer_created AS customer_created,
+    COALESCE(
+      NULLIF(TRIM(pl.product_description_table), ''),
+      NULLIF(TRIM(hs.product_description_event), ''),
+      '(blank)'
+    ) AS product_description
   FROM history_source hs
+  LEFT JOIN products_lookup pl ON pl.product_id = hs.product_id
   LEFT JOIN customers_lookup cl ON cl.customer_id = hs.customer_id
 ),
 history_by_group AS (
