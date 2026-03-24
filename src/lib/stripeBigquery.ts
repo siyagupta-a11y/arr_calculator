@@ -278,6 +278,7 @@ export type StripeAiSpendRequest = {
   targetCurrency: string;
   topLimit?: number;
   detailLimit?: number;
+  excludeCustomerIds?: string[];
 };
 
 export type StripeAiSpendPoint = {
@@ -333,6 +334,22 @@ export type StripeAiSpendResult = {
   detailRows: StripeAiSpendDetailRow[];
 };
 
+export type StripeCustomerBalanceByEmailRequest = {
+  emails: string[];
+  asOfDate?: string;
+};
+
+export type StripeCustomerBalanceByEmailRow = {
+  customerId: string;
+  email: string;
+  name: string;
+  currency: string;
+  balanceMinor: number;
+  accountBalanceMinor: number;
+  invoiceCreditBalance: string;
+  batchTimestamp: string;
+};
+
 export type StripeUpcomingCurrentMonthRequest = {
   monthStartDate: string;
   nextMonthStartDate: string;
@@ -352,6 +369,7 @@ export type StripeUpcomingCurrentMonthDescriptionAmountRequest = {
   nextMonthStartDate: string;
   targetCurrency: string;
   productDescriptionIncludes: string[];
+  excludeCustomerIds?: string[];
 };
 
 export type StripeUpcomingCurrentMonthDescriptionAmountResult = {
@@ -374,6 +392,21 @@ export type StripeUpcomingProjectedArrResult = {
   amountMajorSum: number;
   projectedArr: number;
   targetCurrency: string;
+};
+
+export type StripeUpcomingSnapshotsCleanupRequest = {
+  targetDate?: string;
+  dryRun?: boolean;
+};
+
+export type StripeUpcomingSnapshotsCleanupResult = {
+  profile: StripeBigQueryProfile;
+  table: string;
+  targetDate: string;
+  latestSnapshotKey: string;
+  candidateRows: number;
+  deletedRows: number;
+  dryRun: boolean;
 };
 
 type BigQueryNamedParameter = {
@@ -4647,6 +4680,13 @@ export async function queryStripeAiSpendFromBigQuery(
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
   const topLimit = Math.max(1, Math.min(5000, asInt(request.topLimit || 50)));
   const detailLimit = Math.max(1, Math.min(1000, asInt(request.detailLimit || 200)));
+  const excludedCustomerIds = Array.from(
+    new Set(
+      (request.excludeCustomerIds || [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
 
   const profile = normalizeProfile(options?.profile);
   const sa = getServiceAccount(profile);
@@ -4654,6 +4694,22 @@ export async function queryStripeAiSpendFromBigQuery(
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
+
+  const excludedCustomersCteSql = excludedCustomerIds.length
+    ? `excluded_customers AS (
+  SELECT customer_id
+  FROM UNNEST([${excludedCustomerIds.map((_, idx) => `@excluded_customer_${idx}`).join(", ")}]) AS customer_id
+),`
+    : `excluded_customers AS (
+  SELECT CAST(NULL AS STRING) AS customer_id
+  WHERE FALSE
+),`;
+
+  const exclusionWhereSql = excludedCustomerIds.length
+    ? `    AND COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)') NOT IN (
+      SELECT customer_id FROM excluded_customers
+    )`
+    : "";
 
   const baseCte = `
 WITH latest_invoice_lines AS (
@@ -4702,6 +4758,7 @@ line_discounts AS (
   FROM \`botpress-stripe-data-pipeline.stripe.invoice_line_item_discount_amounts\`
   GROUP BY invoice_line_item_id
 ),
+${excludedCustomersCteSql}
 metered_lines AS (
   SELECT
     DATE(il.period_start) AS event_date,
@@ -4732,6 +4789,7 @@ metered_lines AS (
     LOWER(COALESCE(p.recurring_usage_type, '')) = 'metered'
     AND LOWER(COALESCE(il.currency, '')) = @target_currency
     AND DATE(il.period_start) BETWEEN DATE(@start_date) AND DATE(@end_date)
+${exclusionWhereSql}
 )
 `;
 
@@ -4844,6 +4902,13 @@ LIMIT @detail_limit
     { name: "end_date", type: "STRING", value: endDateIso },
     { name: "target_currency", type: "STRING", value: targetCurrency },
     { name: "grain", type: "STRING", value: grain },
+    ...excludedCustomerIds.map(
+      (customerId, idx): BigQueryNamedParameter => ({
+        name: `excluded_customer_${idx}`,
+        type: "STRING",
+        value: customerId,
+      }),
+    ),
   ];
 
   const [summaryRows, topCustomersRows, topProductsRows, topPricesRows, detailRowsRaw] = await Promise.all([
@@ -4929,6 +4994,88 @@ LIMIT @detail_limit
   };
 }
 
+export async function queryStripeCustomerBalancesByEmailsFromBigQuery(
+  request: StripeCustomerBalanceByEmailRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeCustomerBalanceByEmailRow[]> {
+  const emails = Array.from(
+    new Set(
+      (request.emails || [])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter((value) => value.includes("@")),
+    ),
+  );
+  if (!emails.length) return [];
+  const asOfDate = String(request.asOfDate || "").trim();
+  if (asOfDate && !parseIsoDateUtc(asOfDate)) {
+    throw new Error("Invalid asOfDate");
+  }
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const customersTable = getStripeCustomersTable();
+
+  const query = `
+WITH input_emails AS (
+  SELECT LOWER(TRIM(email)) AS email
+  FROM UNNEST([${emails.map((_, idx) => `@email_${idx}`).join(", ")}]) AS email
+),
+latest_customers AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      c.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY c.id
+        ORDER BY c.batch_timestamp DESC
+      ) AS rn
+    FROM \`${customersTable}\` c
+    WHERE LOWER(TRIM(COALESCE(CAST(c.email AS STRING), ''))) IN (SELECT email FROM input_emails)
+      AND (@as_of_date = '' OR c.batch_timestamp < TIMESTAMP(DATE_ADD(DATE(@as_of_date), INTERVAL 1 DAY)))
+  )
+  WHERE rn = 1
+)
+SELECT
+  COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS customer_id,
+  LOWER(TRIM(COALESCE(CAST(email AS STRING), ''))) AS email,
+  COALESCE(NULLIF(TRIM(CAST(name AS STRING)), ''), '(blank)') AS name,
+  LOWER(TRIM(COALESCE(CAST(currency AS STRING), ''))) AS currency,
+  CAST(COALESCE(balance, 0) AS FLOAT64) AS balance_minor,
+  CAST(COALESCE(account_balance, 0) AS FLOAT64) AS account_balance_minor,
+  COALESCE(CAST(invoice_credit_balance AS STRING), '') AS invoice_credit_balance,
+  CAST(batch_timestamp AS STRING) AS batch_timestamp
+FROM latest_customers
+WHERE LOWER(TRIM(COALESCE(CAST(email AS STRING), ''))) IN (SELECT email FROM input_emails)
+`;
+
+  const params: BigQueryNamedParameter[] = emails.map((email, idx) => ({
+    name: `email_${idx}`,
+    type: "STRING",
+    value: email,
+  }));
+  params.push({
+    name: "as_of_date",
+    type: "STRING",
+    value: asOfDate,
+  });
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+
+  return rows.map((row) => ({
+    customerId: asString(row.customer_id),
+    email: asString(row.email),
+    name: asString(row.name),
+    currency: asString(row.currency),
+    balanceMinor: asNumber(row.balance_minor),
+    accountBalanceMinor: asNumber(row.account_balance_minor),
+    invoiceCreditBalance: asString(row.invoice_credit_balance),
+    batchTimestamp: asString(row.batch_timestamp),
+  }));
+}
+
 export async function queryStripeUpcomingCurrentMonthFromBigQuery(
   request: StripeUpcomingCurrentMonthRequest,
   options?: StripeBigQueryOptions,
@@ -5003,6 +5150,13 @@ export async function queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQue
   const monthStartIso = monthStart.toISOString().slice(0, 10);
   const nextMonthStartIso = nextMonthStart.toISOString().slice(0, 10);
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const excludedCustomerIds = Array.from(
+    new Set(
+      (request.excludeCustomerIds || [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
   const includes = Array.from(
     new Set(
       (request.productDescriptionIncludes || [])
@@ -5032,6 +5186,20 @@ export async function queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQue
   const descriptionTermsSql = includes.map(
     (_, idx) => `STRPOS(LOWER(COALESCE(CAST(pl.product_description AS STRING), '')), @desc_${idx}) > 0`,
   );
+  const excludedCustomersCteSql = excludedCustomerIds.length
+    ? `excluded_customers AS (
+  SELECT customer_id
+  FROM UNNEST([${excludedCustomerIds.map((_, idx) => `@excluded_customer_${idx}`).join(", ")}]) AS customer_id
+),`
+    : `excluded_customers AS (
+  SELECT CAST(NULL AS STRING) AS customer_id
+  WHERE FALSE
+),`;
+  const excludedCustomerWhereSql = excludedCustomerIds.length
+    ? `    AND COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') NOT IN (
+      SELECT customer_id FROM excluded_customers
+    )`
+    : "";
   const query = `
 WITH latest_snapshot AS (
   SELECT MAX(snapshot_date) AS snapshot_date
@@ -5047,6 +5215,7 @@ products_lookup AS (
     ) AS product_description
   FROM \`${productsTable}\`
 ),
+${excludedCustomersCteSql}
 matched_lines AS (
   SELECT
     ls.snapshot_date,
@@ -5057,6 +5226,7 @@ matched_lines AS (
     AND t.period_start >= TIMESTAMP(@month_start_date)
     AND t.period_start < TIMESTAMP(@next_month_start_date)
     AND LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+${excludedCustomerWhereSql}
   JOIN products_lookup pl
     ON pl.product_id = COALESCE(
       NULLIF(TRIM(CAST(t.product_id AS STRING)), ''),
@@ -5078,6 +5248,11 @@ LEFT JOIN matched_lines ml
     { name: "next_month_start_date", type: "STRING", value: nextMonthStartIso },
     { name: "target_currency", type: "STRING", value: targetCurrency },
     ...includes.map((term, idx) => ({ name: `desc_${idx}`, type: "STRING" as const, value: term })),
+    ...excludedCustomerIds.map((customerId, idx) => ({
+      name: `excluded_customer_${idx}`,
+      type: "STRING" as const,
+      value: customerId,
+    })),
   ];
   const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
   const first = rows[0] || {};
@@ -5177,6 +5352,106 @@ WHERE
     amountMajorSum: round2(amountMajorSum),
     projectedArr: round2(projectedArr),
     targetCurrency: targetCurrency.toUpperCase(),
+  };
+}
+
+export async function cleanupStripeUpcomingSnapshotsForDay(
+  request: StripeUpcomingSnapshotsCleanupRequest = {},
+  options?: StripeBigQueryOptions,
+): Promise<StripeUpcomingSnapshotsCleanupResult> {
+  const profile = normalizeProfile(options?.profile);
+  const table = getStripeUpcomingSnapshotsTable(profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+
+  const nowUtc = new Date();
+  const targetDateUtc = request.targetDate
+    ? parseIsoDateUtc(request.targetDate)
+    : new Date(Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate(), 0, 0, 0, 0));
+  if (!targetDateUtc) {
+    throw new Error("Invalid targetDate (expected YYYY-MM-DD)");
+  }
+  const targetDate = isoDateFromUtcDate(targetDateUtc);
+  const dryRun = !!request.dryRun;
+
+  const snapshotKeyExpr = "CAST(snapshot_date AS STRING)";
+  const snapshotTsExpr = `COALESCE(
+  SAFE.PARSE_TIMESTAMP('%Y%m%d%H', ${snapshotKeyExpr}),
+  SAFE.PARSE_TIMESTAMP('%Y%m%d', ${snapshotKeyExpr}),
+  SAFE_CAST(${snapshotKeyExpr} AS TIMESTAMP)
+)`;
+  const snapshotDayExpr = `COALESCE(
+  DATE(${snapshotTsExpr}),
+  SAFE.PARSE_DATE('%Y%m%d', ${snapshotKeyExpr}),
+  SAFE_CAST(${snapshotKeyExpr} AS DATE)
+)`;
+
+  const latestSnapshotQuery = `
+SELECT snapshot_key
+FROM (
+  SELECT DISTINCT
+    ${snapshotKeyExpr} AS snapshot_key,
+    ${snapshotTsExpr} AS snapshot_ts,
+    ${snapshotDayExpr} AS snapshot_day
+  FROM \`${table}\`
+)
+WHERE snapshot_day = @target_date
+ORDER BY snapshot_ts DESC, snapshot_key DESC
+LIMIT 1
+`;
+  const latestSnapshotRows = await runBigQueryQueryRows(accessToken, projectId, location, latestSnapshotQuery, [
+    { name: "target_date", type: "STRING", value: targetDate },
+  ]);
+  const latestSnapshotKey = asString(latestSnapshotRows[0]?.snapshot_key);
+
+  if (!latestSnapshotKey) {
+    return {
+      profile,
+      table,
+      targetDate,
+      latestSnapshotKey: "",
+      candidateRows: 0,
+      deletedRows: 0,
+      dryRun,
+    };
+  }
+
+  const params: BigQueryNamedParameter[] = [
+    { name: "target_date", type: "STRING", value: targetDate },
+    { name: "latest_snapshot_key", type: "STRING", value: latestSnapshotKey },
+  ];
+
+  const candidateCountQuery = `
+SELECT COUNT(*) AS row_count
+FROM \`${table}\`
+WHERE
+  ${snapshotDayExpr} = @target_date
+  AND ${snapshotKeyExpr} != @latest_snapshot_key
+`;
+  const candidateRows = await runBigQueryQueryRows(accessToken, projectId, location, candidateCountQuery, params);
+  const candidateCount = asInt(candidateRows[0]?.row_count);
+
+  if (!dryRun && candidateCount > 0) {
+    const deleteQuery = `
+DELETE FROM \`${table}\`
+WHERE
+  ${snapshotDayExpr} = @target_date
+  AND ${snapshotKeyExpr} != @latest_snapshot_key
+`;
+    await runBigQueryQueryRows(accessToken, projectId, location, deleteQuery, params);
+  }
+
+  return {
+    profile,
+    table,
+    targetDate,
+    latestSnapshotKey,
+    candidateRows: candidateCount,
+    deletedRows: dryRun ? 0 : candidateCount,
+    dryRun,
   };
 }
 

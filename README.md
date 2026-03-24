@@ -19,6 +19,7 @@ This is a Next.js ARR dashboard.
 - `GET|POST /api/stripe-sync` Stripe sync API
 - `GET /api/stripe-sync/status` Stripe sync health/status API
 - `GET|POST /api/stripe-bigquery-refresh` Rebuild Stripe external BigQuery tables from GCS bucket folders
+- `GET|POST /api/stripe-upcoming-snapshots-cleanup` Delete older same-day upcoming-invoice snapshots in BigQuery (keep latest snapshot for the day)
 - `GET /api/quickbooks/connect` Start Intuit OAuth
 - `GET /api/quickbooks/callback` Intuit OAuth callback
 - `GET /api/quickbooks/status` QuickBooks connection status
@@ -26,15 +27,18 @@ This is a Next.js ARR dashboard.
 - `GET /api/quickbooks/company-info` Fetch QuickBooks CompanyInfo
 - `POST /api/quickbooks/query` Run a QuickBooks SQL-like query
 - `POST /api/quickbooks/disconnect` Clear saved QuickBooks tokens
+- `GET|POST /api/slack/daily-arr-summary` Send daily Projected ARR metrics to Slack (DM/channel)
 
 ## Automatic Stripe Sync
 
 Vercel cron runs Stripe sync automatically every 5 minutes:
 
 - `*/5 * * * *` (`/api/stripe-sync`)
-- `0 * * * *` (`/api/stripe-bigquery-refresh`) hourly refresh of bucket-backed external Stripe tables
+- `0 1-23/2 * * *` (`/api/stripe-bigquery-refresh`) refresh of bucket-backed external Stripe tables every 2 hours
+- `55 23 * * *` (`/api/stripe-upcoming-snapshots-cleanup`) end-of-day cleanup: keep only latest same-day upcoming snapshot
 - `5 * * * *` (`/api/hubspot-current-metrics-sync`) hourly HubSpot deal metric property update
 - `0 */6 * * *` (`/api/quickbooks/keepalive`) QuickBooks OAuth token keepalive
+- `0 14 * * *` (`/api/slack/daily-arr-summary`) daily Slack message with projected ARR EOM stats
 
 `/api/stripe-sync` accepts:
 
@@ -68,6 +72,22 @@ Use `/api/stripe-sync/status` to verify live progress. It returns:
 
 The route is cron-authenticated with `CRON_SECRET` (same pattern as `/api/stripe-sync`) and can also be triggered manually.
 
+`/api/stripe-upcoming-snapshots-cleanup` accepts:
+
+```json
+{
+  "dryRun": false,
+  "targetDate": "2026-03-24",
+  "profile": "stripe_arr_correct"
+}
+```
+
+Notes:
+
+- `targetDate` is optional (`YYYY-MM-DD`, UTC). If omitted, current UTC date is used.
+- `profile` supports `stripe_arr_correct` (default) or `default`.
+- The cleanup keeps the latest snapshot key for the target day and deletes other rows for that same day.
+
 `/api/hubspot-current-metrics-sync` accepts:
 
 ```json
@@ -86,6 +106,23 @@ Notes:
 - `currentArrField` is optional (`HUBSPOT_CURRENT_ARR_FIELD`)
 - `syncedAtField` is optional (`HUBSPOT_ARR_SYNC_DATE_FIELD`)
 - Uses the same `INCLUDED_DEALSTAGE` filter as HubSpot report calculations
+
+`/api/slack/daily-arr-summary` accepts:
+
+```json
+{
+  "dryRun": false
+}
+```
+
+Required env vars for Slack:
+
+- `SLACK_BOT_TOKEN`
+- `SLACK_HANY_USER_ID` (DM target; ignored if `SLACK_ARR_DAILY_CHANNEL_ID` is set)
+
+Optional:
+
+- `SLACK_ARR_DAILY_CHANNEL_ID` (post to a channel instead of DM)
 
 ## Persistence Across Redeployments
 
@@ -208,11 +245,12 @@ Optional env vars:
 
 This script creates/replaces **external tables** named from each immediate child folder under `livemode/`.
 
-### Hourly Bucket -> BigQuery Refresh
+### Two-hour Bucket -> BigQuery Refresh
 
-If your Stripe lake lands in GCS and BigQuery tables are external tables over those folders, this app now includes an hourly cron:
+If your Stripe lake lands in GCS and BigQuery tables are external tables over those folders, this app now includes a 2-hour cron:
 
-- `0 * * * *` -> `GET /api/stripe-bigquery-refresh`
+- `0 1-23/2 * * *` -> `GET /api/stripe-bigquery-refresh`
+- `55 23 * * *` -> `GET /api/stripe-upcoming-snapshots-cleanup` (daily prune to keep latest same-day snapshot)
 
 Required env vars for this job:
 

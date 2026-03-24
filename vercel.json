@@ -6,7 +6,11 @@
     },
     {
       "path": "/api/stripe-bigquery-refresh",
-      "schedule": "0 * * * *"
+      "schedule": "0 1-23/2 * * *"
+    },
+    {
+      "path": "/api/stripe-upcoming-snapshots-cleanup",
+      "schedule": "55 23 * * *"
     },
     {
       "path": "/api/hubspot-current-metrics-sync",
@@ -15,6 +19,10 @@
     {
       "path": "/api/quickbooks/keepalive",
       "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/slack/daily-arr-summary",
+      "schedule": "0 14 * * *"
     }
   ]
 }
