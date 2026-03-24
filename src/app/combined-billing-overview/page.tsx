@@ -1959,6 +1959,7 @@ export default function CombinedBillingOverviewPage() {
   const [cacExpenseAccountsError, setCacExpenseAccountsError] = useState("");
   const [savingCacDefaultSelection, setSavingCacDefaultSelection] = useState(false);
   const [cacDefaultSaveStatus, setCacDefaultSaveStatus] = useState("");
+  const [showProjectedArrBreakdown, setShowProjectedArrBreakdown] = useState(false);
   const runRequestRef = useRef(0);
 
   const fetchApiGetJson = useCallback(async <T,>(url: string): Promise<T> => {
@@ -2108,6 +2109,7 @@ export default function CombinedBillingOverviewPage() {
     setError(null);
     setCacNotice(null);
     setCacCurrencyLayerNotice(null);
+    setShowProjectedArrBreakdown(false);
 
     try {
       const fetchJson = async <T,>(url: string, payload: unknown): Promise<T> => {
@@ -2681,22 +2683,41 @@ export default function CombinedBillingOverviewPage() {
                 <p className="stripe-ui__stat-label">Live ARR</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.liveArr, currency)}</p>
               </div>
-              <div
-                className="stripe-ui__stat"
-                title={`AI Spend annualized: ${formatMoney(
-                  data.projectedArrBreakdown.aiSpendAnnualizedArr,
-                  currency,
-                )} | Self-serve projected: ${formatMoney(
-                  data.projectedArrBreakdown.selfserveProjectedArr,
-                  currency,
-                )} | Sales-led current C-ARR: ${formatMoney(
-                  data.projectedArrBreakdown.salesledCurrentArr,
-                  currency,
-                )}`}
-              >
+              <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Projected ARR (EOM)</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.projectedArr, currency)}</p>
-                <p className="stripe-ui__hint">Hover for breakdown</p>
+                <button
+                  type="button"
+                  className="stripe-ui__stat-value"
+                  onClick={() => setShowProjectedArrBreakdown((prev) => !prev)}
+                  title="Click to show projected ARR breakdown"
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
+                    margin: 0,
+                    color: "inherit",
+                    textAlign: "left",
+                    cursor: "pointer",
+                  }}
+                >
+                  {formatMoney(data.projectedArr, currency)}
+                </button>
+                <p className="stripe-ui__hint">
+                  {showProjectedArrBreakdown ? "Click number to hide breakdown" : "Click number for breakdown"}
+                </p>
+                {showProjectedArrBreakdown && (
+                  <div className="stripe-ui__hint" style={{ marginTop: "0.35rem", lineHeight: 1.35 }}>
+                    <div>
+                      AI Spend annualized: {formatMoney(data.projectedArrBreakdown.aiSpendAnnualizedArr, currency)}
+                    </div>
+                    <div>
+                      Self-serve projected: {formatMoney(data.projectedArrBreakdown.selfserveProjectedArr, currency)}
+                    </div>
+                    <div>
+                      Sales-led current C-ARR: {formatMoney(data.projectedArrBreakdown.salesledCurrentArr, currency)}
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Points</p>
