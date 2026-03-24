@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import type { Grain } from "@/lib/types";
 import { generateStripeReport, type StripeGroupField } from "@/lib/stripeReport";
+import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
+const CACHE_TTL_MS = readTtlMs("API_STRIPE_REPORT_CACHE_TTL_MS", 60_000);
 
 type StripeApiRequest = {
   startDate: string;
@@ -31,7 +33,8 @@ function validateAndRun(body: Partial<StripeApiRequest>) {
     sortByPeriodKey: String(body.sortByPeriodKey || "none"),
     page: Number(body.page || 1),
   };
-  return generateStripeReport(payload);
+  const key = `api:stripe-report:${stableStringify(payload)}`;
+  return getOrSetCache(key, CACHE_TTL_MS, () => generateStripeReport(payload));
 }
 
 export async function POST(req: Request) {

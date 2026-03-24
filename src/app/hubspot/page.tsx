@@ -4,7 +4,7 @@ import Link from "next/link";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { downloadSvgAsPng } from "@/lib/chartDownload";
 import { canonicalCountryKey, canonicalCountryLabel, canonicalTerritoryLabel, resolveTerritoryLabel } from "@/lib/geo";
-import type { ReportRequest, ReportResponse, ReportRow, Grain, ReportMode, HubspotPlan } from "@/lib/types";
+import type { ReportResponse, ReportRow, Grain, ReportMode, HubspotPlan } from "@/lib/types";
 
 function fmtMoney(n: number, currencyDisplay: CurrencyDisplay) {
   const fractionDigits = currencyDisplay === "normal" ? 0 : 2;
@@ -232,57 +232,6 @@ function hasAnyNonZeroValue(valuesByPeriod: Record<string, number>) {
   return Object.values(valuesByPeriod || {}).some((value) => Math.abs(Number(value) || 0) > 1e-9);
 }
 
-function parseIsoDateOnly(value: string) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
-  if (!m) return null;
-  const year = Number(m[1]);
-  const month = Number(m[2]) - 1;
-  const day = Number(m[3]);
-  const d = new Date(Date.UTC(year, month, day));
-  if (
-    d.getUTCFullYear() !== year ||
-    d.getUTCMonth() !== month ||
-    d.getUTCDate() !== day
-  ) {
-    return null;
-  }
-  return d;
-}
-
-function toIsoDateOnly(d: Date) {
-  return d.toISOString().slice(0, 10);
-}
-
-function previousPeriodRangeForGrain(startDate: string, grain: Grain) {
-  const parsed = parseIsoDateOnly(startDate);
-  if (!parsed) return { startDate, endDate: startDate };
-
-  if (grain === "daily") {
-    const prevDay = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate() - 1));
-    const iso = toIsoDateOnly(prevDay);
-    return { startDate: iso, endDate: iso };
-  }
-
-  if (grain === "monthly") {
-    const prevMonthStart = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth() - 1, 1));
-    const prevMonthEnd = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), 0));
-    return { startDate: toIsoDateOnly(prevMonthStart), endDate: toIsoDateOnly(prevMonthEnd) };
-  }
-
-  if (grain === "quarterly") {
-    const qStartMonth = Math.floor(parsed.getUTCMonth() / 3) * 3;
-    const prevQuarterStart = new Date(Date.UTC(parsed.getUTCFullYear(), qStartMonth - 3, 1));
-    const prevQuarterEnd = new Date(Date.UTC(parsed.getUTCFullYear(), qStartMonth, 0));
-    return { startDate: toIsoDateOnly(prevQuarterStart), endDate: toIsoDateOnly(prevQuarterEnd) };
-  }
-
-  const prevYear = parsed.getUTCFullYear() - 1;
-  return {
-    startDate: toIsoDateOnly(new Date(Date.UTC(prevYear, 0, 1))),
-    endDate: toIsoDateOnly(new Date(Date.UTC(prevYear, 11, 31))),
-  };
-}
-
 function accountGroupingKey(row: UiRow) {
   const raw = String(row.accountId || "").trim();
   if (raw) {
@@ -335,6 +284,20 @@ type GroupTrendSeries = {
 type PeriodRef = {
   key: string;
   label: string;
+};
+
+type HubspotViewModelResponse = {
+  periods: PeriodRef[];
+  displayedRows: UiRow[];
+  totalsByPeriodForDisplayed: Array<{ key: string; label: string; total: number }>;
+  chartPoints: TrendPoint[];
+  groupedChartSeries: GroupTrendSeries[];
+  deploymentTypeOptions: string[];
+  territoryOptions: string[];
+  countryOptions: string[];
+  industryOptions: string[];
+  dealTypeOptions: string[];
+  planOptions: HubspotPlan[];
 };
 
 type ChartGroupDescriptor = {
@@ -1387,6 +1350,7 @@ export default function Home() {
   const [data, setData] = useState<ReportResponse | null>(null);
   const [chartData, setChartData] = useState<ReportResponse | null>(null);
   const [chartBaselineData, setChartBaselineData] = useState<ReportResponse | null>(null);
+  const [hubspotVm, setHubspotVm] = useState<HubspotViewModelResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function run() {
@@ -1395,100 +1359,45 @@ export default function Home() {
     setData(null);
     setChartData(null);
     setChartBaselineData(null);
-
-    const payload: ReportRequest = {
-      startDate,
-      endDate,
-      mode,
-      grain,
-    };
-
-    const chartPayload: ReportRequest = {
-      startDate,
-      endDate,
-      mode: "contracted",
-      grain,
-    };
+    setHubspotVm(null);
 
     try {
-      const fetchReport = async (requestPayload: ReportRequest, attempt = 0): Promise<ReportResponse> => {
-        const maxRetries = 2;
-        const shouldRetry = (message: string) =>
-          /fetch failed|failed to fetch|network|timed out|timeout|aborted|load failed/i.test(message);
-
-        let res: Response;
-        let text = "";
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 45_000);
-          try {
-            res = await fetch("/api/report", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(requestPayload),
-              signal: controller.signal,
-            });
-          } finally {
-            clearTimeout(timeoutId);
-          }
-          text = await res.text();
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err || "Request failed");
-          if (attempt < maxRetries && shouldRetry(message)) {
-            await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
-            return fetchReport(requestPayload, attempt + 1);
-          }
-          throw err;
+      const res = await fetch("/api/hubspot-view-model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startDate,
+          endDate,
+          mode,
+          grain,
+          chartGroupBy,
+          groupByFields,
+          filterDealName,
+          filterDeploymentType,
+          filterAccountId,
+          filterTerritory,
+          filterCountry,
+          filterIndustry,
+          filterDealType,
+          filterPlan,
+          arrDisplayScope,
+        }),
+      });
+      const text = await res.text();
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+      if (!res.ok) {
+        if (json && typeof json === "object" && "error" in json) {
+          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
         }
-
-        let json: unknown = null;
-        try {
-          json = text ? JSON.parse(text) : null;
-        } catch {
-          json = null;
-        }
-
-        if (!res.ok) {
-          if (json && typeof json === "object" && "error" in json) {
-            const apiError = String((json as { error?: unknown }).error || "Request failed");
-            if (attempt < maxRetries && res.status >= 500) {
-              await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
-              return fetchReport(requestPayload, attempt + 1);
-            }
-            throw new Error(apiError);
-          }
-          if (attempt < maxRetries && res.status >= 500) {
-            await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
-            return fetchReport(requestPayload, attempt + 1);
-          }
-          throw new Error(text || "Request failed");
-        }
-
-        if (!json || typeof json !== "object") {
-          if (attempt < maxRetries) {
-            await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
-            return fetchReport(requestPayload, attempt + 1);
-          }
-          throw new Error("Invalid API response");
-        }
-        return json as ReportResponse;
-      };
-
-      const previousRange = previousPeriodRangeForGrain(startDate, grain);
-      const chartBaselinePayload: ReportRequest = {
-        ...chartPayload,
-        startDate: previousRange.startDate,
-        endDate: previousRange.endDate,
-      };
-
-      const [mainReport, chartMainReport, baselineReport] = await Promise.all([
-        fetchReport(payload),
-        fetchReport(chartPayload),
-        fetchReport(chartBaselinePayload),
-      ]);
-      setData(mainReport);
-      setChartData(chartMainReport);
-      setChartBaselineData(baselineReport);
+        throw new Error(text || "Request failed");
+      }
+      if (!json || typeof json !== "object") throw new Error("Invalid API response");
+      setHubspotVm(json as HubspotViewModelResponse);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
       setError(message);
@@ -1498,6 +1407,7 @@ export default function Home() {
   }
 
   const deploymentTypeOptions = useMemo(() => {
+    if (hubspotVm) return hubspotVm.deploymentTypeOptions || [];
     if (!data) return [];
     const values = new Set<string>();
     for (const r of data.rows || []) {
@@ -1505,9 +1415,10 @@ export default function Home() {
       if (value) values.add(value);
     }
     return Array.from(values).sort((a, b) => a.localeCompare(b));
-  }, [data]);
+  }, [hubspotVm, data]);
 
   const territoryOptions = useMemo(() => {
+    if (hubspotVm) return hubspotVm.territoryOptions || [];
     if (!data) return [];
     const values = new Set<string>();
     for (const r of data.rows || []) {
@@ -1515,9 +1426,10 @@ export default function Home() {
       if (value) values.add(value);
     }
     return Array.from(values).sort((a, b) => a.localeCompare(b));
-  }, [data]);
+  }, [hubspotVm, data]);
 
   const countryOptions = useMemo(() => {
+    if (hubspotVm) return hubspotVm.countryOptions || [];
     if (!data) return [];
     const valuesByNormalized = new Map<string, string>();
     for (const r of data.rows || []) {
@@ -1527,9 +1439,10 @@ export default function Home() {
       if (!valuesByNormalized.has(normalized)) valuesByNormalized.set(normalized, canonicalCountryLabel(value));
     }
     return Array.from(valuesByNormalized.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-  }, [data]);
+  }, [hubspotVm, data]);
 
   const industryOptions = useMemo(() => {
+    if (hubspotVm) return hubspotVm.industryOptions || [];
     if (!data) return [];
     const values = new Set<string>();
     for (const r of data.rows || []) {
@@ -1537,9 +1450,10 @@ export default function Home() {
       if (value) values.add(value);
     }
     return Array.from(values).sort((a, b) => a.localeCompare(b));
-  }, [data]);
+  }, [hubspotVm, data]);
 
   const dealTypeOptions = useMemo(() => {
+    if (hubspotVm) return hubspotVm.dealTypeOptions || [];
     if (!data) return [];
     const values = new Set<string>();
     for (const r of data.rows || []) {
@@ -1547,9 +1461,10 @@ export default function Home() {
       if (value) values.add(value);
     }
     return Array.from(values).sort((a, b) => a.localeCompare(b));
-  }, [data]);
+  }, [hubspotVm, data]);
 
   const planOptions = useMemo(() => {
+    if (hubspotVm) return hubspotVm.planOptions || [];
     const order: HubspotPlan[] = ["enterprise", "managed", "team"];
     if (!data) return order;
     const present = new Set<HubspotPlan>();
@@ -1560,7 +1475,7 @@ export default function Home() {
       }
     }
     return order.filter((value) => present.has(value));
-  }, [data]);
+  }, [hubspotVm, data]);
 
   const buildFilteredLineItemRows = useCallback((
     sourceData: ReportResponse | null,
@@ -1648,6 +1563,7 @@ export default function Home() {
   ]);
 
   const displayedRows: UiRow[] = useMemo(() => {
+    if (hubspotVm) return hubspotVm.displayedRows || [];
     if (groupByFields.length === 0) return filteredLineItemRows;
 
     const map = new Map<string, UiRow>();
@@ -1693,17 +1609,24 @@ export default function Home() {
 
     return Array.from(map.values()).filter((r) => hasAnyNonZeroValue(r.valuesByPeriod));
   }, [
+    hubspotVm,
     filteredLineItemRows,
     groupByFields,
   ]);
 
   const totalsByPeriodForDisplayed = useMemo(() => {
+    if (hubspotVm) return hubspotVm.totalsByPeriodForDisplayed || [];
     if (!data) return [];
     return data.periods.map((p) => {
       const total = displayedRows.reduce((acc, r) => acc + (r.valuesByPeriod[p.key] || 0), 0);
       return { key: p.key, label: p.label, total: round2(total) };
     });
-  }, [data, displayedRows]);
+  }, [hubspotVm, data, displayedRows]);
+
+  const periodRefs = useMemo(
+    () => (hubspotVm?.periods || data?.periods || []) as PeriodRef[],
+    [hubspotVm, data],
+  );
 
   const chartPeriodOrder = useMemo(() => (chartDisplayData?.periods || []) as PeriodRef[], [chartDisplayData]);
 
@@ -1740,8 +1663,8 @@ export default function Home() {
   }, [chartBaselineData, filteredBaselineChartRows]);
 
   const chartPoints: TrendPoint[] = useMemo(
-    () => buildTrendPointsFromAccounts(chartPeriodOrder, accountArrByPeriod, baselineAccountArrByAccount),
-    [chartPeriodOrder, accountArrByPeriod, baselineAccountArrByAccount],
+    () => (hubspotVm?.chartPoints || buildTrendPointsFromAccounts(chartPeriodOrder, accountArrByPeriod, baselineAccountArrByAccount)),
+    [hubspotVm, chartPeriodOrder, accountArrByPeriod, baselineAccountArrByAccount],
   );
 
   const groupedAccountArrByPeriod = useMemo(() => {
@@ -1786,6 +1709,7 @@ export default function Home() {
   }, [chartBaselineData, chartGroupBy, filteredBaselineChartRows]);
 
   const groupedChartSeries = useMemo(() => {
+    if (hubspotVm) return hubspotVm.groupedChartSeries || [];
     if (chartGroupBy === "none" || !chartPeriodOrder.length) return [] as GroupTrendSeries[];
 
     const raw = Array.from(groupedAccountArrByPeriod.entries())
@@ -1840,7 +1764,8 @@ export default function Home() {
       points: group.points,
       color: GROUP_LINE_COLORS[idx % GROUP_LINE_COLORS.length],
     }));
-  }, [chartGroupBy, chartPeriodOrder, groupedAccountArrByPeriod, groupedBaselineAccountArrByAccount]);
+  }, [hubspotVm, chartGroupBy, chartPeriodOrder, groupedAccountArrByPeriod, groupedBaselineAccountArrByAccount]);
+
 
   useEffect(() => {
     if (chartGroupBy === "none") {
@@ -1899,7 +1824,7 @@ export default function Home() {
     ...(showDealIdColumn ? ["Account (Workspace ID, Delivery Stage)"] : []),
     ...(showDealIdColumn ? ["Territory"] : []),
     ...(showDealIdColumn ? ["Company Country"] : []),
-    ...(data?.periods.map((p) => p.label) || []),
+    ...periodRefs.map((p) => p.label),
   ];
 
   function scaleCurrency(n: number) {
@@ -1923,7 +1848,7 @@ export default function Home() {
   }
 
   function exportBreakdownCsv() {
-    if (!data) return;
+    if (!periodRefs.length) return;
 
     const csvHeaders = breakdownHeaders.map((h) =>
       h !== "Deal name" &&
@@ -1948,7 +1873,7 @@ export default function Home() {
       const accountCol = showDealIdColumn ? [accountDisplayWithDetails(r)] : [];
       const territoryCol = showDealIdColumn ? [r.territory || "(blank)"] : [];
       const companyCountryCol = showDealIdColumn ? [r.companyCountry || "(blank)"] : [];
-      const valueCols = (data.periods || []).map((p) => round2(scaleCurrency(r.valuesByPeriod[p.key] || 0)));
+      const valueCols = periodRefs.map((p) => round2(scaleCurrency(r.valuesByPeriod[p.key] || 0)));
       const row = [
         ...leadingColumns,
         ...dealIdCol,
@@ -2233,7 +2158,7 @@ export default function Home() {
         </section>
       )}
 
-      {!loading && data && (
+      {!loading && (hubspotVm || data) && (
         <>
           {chartGroupingEnabled && (
             <section className="stripe-ui__panel ui-reveal ui-reveal-2">
@@ -2543,7 +2468,7 @@ export default function Home() {
               <table className="stripe-ui__table">
                 <thead>
                   <tr>
-                    {data.periods.map((p) => (
+                    {periodRefs.map((p) => (
                       <th key={p.key} className="stripe-ui__num">
                         {p.label}
                       </th>
@@ -2582,7 +2507,7 @@ export default function Home() {
                 <thead>
                   <tr>
                     {breakdownHeaders.map((h) => (
-                      <th key={h} className={data.periods.some((p) => p.label === h) ? "stripe-ui__num" : ""}>
+                      <th key={h} className={periodRefs.some((p) => p.label === h) ? "stripe-ui__num" : ""}>
                         {h}
                       </th>
                     ))}
@@ -2605,7 +2530,7 @@ export default function Home() {
                       {showDealIdColumn && <td>{r.territory || "(blank)"}</td>}
                       {showDealIdColumn && <td>{r.companyCountry || "(blank)"}</td>}
 
-                      {data.periods.map((p) => (
+                      {periodRefs.map((p) => (
                         <td key={p.key} className="stripe-ui__num">
                           {fmtMoney(scaleCurrency(r.valuesByPeriod[p.key] || 0), currencyDisplay)}
                         </td>

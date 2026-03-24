@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import type { Grain } from "@/lib/types";
 import { generateStripeReport, type StripeGroupField } from "@/lib/stripeReport";
+import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
+const CACHE_TTL_MS = readTtlMs("API_STRIPE_ARR_CORRECT_CACHE_TTL_MS", 60_000);
 
 const STRIPE_ARR_CORRECT_OPTIONS = {
   forceSource: "bigquery",
@@ -36,7 +38,8 @@ function validateAndRun(body: Partial<StripeApiRequest>) {
     sortByPeriodKey: String(body.sortByPeriodKey || "none"),
     page: Number(body.page || 1),
   };
-  return generateStripeReport(payload, STRIPE_ARR_CORRECT_OPTIONS);
+  const key = `api:stripe-arr-correct:${stableStringify(payload)}`;
+  return getOrSetCache(key, CACHE_TTL_MS, () => generateStripeReport(payload, STRIPE_ARR_CORRECT_OPTIONS));
 }
 
 export async function POST(req: Request) {

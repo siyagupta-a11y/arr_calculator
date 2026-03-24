@@ -4,9 +4,11 @@ import {
   type StripeAiSpendGrain,
   type StripeAiSpendRequest,
 } from "@/lib/stripeBigquery";
+import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
+const CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_CACHE_TTL_MS", 60_000);
 
 const ALLOWED_GRAINS = new Set<StripeAiSpendGrain>([
   "daily",
@@ -73,7 +75,8 @@ function parsePayload(raw: Partial<ApiBody>): StripeAiSpendRequest {
 
 async function validateAndRun(body: Partial<ApiBody>) {
   const payload = parsePayload(body);
-  return queryStripeAiSpendFromBigQuery(payload);
+  const key = `api:stripe-ai-spend:${stableStringify(payload)}`;
+  return getOrSetCache(key, CACHE_TTL_MS, () => queryStripeAiSpendFromBigQuery(payload));
 }
 
 export async function POST(req: Request) {
