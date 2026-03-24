@@ -47,17 +47,6 @@ const STORE_SCHEMA_VERSION = 2;
 
 let writeLock: Promise<void> = Promise.resolve();
 
-function blobAccessMode(): "public" | "private" {
-  const raw = String(process.env.BLOB_STORE_ACCESS || "private").trim().toLowerCase();
-  return raw === "public" ? "public" : "private";
-}
-
-function blobFetchHeaders() {
-  const token = String(process.env.BLOB_READ_WRITE_TOKEN || "").trim();
-  if (!token) return undefined;
-  return { Authorization: `Bearer ${token}` };
-}
-
 function nowTs() {
   return Date.now();
 }
