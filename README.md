@@ -93,11 +93,12 @@ Stripe sync state is persisted in Vercel Blob when configured.
 
 Required for persistent shared storage:
 
-- `BLOB_READ_WRITE_TOKEN`
+- `ARRP_READ_WRITE_TOKEN` or `AARP_READ_WRITE_TOKEN` or `BLOB_READ_WRITE_TOKEN`
 
 Optional blob key path:
 
 - `STRIPE_SYNC_BLOB_PATH` (default `arr/stripe-sync-store-v1.json`)
+- `BLOB_STORE_ACCESS` (`private` default, set `public` only if you intentionally use a public store)
 
 If blob token is missing, local `/tmp` fallback is used (not persistent across redeploys/instances).
 
@@ -270,7 +271,7 @@ Stripe:
 - `STRIPE_SECRET_KEY`
 - `STRIPE_INVOICE_STATUS` (optional, default `paid`)
 - `STRIPE_TARGET_CURRENCY` (optional, default `USD`)
-- `BLOB_READ_WRITE_TOKEN` (required for persistent sync store)
+- `ARRP_READ_WRITE_TOKEN` or `AARP_READ_WRITE_TOKEN` or `BLOB_READ_WRITE_TOKEN` (required for persistent sync store)
 
 QuickBooks:
 

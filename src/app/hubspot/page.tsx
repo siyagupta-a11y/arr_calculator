@@ -99,6 +99,8 @@ type UiRow = {
   deploymentType?: string;
   accountId?: string;
   accountName?: string;
+  workspaceId?: string;
+  deliveryStage?: string;
   territory?: string;
   country?: string;
   industry?: string;
@@ -140,6 +142,23 @@ function groupValueForRow(r: UiRow, field: GroupField) {
   if (accountName) return accountName;
   if (accountId) return accountId;
   return "(blank)";
+}
+
+function accountDetailParts(r: UiRow) {
+  const parts: string[] = [];
+  const workspaceId = String(r.workspaceId || "").trim();
+  const deliveryStage = String(r.deliveryStage || "").trim();
+  if (workspaceId) parts.push(`Workspace ID: ${workspaceId}`);
+  if (deliveryStage) parts.push(`Delivery Stage: ${deliveryStage}`);
+  return parts;
+}
+
+function accountDisplayWithDetails(r: UiRow) {
+  const account = groupValueForRow(r, "accountId");
+  const details = accountDetailParts(r);
+  if (details.length === 0) return account;
+  if (account && account !== "(blank)") return `${account} | ${details.join(" | ")}`;
+  return details.join(" | ");
 }
 
 function normalizeCaseInsensitiveValue(value: string) {
@@ -1558,6 +1577,8 @@ export default function Home() {
       accountName: r.accountName || "",
       country: canonicalCountryLabel(r.country || "") || "",
       territory: resolveTerritoryLabel(r.territory || "", r.country || ""),
+      workspaceId: r.workspaceId || "",
+      deliveryStage: r.deliveryStage || "",
       industry: r.industry || "",
       companySegment: r.companySegment || "",
       primaryProjectType: r.primaryProjectType || "",
@@ -1642,6 +1663,8 @@ export default function Home() {
             deploymentType: r.deploymentType,
             accountId: r.accountId,
             accountName: r.accountName,
+            workspaceId: r.workspaceId,
+            deliveryStage: r.deliveryStage,
             territory: r.territory,
             country: r.country,
             industry: r.industry,
@@ -1873,7 +1896,7 @@ export default function Home() {
       : groupByFields.map((field) => GROUP_BY_OPTIONS.find((opt) => opt.key === field)?.label || field)),
     ...(showDealIdColumn ? ["Deal ID"] : []),
     ...(showDealIdColumn ? ["Plan"] : []),
-    ...(showDealIdColumn ? ["Account"] : []),
+    ...(showDealIdColumn ? ["Account (Workspace ID, Delivery Stage)"] : []),
     ...(showDealIdColumn ? ["Territory"] : []),
     ...(showDealIdColumn ? ["Company Country"] : []),
     ...(data?.periods.map((p) => p.label) || []),
@@ -1906,7 +1929,7 @@ export default function Home() {
       h !== "Deal name" &&
       h !== "Deal ID" &&
       h !== "Plan" &&
-      h !== "Account" &&
+      h !== "Account (Workspace ID, Delivery Stage)" &&
       h !== "Territory" &&
       h !== "Company Country" &&
       h !== "Email"
@@ -1919,10 +1942,10 @@ export default function Home() {
       const leadingColumns =
         groupByFields.length === 0
           ? [r.dealName]
-          : groupByFields.map((field) => r.groupValues[field] || "(blank)");
+          : groupByFields.map((field) => (field === "accountId" ? accountDisplayWithDetails(r) : r.groupValues[field] || "(blank)"));
       const dealIdCol = showDealIdColumn ? [r.dealId] : [];
       const planCol = showDealIdColumn ? [r.plan || "team"] : [];
-      const accountCol = showDealIdColumn ? [groupValueForRow(r, "accountId")] : [];
+      const accountCol = showDealIdColumn ? [accountDisplayWithDetails(r)] : [];
       const territoryCol = showDealIdColumn ? [r.territory || "(blank)"] : [];
       const companyCountryCol = showDealIdColumn ? [r.companyCountry || "(blank)"] : [];
       const valueCols = (data.periods || []).map((p) => round2(scaleCurrency(r.valuesByPeriod[p.key] || 0)));
@@ -2573,12 +2596,12 @@ export default function Home() {
                         <td>{r.dealName}</td>
                       ) : (
                         groupByFields.map((field) => (
-                          <td key={field}>{r.groupValues[field] || "(blank)"}</td>
+                          <td key={field}>{field === "accountId" ? accountDisplayWithDetails(r) : r.groupValues[field] || "(blank)"}</td>
                         ))
                       )}
                       {showDealIdColumn && <td>{r.dealId}</td>}
                       {showDealIdColumn && <td>{r.plan || "team"}</td>}
-                      {showDealIdColumn && <td>{groupValueForRow(r, "accountId")}</td>}
+                      {showDealIdColumn && <td>{accountDisplayWithDetails(r)}</td>}
                       {showDealIdColumn && <td>{r.territory || "(blank)"}</td>}
                       {showDealIdColumn && <td>{r.companyCountry || "(blank)"}</td>}
 

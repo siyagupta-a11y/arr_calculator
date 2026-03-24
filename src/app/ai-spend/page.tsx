@@ -93,6 +93,32 @@ function withLabel(id: string, label: string) {
   return `${cleanId} (${cleanLabel})`;
 }
 
+function csvTimestamp() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}-${hh}${mi}${ss}`;
+}
+
+function downloadCsv(filename: string, rows: Array<Array<string | number | null | undefined>>) {
+  const escape = (value: string | number | null | undefined) => {
+    const text = value == null ? "" : String(value);
+    return `"${text.replace(/"/g, '""')}"`;
+  };
+  const lines = rows.map((row) => row.map((cell) => escape(cell)).join(","));
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function AiSpendPage() {
   const defaults = useMemo(() => defaultDateRange(), []);
 
@@ -171,6 +197,36 @@ export default function AiSpendPage() {
       if (row.customerId) set.add(row.customerId);
     }
     return set.size;
+  }, [data]);
+
+  const exportCustomerBreakdownCsv = useCallback(() => {
+    if (!data) return;
+    const rows: Array<Array<string | number | null | undefined>> = [
+      [
+        "customer_id",
+        "customer_name",
+        "customer_display",
+        "revenue",
+        "line_count",
+        "target_currency",
+        "start_date",
+        "end_date",
+        "grain",
+      ],
+      ...(data.topCustomers || []).map((row) => [
+        row.key,
+        row.label,
+        withLabel(row.key, row.label),
+        row.revenue,
+        row.lineCount,
+        data.targetCurrency,
+        data.startDate,
+        data.endDate,
+        data.grain,
+      ]),
+    ];
+
+    downloadCsv(`ai-spend-customer-breakdown-${data.grain}-${csvTimestamp()}.csv`, rows);
   }, [data]);
 
   return (
@@ -388,6 +444,16 @@ export default function AiSpendPage() {
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
             <h2 className="stripe-ui__panel-title">Customer breakdown</h2>
             <p className="stripe-ui__panel-subtitle">Sorted by highest to lowest net revenue.</p>
+            <div className="stripe-ui__actions" style={{ marginBottom: "0.75rem" }}>
+              <button
+                id="ai-spend-export-customer-breakdown-csv"
+                className="stripe-ui__btn stripe-ui__btn--ghost"
+                onClick={() => exportCustomerBreakdownCsv()}
+                disabled={(data.topCustomers || []).length === 0}
+              >
+                Export customer breakdown CSV
+              </button>
+            </div>
             <div className="stripe-ui__table-wrap">
               <table className="stripe-ui__table">
                 <thead>

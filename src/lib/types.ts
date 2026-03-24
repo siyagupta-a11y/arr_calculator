@@ -84,6 +84,8 @@ export type ReportRow = {
   deploymentType?: string;
   accountId?: string;
   accountName?: string;
+  workspaceId?: string;
+  deliveryStage?: string;
   territory?: string;
   country?: string;
   companyCountry?: string;

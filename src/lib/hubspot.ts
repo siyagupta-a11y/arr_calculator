@@ -19,6 +19,7 @@ const HUBSPOT_CACHE_TTL_MS = Number(process.env.HUBSPOT_CACHE_TTL_MS || "120000"
 type CacheEntry<T> = { value: T; expiresAt: number };
 
 const DEALS_CACHE = new Map<string, CacheEntry<HubspotDeal[]>>();
+const DEAL_STAGE_LABELS_CACHE = new Map<string, CacheEntry<Array<[string, string]>>>();
 const DEAL_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
 const COMPANY_CONTACT_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
 const CONTACT_COMPANY_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
@@ -101,6 +102,17 @@ type DealSearchPayload = {
   properties: string[];
   limit: number;
   after?: string;
+};
+
+type DealPipelinesResponse = {
+  results?: Array<{
+    id?: string;
+    label?: string;
+    stages?: Array<{
+      id?: string;
+      label?: string;
+    }>;
+  }>;
 };
 
 type DealLineItemAssociationResponse = {
@@ -205,6 +217,28 @@ export async function fetchDealsInStage(properties: string[], dealstage: string)
 
   writeCache(DEALS_CACHE, cacheKey, results);
   return results;
+}
+
+export async function fetchDealStageIdToLabelMap() {
+  const cacheKey = "all";
+  const cached = readCache(DEAL_STAGE_LABELS_CACHE, cacheKey);
+  if (cached) return new Map<string, string>(cached);
+
+  const url = `${HUBSPOT_BASE}/crm/v3/pipelines/deals`;
+  const json = (await hsFetch(url)) as DealPipelinesResponse;
+  const out = new Map<string, string>();
+
+  for (const pipeline of json.results || []) {
+    for (const stage of pipeline.stages || []) {
+      const id = String(stage.id || "").trim();
+      const label = String(stage.label || "").trim();
+      if (!id || !label) continue;
+      if (!out.has(id)) out.set(id, label);
+    }
+  }
+
+  writeCache(DEAL_STAGE_LABELS_CACHE, cacheKey, Array.from(out.entries()));
+  return out;
 }
 
 export async function fetchLineItemIdsForDeal(dealId: string) {

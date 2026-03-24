@@ -2141,12 +2141,16 @@ export default function CombinedBillingOverviewPage() {
         grain,
       };
 
-      const [hubspotMain, hubspotBaseline, stripe, liveArrData] = await Promise.all([
-        fetchJson<ReportResponse>("/api/report", hubspotPayload),
-        fetchJson<ReportResponse>("/api/report", hubspotBaselinePayload),
-        fetchJson<StripeOverviewResponse>("/api/stripe-billing-overview-report", stripePayload),
-        fetchJson<CombinedLiveArrResponse>("/api/combined-live-arr", {}),
-      ]);
+      // Avoid overlapping HubSpot-heavy endpoints (/api/report and /api/combined-live-arr),
+      // which can trigger HubSpot throttling and serverless timeouts.
+      const stripePromise = fetchJson<StripeOverviewResponse>("/api/stripe-billing-overview-report", stripePayload);
+      const hubspotMain = await fetchJson<ReportResponse>("/api/report", hubspotPayload);
+      if (isStale()) return;
+      const hubspotBaseline = await fetchJson<ReportResponse>("/api/report", hubspotBaselinePayload);
+      if (isStale()) return;
+      const liveArrData = await fetchJson<CombinedLiveArrResponse>("/api/combined-live-arr", {});
+      if (isStale()) return;
+      const stripe = await stripePromise;
       if (isStale()) return;
 
       let stripeBaseline: StripeOverviewResponse | null = null;

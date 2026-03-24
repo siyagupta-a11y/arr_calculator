@@ -2674,7 +2674,26 @@ history_source AS (
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.id')), ''),
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product')), ''),
       '(blank)'
-    ) AS product_id
+    ) AS product_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.lookup_key')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.product_name')), ''),
+      '(blank)'
+    ) AS price_description,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.nickname')), ''),
+      ''
+    ) AS product_description_event
   FROM \`${table}\` t
   WHERE
     LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
@@ -2687,9 +2706,15 @@ history_enriched AS (
     cc.customer_created AS customer_created,
     COALESCE(cc.customer_country, 'N/A') AS customer_country,
     COALESCE(cc.customer_country_code, '') AS customer_country_code,
-    COALESCE(cc.customer_territory, 'N/A') AS customer_territory
+    COALESCE(cc.customer_territory, 'N/A') AS customer_territory,
+    COALESCE(
+      NULLIF(TRIM(pl.product_description_table), ''),
+      NULLIF(TRIM(hs.product_description_event), ''),
+      '(blank)'
+    ) AS product_description
   FROM history_source hs
   LEFT JOIN customer_countries_enriched cc ON cc.customer_id = hs.customer_id
+  LEFT JOIN products_lookup pl ON pl.product_id = hs.product_id
 ),
 history_by_group AS (
   SELECT
@@ -2765,7 +2790,26 @@ history_source AS (
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.id')), ''),
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product')), ''),
       '(blank)'
-    ) AS product_id
+    ) AS product_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.lookup_key')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.product_name')), ''),
+      '(blank)'
+    ) AS price_description,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.nickname')), ''),
+      ''
+    ) AS product_description_event
   FROM \`${table}\` t
   WHERE
     LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
@@ -2778,9 +2822,15 @@ history_enriched AS (
     cc.customer_created AS customer_created,
     COALESCE(cc.customer_country, 'N/A') AS customer_country,
     COALESCE(cc.customer_country_code, '') AS customer_country_code,
-    COALESCE(cc.customer_territory, 'N/A') AS customer_territory
+    COALESCE(cc.customer_territory, 'N/A') AS customer_territory,
+    COALESCE(
+      NULLIF(TRIM(pl.product_description_table), ''),
+      NULLIF(TRIM(hs.product_description_event), ''),
+      '(blank)'
+    ) AS product_description
   FROM history_source hs
   LEFT JOIN customer_countries_enriched cc ON cc.customer_id = hs.customer_id
+  LEFT JOIN products_lookup pl ON pl.product_id = hs.product_id
 ),
 history_by_group AS (
   SELECT

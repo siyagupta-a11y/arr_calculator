@@ -1,6 +1,7 @@
 import { BlobNotFoundError, head, put } from "@vercel/blob";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { blobAccessMode, blobFetchHeaders, blobReadWriteToken, hasBlobToken } from "@/lib/blobConfig";
 import type { QuickBooksStorageKind } from "@/lib/quickbooksStore";
 
 type QuickBooksCacDefaults = {
@@ -14,7 +15,7 @@ const STORE_PATH =
   process.env.QUICKBOOKS_CAC_DEFAULTS_STORE_PATH || "/tmp/arr-quickbooks-cac-defaults-v1.json";
 
 function canUseBlobStorage() {
-  return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
+  return hasBlobToken();
 }
 
 function normalizeIds(values: string[]) {
@@ -52,9 +53,14 @@ function encodeDefaults(payload: QuickBooksCacDefaults) {
 
 async function loadFromBlob() {
   try {
-    const meta = await head(STORE_BLOB_PATH);
+    const token = blobReadWriteToken();
+    if (!token) return { selectedAccountIds: [], updatedAt: Date.now() };
+    const meta = await head(STORE_BLOB_PATH, { token });
     if (!meta?.url) return { selectedAccountIds: [], updatedAt: Date.now() };
-    const res = await fetch(meta.url, { cache: "no-store" });
+    const res = await fetch(meta.url, {
+      cache: "no-store",
+      headers: blobFetchHeaders(),
+    });
     if (!res.ok) return { selectedAccountIds: [], updatedAt: Date.now() };
     const text = await res.text();
     return parseDefaults(text);
@@ -69,8 +75,11 @@ async function loadFromBlob() {
 }
 
 async function saveToBlob(payload: QuickBooksCacDefaults) {
+  const token = blobReadWriteToken();
+  if (!token) throw new Error("Missing blob read/write token");
   await put(STORE_BLOB_PATH, encodeDefaults(payload), {
-    access: "public",
+    token,
+    access: blobAccessMode(),
     allowOverwrite: true,
     addRandomSuffix: false,
     contentType: "application/json",
