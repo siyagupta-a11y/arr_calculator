@@ -125,6 +125,11 @@ type CombinedLiveArrResponse = {
   generatedAtUtc: string;
   liveArr: number;
   projectedArr: number;
+  projectedArrBreakdown?: {
+    aiSpendAnnualizedArr: number;
+    selfserveProjectedArr: number;
+    salesledCurrentArr: number;
+  };
 };
 
 type HubspotChartRow = {
@@ -161,6 +166,11 @@ type CombinedOverviewData = {
   liveArr: number;
   liveArrAsOfUtc: string;
   projectedArr: number;
+  projectedArrBreakdown: {
+    aiSpendAnnualizedArr: number;
+    selfserveProjectedArr: number;
+    salesledCurrentArr: number;
+  };
   points: CombinedPoint[];
   retentionPoints: RetentionSeriesPoint[];
   cacPoints: CacPoint[];
@@ -2491,6 +2501,11 @@ export default function CombinedBillingOverviewPage() {
         liveArr: round2(liveArrData.liveArr || 0),
         liveArrAsOfUtc: String(liveArrData.generatedAtUtc || ""),
         projectedArr: round2(liveArrData.projectedArr || 0),
+        projectedArrBreakdown: {
+          aiSpendAnnualizedArr: round2(liveArrData.projectedArrBreakdown?.aiSpendAnnualizedArr || 0),
+          selfserveProjectedArr: round2(liveArrData.projectedArrBreakdown?.selfserveProjectedArr || 0),
+          salesledCurrentArr: round2(liveArrData.projectedArrBreakdown?.salesledCurrentArr || 0),
+        },
         points: combinedPoints,
         retentionPoints,
         cacPoints,
@@ -2667,8 +2682,23 @@ export default function CombinedBillingOverviewPage() {
                 <p className="stripe-ui__stat-value">{formatMoney(data.liveArr, currency)}</p>
               </div>
               <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Projected ARR</p>
+                <p className="stripe-ui__stat-label">Projected ARR (EOM)</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.projectedArr, currency)}</p>
+                <p
+                  className="stripe-ui__hint"
+                  title={`AI Spend annualized: ${formatMoney(
+                    data.projectedArrBreakdown.aiSpendAnnualizedArr,
+                    currency,
+                  )}\nSelf-serve projected: ${formatMoney(
+                    data.projectedArrBreakdown.selfserveProjectedArr,
+                    currency,
+                  )}\nSales-led current C-ARR: ${formatMoney(
+                    data.projectedArrBreakdown.salesledCurrentArr,
+                    currency,
+                  )}`}
+                >
+                  Hover for breakdown
+                </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Points</p>

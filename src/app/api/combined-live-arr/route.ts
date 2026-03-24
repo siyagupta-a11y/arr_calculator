@@ -2,8 +2,7 @@ import { NextResponse } from "next/server";
 import { generateReport } from "@/lib/report";
 import {
   queryStripeBillingOverviewFromBigQuery,
-  queryStripeUpcomingCurrentMonthFromBigQuery,
-  queryStripeUpcomingProjectedArrFromBigQuery,
+  queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQuery,
   type StripeBillingOverviewResult,
 } from "@/lib/stripeBigquery";
 import type { ReportResponse, ReportRow } from "@/lib/types";
@@ -90,9 +89,6 @@ async function buildLiveArrPayload() {
   const nextMonthStartUtc = new Date(
     Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1, 1, 0, 0, 0, 0),
   );
-  const secondNextMonthStartUtc = new Date(
-    Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 2, 1, 0, 0, 0, 0),
-  );
   const monthEndUtc = new Date(
     Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1, 0, 0, 0, 0, 0),
   );
@@ -100,15 +96,16 @@ async function buildLiveArrPayload() {
   const monthStartDate = toIsoDateOnlyUtc(monthStartUtc);
   const monthEndDate = toIsoDateOnlyUtc(monthEndUtc);
   const nextMonthStartDate = toIsoDateOnlyUtc(nextMonthStartUtc);
-  const secondNextMonthStartDate = toIsoDateOnlyUtc(secondNextMonthStartUtc);
   const targetCurrency = pickTargetCurrency();
 
-  const [hubspotReport, stripeReport, upcoming, projectedUpcoming] = await Promise.all([
+  const todayDate = toIsoDateOnlyUtc(nowUtc);
+
+  const [hubspotTodayReport, stripeReport, aiSpendUpcoming] = await Promise.all([
     generateReport({
-      startDate: monthStartDate,
-      endDate: monthEndDate,
+      startDate: todayDate,
+      endDate: todayDate,
       mode: "contracted",
-      grain: "monthly",
+      grain: "daily",
     }),
     queryStripeBillingOverviewFromBigQuery(
       {
@@ -120,25 +117,18 @@ async function buildLiveArrPayload() {
       },
       { profile: "stripe_arr_correct" },
     ),
-    queryStripeUpcomingCurrentMonthFromBigQuery(
+    queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQuery(
       {
         monthStartDate,
         nextMonthStartDate,
         targetCurrency,
-      },
-      { profile: "stripe_arr_correct" },
-    ),
-    queryStripeUpcomingProjectedArrFromBigQuery(
-      {
-        monthStartDate: nextMonthStartDate,
-        nextMonthStartDate: secondNextMonthStartDate,
-        targetCurrency,
+        productDescriptionIncludes: ["ai tokens", "web search and crawl"],
       },
       { profile: "stripe_arr_correct" },
     ),
   ]);
 
-  const hubspotCurrentArr = computeHubspotCurrentArr(hubspotReport);
+  const hubspotCurrentArr = computeHubspotCurrentArr(hubspotTodayReport);
   const stripeCurrentArr = computeStripeCurrentArr(stripeReport);
   const currentMonthArr = round2(hubspotCurrentArr + stripeCurrentArr);
 
@@ -147,9 +137,12 @@ async function buildLiveArrPayload() {
   const elapsedMs = Math.max(1000, Math.min(monthDurationMs, elapsedMsRaw));
   const timeScale = monthDurationMs / elapsedMs;
 
-  const upcomingMonthlyAmount = round2(upcoming.amountMajorSum);
-  const upcomingAnnualizedProjection = round2(upcomingMonthlyAmount * 12 * timeScale);
-  const projectedArr = round2(projectedUpcoming.projectedArr);
+  const aiSpendCurrentMonthAmount = round2(aiSpendUpcoming.amountMajorSum);
+  const aiSpendAnnualizedProjection = round2(aiSpendCurrentMonthAmount * 12 * timeScale);
+  const upcomingAnnualizedProjection = aiSpendAnnualizedProjection;
+  const selfserveProjectedArr = round2((stripeReport.currentMonthProjection?.projectedEndMrr || 0) * 12);
+  const salesledCurrentArr = round2(hubspotCurrentArr);
+  const projectedArr = round2(aiSpendAnnualizedProjection + selfserveProjectedArr + salesledCurrentArr);
   const liveArr = round2(currentMonthArr + upcomingAnnualizedProjection);
 
   return {
@@ -161,16 +154,21 @@ async function buildLiveArrPayload() {
     hubspotCurrentArr,
     stripeCurrentArr,
     currentMonthArr,
-    upcomingSnapshotDate: upcoming.snapshotDate,
-    upcomingLineCount: upcoming.lineCount,
-    upcomingMonthlyAmount,
+    upcomingSnapshotDate: aiSpendUpcoming.snapshotDate,
+    upcomingLineCount: aiSpendUpcoming.lineCount,
+    upcomingMonthlyAmount: aiSpendCurrentMonthAmount,
     monthDurationDays: monthDurationMs / 86_400_000,
     elapsedDays: elapsedMs / 86_400_000,
     timestampScaleFactor: timeScale,
-    upcomingAnnualizedProjection,
-    projectedSnapshotDate: projectedUpcoming.snapshotDate,
-    projectedLineCount: projectedUpcoming.lineCount,
+    upcomingAnnualizedProjection: aiSpendAnnualizedProjection,
+    projectedSnapshotDate: aiSpendUpcoming.snapshotDate,
+    projectedLineCount: aiSpendUpcoming.lineCount,
     projectedArr,
+    projectedArrBreakdown: {
+      aiSpendAnnualizedArr: aiSpendAnnualizedProjection,
+      selfserveProjectedArr,
+      salesledCurrentArr,
+    },
     liveArr,
   };
 }

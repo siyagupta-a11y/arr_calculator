@@ -347,6 +347,21 @@ export type StripeUpcomingCurrentMonthResult = {
   targetCurrency: string;
 };
 
+export type StripeUpcomingCurrentMonthDescriptionAmountRequest = {
+  monthStartDate: string;
+  nextMonthStartDate: string;
+  targetCurrency: string;
+  productDescriptionIncludes: string[];
+};
+
+export type StripeUpcomingCurrentMonthDescriptionAmountResult = {
+  snapshotDate: string;
+  lineCount: number;
+  amountMinorSum: number;
+  amountMajorSum: number;
+  targetCurrency: string;
+};
+
 export type StripeUpcomingProjectedArrRequest = {
   monthStartDate: string;
   nextMonthStartDate: string;
@@ -4958,6 +4973,111 @@ LEFT JOIN \`${table}\` t
     { name: "month_start_date", type: "STRING", value: monthStartIso },
     { name: "next_month_start_date", type: "STRING", value: nextMonthStartIso },
     { name: "target_currency", type: "STRING", value: targetCurrency },
+  ];
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+  const first = rows[0] || {};
+  const amountMinorSum = asNumber(first.amount_minor_sum);
+
+  return {
+    snapshotDate: asString(first.snapshot_date),
+    lineCount: asInt(first.line_count),
+    amountMinorSum,
+    amountMajorSum: round2(amountMinorSum / 100),
+    targetCurrency: targetCurrency.toUpperCase(),
+  };
+}
+
+export async function queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQuery(
+  request: StripeUpcomingCurrentMonthDescriptionAmountRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeUpcomingCurrentMonthDescriptionAmountResult> {
+  const monthStart = parseIsoDateUtc(request.monthStartDate);
+  const nextMonthStart = parseIsoDateUtc(request.nextMonthStartDate);
+  if (!monthStart || !nextMonthStart) {
+    throw new Error("Invalid monthStartDate/nextMonthStartDate");
+  }
+  if (nextMonthStart.getTime() <= monthStart.getTime()) {
+    throw new Error("nextMonthStartDate must be > monthStartDate");
+  }
+
+  const monthStartIso = monthStart.toISOString().slice(0, 10);
+  const nextMonthStartIso = nextMonthStart.toISOString().slice(0, 10);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const includes = Array.from(
+    new Set(
+      (request.productDescriptionIncludes || [])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+  if (!includes.length) {
+    return {
+      snapshotDate: "",
+      lineCount: 0,
+      amountMinorSum: 0,
+      amountMajorSum: 0,
+      targetCurrency: targetCurrency.toUpperCase(),
+    };
+  }
+
+  const profile = normalizeProfile(options?.profile);
+  const table = getStripeUpcomingSnapshotsTable(profile);
+  const productsTable = getStripeProductsTable(profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+
+  const descriptionTermsSql = includes.map(
+    (_, idx) => `STRPOS(LOWER(COALESCE(CAST(pl.product_description AS STRING), '')), @desc_${idx}) > 0`,
+  );
+  const query = `
+WITH latest_snapshot AS (
+  SELECT MAX(snapshot_date) AS snapshot_date
+  FROM \`${table}\`
+),
+products_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id,
+    COALESCE(
+      NULLIF(TRIM(CAST(description AS STRING)), ''),
+      NULLIF(TRIM(CAST(name AS STRING)), ''),
+      '(blank)'
+    ) AS product_description
+  FROM \`${productsTable}\`
+),
+matched_lines AS (
+  SELECT
+    ls.snapshot_date,
+    t.amount_minor
+  FROM latest_snapshot ls
+  JOIN \`${table}\` t
+    ON t.snapshot_date = ls.snapshot_date
+    AND t.period_start >= TIMESTAMP(@month_start_date)
+    AND t.period_start < TIMESTAMP(@next_month_start_date)
+    AND LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+  JOIN products_lookup pl
+    ON pl.product_id = COALESCE(
+      NULLIF(TRIM(CAST(t.product_id AS STRING)), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_id')), ''),
+      '(blank)'
+    )
+    AND (${descriptionTermsSql.join(" OR ")})
+)
+SELECT
+  CAST(MAX(ls.snapshot_date) AS STRING) AS snapshot_date,
+  COUNT(ml.amount_minor) AS line_count,
+  COALESCE(SUM(CAST(ml.amount_minor AS FLOAT64)), 0.0) AS amount_minor_sum
+FROM latest_snapshot ls
+LEFT JOIN matched_lines ml
+  ON ml.snapshot_date = ls.snapshot_date
+`;
+  const params: BigQueryNamedParameter[] = [
+    { name: "month_start_date", type: "STRING", value: monthStartIso },
+    { name: "next_month_start_date", type: "STRING", value: nextMonthStartIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+    ...includes.map((term, idx) => ({ name: `desc_${idx}`, type: "STRING" as const, value: term })),
   ];
   const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
   const first = rows[0] || {};
