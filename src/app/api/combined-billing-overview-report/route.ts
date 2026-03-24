@@ -470,6 +470,18 @@ async function fetchQuickBooksSalesMarketingCostsWithFx(
   return payload;
 }
 
+async function fetchQuickBooksSalesMarketingCostsNoFx(
+  startDate: string,
+  endDate: string,
+  accountIds: string[],
+  accountNames: string[],
+) {
+  return fetchQuickBooksSalesMarketingCostsByMonth(startDate, endDate, {
+    selectedAccountIds: accountIds,
+    selectedAccountNames: accountNames,
+  });
+}
+
 function conciseErrorMessage(error: unknown, fallback: string) {
   const message = error instanceof Error ? error.message : fallback;
   const trimmed = String(message || fallback).trim();
@@ -789,18 +801,25 @@ async function buildCombinedBillingOverview(
 
   let cacPoints: CacPoint[] = [];
   let cacCurrencyLayerPoints: CacPoint[] = [];
+  let cacCadPoints: CacPoint[] = [];
   let cacNotice: string | null = null;
   let cacCurrencyLayerNotice: string | null = null;
+  let cacCadNotice: string | null = null;
+  let cacCadCurrency = "CAD";
   if (grain !== "monthly") {
     cacNotice = "CAC currently supports monthly grain. Switch Time grain to Monthly to load CAC over time.";
     cacCurrencyLayerNotice =
       "Currencylayer CAC currently supports monthly grain. Switch Time grain to Monthly to load CAC over time.";
+    cacCadNotice =
+      "CAC (CAD, no FX) currently supports monthly grain. Switch Time grain to Monthly to load CAC over time.";
     cacPoints = emptyCacSeries;
     cacCurrencyLayerPoints = emptyCacSeries;
+    cacCadPoints = emptyCacSeries;
   } else {
-    const [frankfurterResult, currencyLayerResult] = await Promise.allSettled([
+    const [frankfurterResult, currencyLayerResult, cadRawResult] = await Promise.allSettled([
       fetchQuickBooksSalesMarketingCostsWithFx(startDate, endDate, accountIds, accountNames, "frankfurter"),
       fetchQuickBooksSalesMarketingCostsWithFx(startDate, endDate, accountIds, accountNames, "currencylayer"),
+      fetchQuickBooksSalesMarketingCostsNoFx(startDate, endDate, accountIds, accountNames),
     ]);
 
     if (frankfurterResult.status === "fulfilled") {
@@ -837,6 +856,25 @@ async function buildCombinedBillingOverview(
       )}`;
       cacCurrencyLayerPoints = emptyCacSeries;
     }
+
+    if (cadRawResult.status === "fulfilled") {
+      const cadRawCosts = cadRawResult.value as QuickBooksSalesMarketingCostResponse;
+      cacCadCurrency = String(cadRawCosts.currency || "CAD").trim().toUpperCase() || "CAD";
+      cacCadPoints = buildCacSeries(
+        periodOrder,
+        grain,
+        buildCostByMonth(cadRawCosts.points || []),
+        combinedNewCustomerCountByPeriod,
+      );
+      const accountMatchNotice = buildCacAccountMatchNotice(cadRawCosts, accountIds);
+      cacCadNotice = accountMatchNotice ? `CAD CAC: ${accountMatchNotice}` : null;
+    } else {
+      cacCadNotice = `CAD CAC unavailable: ${conciseErrorMessage(
+        cadRawResult.reason,
+        "QuickBooks cost query failed.",
+      )}`;
+      cacCadPoints = emptyCacSeries;
+    }
   }
 
   return {
@@ -850,8 +888,11 @@ async function buildCombinedBillingOverview(
     retentionPoints,
     cacPoints,
     cacCurrencyLayerPoints,
+    cacCadPoints,
     cacNotice,
     cacCurrencyLayerNotice,
+    cacCadNotice,
+    cacCadCurrency,
   };
 }
 

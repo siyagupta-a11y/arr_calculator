@@ -80,8 +80,11 @@ type CombinedBillingOverviewReportResponse = {
   retentionPoints: RetentionSeriesPoint[];
   cacPoints: CacPoint[];
   cacCurrencyLayerPoints: CacPoint[];
+  cacCadPoints: CacPoint[];
   cacNotice: string | null;
   cacCurrencyLayerNotice: string | null;
+  cacCadNotice: string | null;
+  cacCadCurrency: string;
 };
 
 type RetentionSource = "combined" | "salesled" | "selfserve";
@@ -118,6 +121,8 @@ type CombinedOverviewData = {
   retentionPoints: RetentionSeriesPoint[];
   cacPoints: CacPoint[];
   cacCurrencyLayerPoints: CacPoint[];
+  cacCadPoints: CacPoint[];
+  cacCadCurrency: string;
 };
 
 function round2(n: number) {
@@ -1617,6 +1622,7 @@ export default function CombinedBillingOverviewPage() {
   const [data, setData] = useState<CombinedOverviewData | null>(null);
   const [cacNotice, setCacNotice] = useState<string | null>(null);
   const [cacCurrencyLayerNotice, setCacCurrencyLayerNotice] = useState<string | null>(null);
+  const [cacCadNotice, setCacCadNotice] = useState<string | null>(null);
   const [selectedCacAccountIds, setSelectedCacAccountIds] = useState<string[]>([]);
   const [cacAccountMenuTarget, setCacAccountMenuTarget] = useState<CacMenuTarget>(null);
   const [cacExpenseAccounts, setCacExpenseAccounts] = useState<QuickBooksExpenseAccount[]>([]);
@@ -1775,6 +1781,7 @@ export default function CombinedBillingOverviewPage() {
     setError(null);
     setCacNotice(null);
     setCacCurrencyLayerNotice(null);
+    setCacCadNotice(null);
     setShowProjectedArrBreakdown(false);
 
     try {
@@ -1828,6 +1835,7 @@ export default function CombinedBillingOverviewPage() {
 
       setCacNotice(overview.cacNotice);
       setCacCurrencyLayerNotice(overview.cacCurrencyLayerNotice);
+      setCacCadNotice(overview.cacCadNotice);
 
       setData({
         startDate: overview.startDate,
@@ -1850,6 +1858,8 @@ export default function CombinedBillingOverviewPage() {
         retentionPoints: overview.retentionPoints || [],
         cacPoints: overview.cacPoints || [],
         cacCurrencyLayerPoints: overview.cacCurrencyLayerPoints || [],
+        cacCadPoints: overview.cacCadPoints || [],
+        cacCadCurrency: String(overview.cacCadCurrency || "CAD").toUpperCase(),
       });
     } catch (e: unknown) {
       if (isStale()) return;
@@ -1865,6 +1875,7 @@ export default function CombinedBillingOverviewPage() {
   const retentionPoints = useMemo(() => data?.retentionPoints ?? [], [data]);
   const cacPoints = useMemo(() => data?.cacPoints ?? [], [data]);
   const cacCurrencyLayerPoints = useMemo(() => data?.cacCurrencyLayerPoints ?? [], [data]);
+  const cacCadPoints = useMemo(() => data?.cacCadPoints ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
 
   return (
@@ -2001,6 +2012,14 @@ export default function CombinedBillingOverviewPage() {
         <section className="stripe-ui__panel ui-reveal ui-reveal-2">
           <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
             {cacCurrencyLayerNotice}
+          </p>
+        </section>
+      )}
+
+      {!loading && !error && cacCadNotice && (
+        <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+          <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+            {cacCadNotice}
           </p>
         </section>
       )}
@@ -2159,6 +2178,36 @@ export default function CombinedBillingOverviewPage() {
               savingDefaultSelection={savingCacDefaultSelection}
               defaultSaveStatus={cacDefaultSaveStatus}
               onToggleAccountMenu={() => toggleCacAccountMenu("currencylayer")}
+              onRefreshAccounts={() => void loadCacExpenseAccounts()}
+              onToggleAccountSelection={toggleCacAccountSelection}
+              onSelectAllAccounts={selectAllCacAccounts}
+              onClearAccounts={clearCacAccounts}
+              onSaveDefaultSelection={() => void saveCacDefaultSelection()}
+              onApplySelection={() => {
+                setCacAccountMenuTarget(null);
+                void run();
+              }}
+            />
+
+            <CacChartCard
+              points={cacCadPoints}
+              currency={data.cacCadCurrency}
+              title="CAC Over Time (CAD Raw, No FX)"
+              subtitle="CAC = Sales & Marketing Cost / Total Users. Uses raw QuickBooks S&M costs in CAD with no currency conversion."
+              accentColor="#22c55e"
+              downloadFilename="combined-billing-overview-cac-over-time-cad-no-fx"
+              tableTitle="CAC Table (CAD Raw, No FX)"
+              tableAriaLabel="CAC table using CAD raw costs with no FX conversion"
+              showAccountSelector={false}
+              expenseAccounts={cacExpenseAccounts}
+              selectedAccountIds={selectedCacAccountIds}
+              runLoading={loading}
+              accountMenuOpen={false}
+              accountsLoading={cacExpenseAccountsLoading}
+              accountsError={cacExpenseAccountsError}
+              savingDefaultSelection={savingCacDefaultSelection}
+              defaultSaveStatus={cacDefaultSaveStatus}
+              onToggleAccountMenu={() => toggleCacAccountMenu("frankfurter")}
               onRefreshAccounts={() => void loadCacExpenseAccounts()}
               onToggleAccountSelection={toggleCacAccountSelection}
               onSelectAllAccounts={selectAllCacAccounts}
