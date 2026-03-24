@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { resolveEnterprisePrepaidAiSpendExclusions } from "@/lib/aiSpendEnterprisePrepaidExclusions";
 import {
   queryStripeAiSpendFromBigQuery,
   type StripeAiSpendGrain,
@@ -9,6 +10,7 @@ import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseC
 export const runtime = "nodejs";
 export const maxDuration = 300;
 const CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_CACHE_TTL_MS", 60_000);
+const EXCLUSIONS_CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_EXCLUSIONS_CACHE_TTL_MS", 300_000);
 
 const ALLOWED_GRAINS = new Set<StripeAiSpendGrain>([
   "daily",
@@ -75,8 +77,35 @@ function parsePayload(raw: Partial<ApiBody>): StripeAiSpendRequest {
 
 async function validateAndRun(body: Partial<ApiBody>) {
   const payload = parsePayload(body);
-  const key = `api:stripe-ai-spend:${stableStringify(payload)}`;
-  return getOrSetCache(key, CACHE_TTL_MS, () => queryStripeAiSpendFromBigQuery(payload));
+  const exclusionsKey = `api:stripe-ai-spend:enterprise-prepaid-exclusions:${stableStringify({
+    startDate: payload.startDate,
+    endDate: payload.endDate,
+    asOfDate: payload.endDate,
+  })}`;
+  const exclusions = await getOrSetCache(
+    exclusionsKey,
+    EXCLUSIONS_CACHE_TTL_MS,
+    () =>
+      resolveEnterprisePrepaidAiSpendExclusions({
+        startDate: payload.startDate,
+        endDate: payload.endDate,
+        asOfDate: payload.endDate,
+      }),
+  ).catch(() => ({ customerIds: [], customerMonthPairs: [], rows: [] }));
+  const requestPayload: StripeAiSpendRequest = {
+    ...payload,
+    excludeCustomerIds: [],
+    excludeCustomerMonthPairs: exclusions.customerMonthPairs || [],
+  };
+  const key = `api:stripe-ai-spend:${stableStringify(requestPayload)}`;
+  return getOrSetCache(key, CACHE_TTL_MS, async () => {
+    const report = await queryStripeAiSpendFromBigQuery(requestPayload, { profile: "stripe_arr_correct" });
+    return {
+      ...report,
+      excludedEnterprisePrepaidCustomerCount: exclusions.customerIds.length,
+      excludedEnterprisePrepaidCustomers: exclusions.rows,
+    };
+  });
 }
 
 export async function POST(req: Request) {

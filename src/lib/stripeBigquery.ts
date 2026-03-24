@@ -279,6 +279,7 @@ export type StripeAiSpendRequest = {
   topLimit?: number;
   detailLimit?: number;
   excludeCustomerIds?: string[];
+  excludeCustomerMonthPairs?: string[];
 };
 
 export type StripeAiSpendPoint = {
@@ -4687,6 +4688,13 @@ export async function queryStripeAiSpendFromBigQuery(
         .filter(Boolean),
     ),
   );
+  const excludedCustomerMonthPairs = Array.from(
+    new Set(
+      (request.excludeCustomerMonthPairs || [])
+        .map((value) => String(value || "").trim())
+        .filter((value) => /^\S+\|\d{4}-\d{2}$/.test(value)),
+    ),
+  );
 
   const profile = normalizeProfile(options?.profile);
   const sa = getServiceAccount(profile);
@@ -4708,6 +4716,24 @@ export async function queryStripeAiSpendFromBigQuery(
   const exclusionWhereSql = excludedCustomerIds.length
     ? `    AND COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)') NOT IN (
       SELECT customer_id FROM excluded_customers
+    )`
+    : "";
+  const excludedCustomerMonthPairsCteSql = excludedCustomerMonthPairs.length
+    ? `excluded_customer_month_pairs AS (
+  SELECT pair_key
+  FROM UNNEST([${excludedCustomerMonthPairs.map((_, idx) => `@excluded_customer_month_pair_${idx}`).join(", ")}]) AS pair_key
+),`
+    : `excluded_customer_month_pairs AS (
+  SELECT CAST(NULL AS STRING) AS pair_key
+  WHERE FALSE
+),`;
+  const exclusionByMonthWhereSql = excludedCustomerMonthPairs.length
+    ? `    AND CONCAT(
+      COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)'),
+      '|',
+      FORMAT_DATE('%Y-%m', DATE(il.period_start))
+    ) NOT IN (
+      SELECT pair_key FROM excluded_customer_month_pairs
     )`
     : "";
 
@@ -4759,6 +4785,7 @@ line_discounts AS (
   GROUP BY invoice_line_item_id
 ),
 ${excludedCustomersCteSql}
+${excludedCustomerMonthPairsCteSql}
 metered_lines AS (
   SELECT
     DATE(il.period_start) AS event_date,
@@ -4790,6 +4817,7 @@ metered_lines AS (
     AND LOWER(COALESCE(il.currency, '')) = @target_currency
     AND DATE(il.period_start) BETWEEN DATE(@start_date) AND DATE(@end_date)
 ${exclusionWhereSql}
+${exclusionByMonthWhereSql}
 )
 `;
 
@@ -4907,6 +4935,13 @@ LIMIT @detail_limit
         name: `excluded_customer_${idx}`,
         type: "STRING",
         value: customerId,
+      }),
+    ),
+    ...excludedCustomerMonthPairs.map(
+      (pair, idx): BigQueryNamedParameter => ({
+        name: `excluded_customer_month_pair_${idx}`,
+        type: "STRING",
+        value: pair,
       }),
     ),
   ];

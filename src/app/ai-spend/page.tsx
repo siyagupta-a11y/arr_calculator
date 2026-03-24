@@ -45,6 +45,20 @@ type AiSpendDetailRow = {
   quantity: number;
 };
 
+type ExcludedEnterprisePrepaidCustomer = {
+  monthKey: string;
+  monthLabel: string;
+  asOfDate: string;
+  customerId: string;
+  customerEmail: string;
+  customerName: string;
+  currency: string;
+  availableCreditMinor: number;
+  availableCreditMajor: number;
+  accountIds: string[];
+  accountNames: string[];
+};
+
 type ApiResponse = {
   startDate: string;
   endDate: string;
@@ -59,6 +73,8 @@ type ApiResponse = {
   reportSource?: string;
   reportTypeId?: string;
   reportRunId?: string;
+  excludedEnterprisePrepaidCustomerCount?: number;
+  excludedEnterprisePrepaidCustomers?: ExcludedEnterprisePrepaidCustomer[];
 };
 
 function defaultDateRange() {
@@ -132,6 +148,7 @@ export default function AiSpendPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<ApiResponse | null>(null);
+  const [showExclusions, setShowExclusions] = useState(false);
 
   const run = useCallback(async (request: {
     startDate: string;
@@ -143,6 +160,7 @@ export default function AiSpendPage() {
     setHasRunOnce(true);
     setLoading(true);
     setError(null);
+    setShowExclusions(false);
     try {
       const res = await fetch("/api/stripe-ai-spend-report", {
         method: "POST",
@@ -198,6 +216,11 @@ export default function AiSpendPage() {
     }
     return set.size;
   }, [data]);
+  const excludedCustomers = useMemo(
+    () => data?.excludedEnterprisePrepaidCustomers || [],
+    [data],
+  );
+  const excludedCustomerCount = data?.excludedEnterprisePrepaidCustomerCount || excludedCustomers.length;
 
   const exportCustomerBreakdownCsv = useCallback(() => {
     if (!data) return;
@@ -388,7 +411,7 @@ export default function AiSpendPage() {
                 {data.reportRunId ? ` | Run: ${data.reportRunId}` : ""}
               </p>
             ) : null}
-            <div className="stripe-ui__stats" style={{ gridTemplateColumns: "repeat(4, minmax(140px, 1fr))" }}>
+            <div className="stripe-ui__stats" style={{ gridTemplateColumns: "repeat(5, minmax(140px, 1fr))" }}>
               <article className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Total net metered revenue</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.totalRevenue || 0, summaryCurrency)}</p>
@@ -405,6 +428,19 @@ export default function AiSpendPage() {
                 <p className="stripe-ui__stat-label">Customers in details</p>
                 <p className="stripe-ui__stat-value">{uniqueCustomersShown}</p>
               </article>
+              <article className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Enterprise prepaid exclusions</p>
+                <p className="stripe-ui__stat-value">{excludedCustomerCount}</p>
+              </article>
+            </div>
+            <div className="stripe-ui__actions" style={{ marginTop: "0.75rem", marginBottom: "0.25rem" }}>
+              <button
+                className="stripe-ui__btn stripe-ui__btn--ghost"
+                onClick={() => setShowExclusions((prev) => !prev)}
+                disabled={excludedCustomerCount === 0}
+              >
+                {showExclusions ? "Hide exclusion list" : "Show exclusion list"}
+              </button>
             </div>
 
             <div className="stripe-ui__table-wrap">
@@ -440,6 +476,52 @@ export default function AiSpendPage() {
               </table>
             </div>
           </section>
+
+          {showExclusions ? (
+            <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+              <h2 className="stripe-ui__panel-title">Excluded enterprise prepaid customers</h2>
+              <p className="stripe-ui__panel-subtitle">
+                AI spend is excluded for these Stripe customers because they are enterprise-linked and currently have
+                available prepaid credit balance.
+              </p>
+              <div className="stripe-ui__table-wrap">
+                <table className="stripe-ui__table">
+                  <thead>
+                    <tr>
+                      <th>Month</th>
+                      <th>Customer</th>
+                      <th>Email</th>
+                      <th>Enterprise account(s)</th>
+                      <th className="stripe-ui__num">Available credit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {excludedCustomers.length === 0 ? (
+                      <tr>
+                        <td colSpan={5}>No excluded enterprise prepaid customers for this run.</td>
+                      </tr>
+                    ) : (
+                      excludedCustomers.map((row) => (
+                        <tr key={`excluded-${row.monthKey}-${row.customerId}`}>
+                          <td>{row.monthLabel || row.monthKey}</td>
+                          <td>{withLabel(row.customerId, row.customerName)}</td>
+                          <td>{row.customerEmail || "(blank)"}</td>
+                          <td>
+                            {row.accountNames.length
+                              ? row.accountNames.join(" | ")
+                              : row.accountIds.length
+                                ? row.accountIds.join(" | ")
+                                : "(blank)"}
+                          </td>
+                          <td className="stripe-ui__num">{formatMoney(row.availableCreditMajor, row.currency || summaryCurrency)}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
 
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
             <h2 className="stripe-ui__panel-title">Customer breakdown</h2>
