@@ -4709,8 +4709,8 @@ export async function queryStripeAiSpendFromBigQuery(
   FROM UNNEST([${excludedCustomerIds.map((_, idx) => `@excluded_customer_${idx}`).join(", ")}]) AS customer_id
 ),`
     : `excluded_customers AS (
-  SELECT CAST(NULL AS STRING) AS customer_id
-  WHERE FALSE
+  SELECT customer_id
+  FROM UNNEST(CAST([] AS ARRAY<STRING>)) AS customer_id
 ),`;
 
   const exclusionWhereSql = excludedCustomerIds.length
@@ -4724,8 +4724,8 @@ export async function queryStripeAiSpendFromBigQuery(
   FROM UNNEST([${excludedCustomerMonthPairs.map((_, idx) => `@excluded_customer_month_pair_${idx}`).join(", ")}]) AS pair_key
 ),`
     : `excluded_customer_month_pairs AS (
-  SELECT CAST(NULL AS STRING) AS pair_key
-  WHERE FALSE
+  SELECT pair_key
+  FROM UNNEST(CAST([] AS ARRAY<STRING>)) AS pair_key
 ),`;
   const exclusionByMonthWhereSql = excludedCustomerMonthPairs.length
     ? `    AND CONCAT(
@@ -5227,8 +5227,8 @@ export async function queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQue
   FROM UNNEST([${excludedCustomerIds.map((_, idx) => `@excluded_customer_${idx}`).join(", ")}]) AS customer_id
 ),`
     : `excluded_customers AS (
-  SELECT CAST(NULL AS STRING) AS customer_id
-  WHERE FALSE
+  SELECT customer_id
+  FROM UNNEST(CAST([] AS ARRAY<STRING>)) AS customer_id
 ),`;
   const excludedCustomerWhereSql = excludedCustomerIds.length
     ? `    AND COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') NOT IN (
