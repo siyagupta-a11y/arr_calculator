@@ -18,6 +18,17 @@ function canUseBlobStorage() {
   return hasBlobToken();
 }
 
+function blobAccessMode(): "public" | "private" {
+  const raw = String(process.env.BLOB_STORE_ACCESS || "private").trim().toLowerCase();
+  return raw === "public" ? "public" : "private";
+}
+
+function blobFetchHeaders() {
+  const token = String(process.env.BLOB_READ_WRITE_TOKEN || "").trim();
+  if (!token) return undefined;
+  return { Authorization: `Bearer ${token}` };
+}
+
 function normalizeIds(values: string[]) {
   return Array.from(
     new Set(

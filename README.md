@@ -293,3 +293,4 @@ QuickBooks:
 - `STRIPE_SYNC_CRON_ITERATIONS` (default `12`)
 - `STRIPE_SYNC_MAX_RUNTIME_MS` (default `40000`)
 - `STRIPE_SYNC_STORE_PATH` (local fallback path, default `/tmp/arr-stripe-sync-store.json`)
+- `BLOB_STORE_ACCESS` (default `private`; set `public` if your Blob store is still public)
