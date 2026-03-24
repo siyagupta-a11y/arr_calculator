@@ -2681,24 +2681,22 @@ export default function CombinedBillingOverviewPage() {
                 <p className="stripe-ui__stat-label">Live ARR</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.liveArr, currency)}</p>
               </div>
-              <div className="stripe-ui__stat">
+              <div
+                className="stripe-ui__stat"
+                title={`AI Spend annualized: ${formatMoney(
+                  data.projectedArrBreakdown.aiSpendAnnualizedArr,
+                  currency,
+                )} | Self-serve projected: ${formatMoney(
+                  data.projectedArrBreakdown.selfserveProjectedArr,
+                  currency,
+                )} | Sales-led current C-ARR: ${formatMoney(
+                  data.projectedArrBreakdown.salesledCurrentArr,
+                  currency,
+                )}`}
+              >
                 <p className="stripe-ui__stat-label">Projected ARR (EOM)</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.projectedArr, currency)}</p>
-                <p
-                  className="stripe-ui__hint"
-                  title={`AI Spend annualized: ${formatMoney(
-                    data.projectedArrBreakdown.aiSpendAnnualizedArr,
-                    currency,
-                  )}\nSelf-serve projected: ${formatMoney(
-                    data.projectedArrBreakdown.selfserveProjectedArr,
-                    currency,
-                  )}\nSales-led current C-ARR: ${formatMoney(
-                    data.projectedArrBreakdown.salesledCurrentArr,
-                    currency,
-                  )}`}
-                >
-                  Hover for breakdown
-                </p>
+                <p className="stripe-ui__hint">Hover for breakdown</p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Points</p>
