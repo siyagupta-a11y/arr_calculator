@@ -5413,6 +5413,10 @@ export async function queryStripeSalesLedCustomerInvoicePrepaidUsageFromBigQuery
   if (monthEndDate < monthStartDate) {
     throw new Error("monthEndDate must be >= monthStartDate");
   }
+  const includedDealstage = String(process.env.INCLUDED_DEALSTAGE || "").trim();
+  if (!includedDealstage) {
+    throw new Error("Missing INCLUDED_DEALSTAGE");
+  }
 
   const profile = normalizeProfile(options?.profile);
   const sa = getServiceAccount(profile);
@@ -5452,6 +5456,41 @@ latest_companies AS (
   )
   WHERE rn = 1
 ),
+latest_deals AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      d.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY d.id
+        ORDER BY d.updatedAt DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.hubspot.deals\` d
+    WHERE COALESCE(d.archived, FALSE) = FALSE
+      AND TRIM(COALESCE(CAST(d.properties_dealstage AS STRING), '')) = @included_dealstage
+  )
+  WHERE rn = 1
+),
+included_salesled_companies AS (
+  SELECT DISTINCT company_id
+  FROM (
+    SELECT
+      REGEXP_EXTRACT(TRIM(COALESCE(CAST(d.properties_hs_primary_associated_company AS STRING), '')), r'\\d+') AS company_id
+    FROM latest_deals d
+    UNION ALL
+    SELECT
+      REGEXP_EXTRACT(company_id_raw, r'\\d+') AS company_id
+    FROM latest_deals d
+    CROSS JOIN UNNEST(
+      CASE
+        WHEN d.companies IS NULL THEN CAST([] AS ARRAY<STRING>)
+        ELSE JSON_VALUE_ARRAY(d.companies, '$')
+      END
+    ) AS company_id_raw
+  )
+  WHERE company_id IS NOT NULL
+    AND TRIM(company_id) != ''
+),
 contact_company_pairs AS (
   SELECT
     LOWER(TRIM(COALESCE(CAST(c.properties_email AS STRING), ''))) AS email,
@@ -5475,6 +5514,8 @@ salesled_email_companies AS (
       ) IGNORE NULLS
     ) AS account_names
   FROM contact_company_pairs cp
+  JOIN included_salesled_companies isc
+    ON isc.company_id = cp.company_id
   LEFT JOIN latest_companies co
     ON co.id = cp.company_id
   WHERE cp.email != ''
@@ -5610,6 +5651,7 @@ ORDER BY prepaid_applied_minor DESC, customer_id ASC
     { name: "month_start_date", type: "STRING", value: monthStartDate },
     { name: "month_end_date", type: "STRING", value: monthEndDate },
     { name: "as_of_date", type: "STRING", value: asOfDate },
+    { name: "included_dealstage", type: "STRING", value: includedDealstage },
   ];
   const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
 
