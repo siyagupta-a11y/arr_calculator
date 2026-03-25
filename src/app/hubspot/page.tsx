@@ -1465,12 +1465,12 @@ export default function Home() {
 
   const planOptions = useMemo(() => {
     if (hubspotVm) return hubspotVm.planOptions || [];
-    const order: HubspotPlan[] = ["enterprise", "managed", "team"];
+    const order: HubspotPlan[] = ["enterprise", "managed", "team", "other"];
     if (!data) return order;
     const present = new Set<HubspotPlan>();
     for (const r of data.rows || []) {
       const value = String(r.plan || "").trim().toLowerCase();
-      if (value === "enterprise" || value === "managed" || value === "team") {
+      if (value === "enterprise" || value === "managed" || value === "team" || value === "other") {
         present.add(value);
       }
     }
@@ -1499,7 +1499,7 @@ export default function Home() {
       primaryProjectType: r.primaryProjectType || "",
       customerSupportApplication: r.customerSupportApplication || "",
       dealType: r.dealType || "",
-      plan: r.plan || "team",
+      plan: r.plan || "other",
       groupValues: {},
       valuesByPeriod: r.valuesByPeriod || {},
     }));
@@ -1515,7 +1515,7 @@ export default function Home() {
         : arrDisplayScope === "all" || isCloudDeploymentType(r.deploymentType || "");
       if (!displayScopeOk) return false;
 
-      const planOk = filterPlan === "all" || (r.plan || "team") === filterPlan;
+      const planOk = filterPlan === "all" || (r.plan || "other") === filterPlan;
       if (!planOk) return false;
 
       if (!applyInteractiveFilters) return true;
@@ -1869,7 +1869,7 @@ export default function Home() {
           ? [r.dealName]
           : groupByFields.map((field) => (field === "accountId" ? accountDisplayWithDetails(r) : r.groupValues[field] || "(blank)"));
       const dealIdCol = showDealIdColumn ? [r.dealId] : [];
-      const planCol = showDealIdColumn ? [r.plan || "team"] : [];
+      const planCol = showDealIdColumn ? [r.plan || "other"] : [];
       const accountCol = showDealIdColumn ? [accountDisplayWithDetails(r)] : [];
       const territoryCol = showDealIdColumn ? [r.territory || "(blank)"] : [];
       const companyCountryCol = showDealIdColumn ? [r.companyCountry || "(blank)"] : [];
@@ -2525,7 +2525,7 @@ export default function Home() {
                         ))
                       )}
                       {showDealIdColumn && <td>{r.dealId}</td>}
-                      {showDealIdColumn && <td>{r.plan || "team"}</td>}
+                      {showDealIdColumn && <td>{r.plan || "other"}</td>}
                       {showDealIdColumn && <td>{accountDisplayWithDetails(r)}</td>}
                       {showDealIdColumn && <td>{r.territory || "(blank)"}</td>}
                       {showDealIdColumn && <td>{r.companyCountry || "(blank)"}</td>}

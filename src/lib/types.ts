@@ -43,7 +43,7 @@ export type HubspotLineItemProps = {
   hs_sku?: unknown;
 };
 
-export type HubspotPlan = "enterprise" | "managed" | "team";
+export type HubspotPlan = "enterprise" | "managed" | "team" | "other";
 
 export type ReportMode = "arr" | "contracted";
 export type Grain = "daily" | "monthly" | "quarterly" | "annually";

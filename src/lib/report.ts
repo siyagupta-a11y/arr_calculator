@@ -79,7 +79,9 @@ function parsePrimaryCompanyId(raw: string) {
 }
 
 function inferDealPlan(liIds: string[], lineItemsById: Map<string, HubspotLineItem>): HubspotPlan {
+  let hasEnterprise = false;
   let hasManaged = false;
+  let hasTeam = false;
 
   for (const liId of liIds) {
     const p = (lineItemsById.get(liId)?.properties || {}) as Record<string, unknown>;
@@ -89,11 +91,15 @@ function inferDealPlan(liIds: string[], lineItemsById: Map<string, HubspotLineIt
       .join(" ");
     if (!searchable) continue;
 
-    if (searchable.includes("enterprise")) return "enterprise";
+    if (/\b(midmarket|smb|enterprise)\b/.test(searchable)) hasEnterprise = true;
     if (searchable.includes("managed")) hasManaged = true;
+    if (searchable.includes("team")) hasTeam = true;
   }
 
-  return hasManaged ? "managed" : "team";
+  if (hasEnterprise) return "enterprise";
+  if (hasManaged) return "managed";
+  if (hasTeam) return "team";
+  return "other";
 }
 
 function isCompanyScopesError(err: unknown) {

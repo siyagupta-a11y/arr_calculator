@@ -515,7 +515,7 @@ function toUiRows(sourceData: ReportResponse | null): UiRow[] {
     primaryProjectType: r.primaryProjectType || "",
     customerSupportApplication: r.customerSupportApplication || "",
     dealType: r.dealType || "",
-    plan: r.plan || "team",
+    plan: r.plan || "other",
     groupValues: {},
     valuesByPeriod: r.valuesByPeriod || {},
   }));
@@ -546,7 +546,7 @@ function computeForPayload(
         : payload.arrDisplayScope === "all" || isCloudDeploymentType(r.deploymentType || "");
       if (!displayScopeOk) return false;
 
-      const planOk = payload.filterPlan === "all" || (r.plan || "team") === payload.filterPlan;
+      const planOk = payload.filterPlan === "all" || (r.plan || "other") === payload.filterPlan;
       if (!planOk) return false;
 
       if (!applyInteractiveFilters) return true;
@@ -617,11 +617,11 @@ function computeForPayload(
   })();
 
   const planOptions = (() => {
-    const order: HubspotPlan[] = ["enterprise", "managed", "team"];
+    const order: HubspotPlan[] = ["enterprise", "managed", "team", "other"];
     const present = new Set<HubspotPlan>();
     for (const r of data.rows || []) {
       const value = String(r.plan || "").trim().toLowerCase();
-      if (value === "enterprise" || value === "managed" || value === "team") {
+      if (value === "enterprise" || value === "managed" || value === "team" || value === "other") {
         present.add(value);
       }
     }
@@ -859,7 +859,10 @@ function parsePayload(body: Partial<RequestBody>): ParsedPayload {
 
   const filterPlanRaw = String(body.filterPlan || "all").trim().toLowerCase();
   const filterPlan: HubspotPlan | "all" =
-    filterPlanRaw === "enterprise" || filterPlanRaw === "managed" || filterPlanRaw === "team"
+    filterPlanRaw === "enterprise" ||
+    filterPlanRaw === "managed" ||
+    filterPlanRaw === "team" ||
+    filterPlanRaw === "other"
       ? filterPlanRaw
       : "all";
 
@@ -938,4 +941,3 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: message }, { status });
   }
 }
-
