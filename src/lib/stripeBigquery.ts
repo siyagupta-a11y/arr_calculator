@@ -351,6 +351,26 @@ export type StripeCustomerBalanceByEmailRow = {
   batchTimestamp: string;
 };
 
+export type StripeCustomerInvoicePrepaidUsageByEmailRequest = {
+  emails: string[];
+  monthStartDate: string;
+  monthEndDate: string;
+  asOfDate?: string;
+};
+
+export type StripeCustomerInvoicePrepaidUsageByEmailRow = {
+  customerId: string;
+  email: string;
+  name: string;
+  currency: string;
+  invoiceCount: number;
+  creditInvoiceCount: number;
+  prepaidAppliedMinor: number;
+  maxAvailableCreditMinor: number;
+  invoiceDateStart: string;
+  invoiceDateEnd: string;
+};
+
 export type StripeUpcomingCurrentMonthRequest = {
   monthStartDate: string;
   nextMonthStartDate: string;
@@ -5108,6 +5128,145 @@ WHERE LOWER(TRIM(COALESCE(CAST(email AS STRING), ''))) IN (SELECT email FROM inp
     accountBalanceMinor: asNumber(row.account_balance_minor),
     invoiceCreditBalance: asString(row.invoice_credit_balance),
     batchTimestamp: asString(row.batch_timestamp),
+  }));
+}
+
+export async function queryStripeCustomerInvoicePrepaidUsageByEmailsFromBigQuery(
+  request: StripeCustomerInvoicePrepaidUsageByEmailRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeCustomerInvoicePrepaidUsageByEmailRow[]> {
+  const emails = Array.from(
+    new Set(
+      (request.emails || [])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter((value) => value.includes("@")),
+    ),
+  );
+  if (!emails.length) return [];
+
+  const monthStartDate = String(request.monthStartDate || "").trim();
+  const monthEndDate = String(request.monthEndDate || "").trim();
+  const asOfDate = String(request.asOfDate || "").trim();
+  if (!parseIsoDateUtc(monthStartDate) || !parseIsoDateUtc(monthEndDate)) {
+    throw new Error("Invalid monthStartDate/monthEndDate");
+  }
+  if (asOfDate && !parseIsoDateUtc(asOfDate)) {
+    throw new Error("Invalid asOfDate");
+  }
+  if (monthEndDate < monthStartDate) {
+    throw new Error("monthEndDate must be >= monthStartDate");
+  }
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const customersTable = getStripeCustomersTable();
+
+  const query = `
+WITH input_emails AS (
+  SELECT LOWER(TRIM(email)) AS email
+  FROM UNNEST([${emails.map((_, idx) => `@email_${idx}`).join(", ")}]) AS email
+),
+latest_customers AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      c.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY c.id
+        ORDER BY c.batch_timestamp DESC
+      ) AS rn
+    FROM \`${customersTable}\` c
+    WHERE LOWER(TRIM(COALESCE(CAST(c.email AS STRING), ''))) IN (SELECT email FROM input_emails)
+      AND (@as_of_date = '' OR c.batch_timestamp < TIMESTAMP(DATE_ADD(DATE(@as_of_date), INTERVAL 1 DAY)))
+  )
+  WHERE rn = 1
+),
+latest_invoices AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      i.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY i.id
+        ORDER BY i.batch_timestamp DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.stripe.invoices\` i
+    WHERE DATE(i.date) >= DATE(@month_start_date)
+      AND DATE(i.date) <= DATE(@month_end_date)
+      AND (@as_of_date = '' OR DATE(i.date) <= DATE(@as_of_date))
+      AND LOWER(TRIM(COALESCE(CAST(i.status AS STRING), ''))) != 'void'
+  )
+  WHERE rn = 1
+)
+SELECT
+  COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') AS customer_id,
+  LOWER(TRIM(COALESCE(CAST(c.email AS STRING), ''))) AS email,
+  COALESCE(NULLIF(TRIM(CAST(c.name AS STRING)), ''), '(blank)') AS name,
+  UPPER(TRIM(COALESCE(CAST(c.currency AS STRING), ''))) AS currency,
+  COUNT(i.id) AS invoice_count,
+  COUNTIF(LEAST(COALESCE(i.starting_balance, 0), COALESCE(i.ending_balance, 0)) < 0) AS credit_invoice_count,
+  CAST(
+    SUM(
+      CASE
+        WHEN LEAST(COALESCE(i.starting_balance, 0), COALESCE(i.ending_balance, 0)) < 0
+          THEN GREATEST(COALESCE(i.ending_balance, 0) - COALESCE(i.starting_balance, 0), 0)
+        ELSE 0
+      END
+    ) AS FLOAT64
+  ) AS prepaid_applied_minor,
+  CAST(
+    MAX(
+      GREATEST(
+        -COALESCE(i.starting_balance, 0),
+        -COALESCE(i.ending_balance, 0),
+        0
+      )
+    ) AS FLOAT64
+  ) AS max_available_credit_minor,
+  CAST(MIN(DATE(i.date)) AS STRING) AS invoice_date_start,
+  CAST(MAX(DATE(i.date)) AS STRING) AS invoice_date_end
+FROM latest_customers c
+LEFT JOIN latest_invoices i
+  ON i.customer_id = c.id
+WHERE LOWER(TRIM(COALESCE(CAST(c.email AS STRING), ''))) IN (SELECT email FROM input_emails)
+GROUP BY customer_id, email, name, currency
+HAVING
+  SUM(
+    CASE
+      WHEN LEAST(COALESCE(i.starting_balance, 0), COALESCE(i.ending_balance, 0)) < 0
+        THEN GREATEST(COALESCE(i.ending_balance, 0) - COALESCE(i.starting_balance, 0), 0)
+      ELSE 0
+    END
+  ) > 0
+ORDER BY prepaid_applied_minor DESC, customer_id ASC
+`;
+
+  const params: BigQueryNamedParameter[] = emails.map((email, idx) => ({
+    name: `email_${idx}`,
+    type: "STRING",
+    value: email,
+  }));
+  params.push({ name: "month_start_date", type: "STRING", value: monthStartDate });
+  params.push({ name: "month_end_date", type: "STRING", value: monthEndDate });
+  params.push({ name: "as_of_date", type: "STRING", value: asOfDate });
+
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+
+  return rows.map((row) => ({
+    customerId: asString(row.customer_id),
+    email: asString(row.email),
+    name: asString(row.name),
+    currency: asString(row.currency),
+    invoiceCount: asInt(row.invoice_count),
+    creditInvoiceCount: asInt(row.credit_invoice_count),
+    prepaidAppliedMinor: asNumber(row.prepaid_applied_minor),
+    maxAvailableCreditMinor: asNumber(row.max_available_credit_minor),
+    invoiceDateStart: asString(row.invoice_date_start),
+    invoiceDateEnd: asString(row.invoice_date_end),
   }));
 }
 

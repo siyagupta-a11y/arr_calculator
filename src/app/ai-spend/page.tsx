@@ -53,6 +53,8 @@ type ExcludedEnterprisePrepaidCustomer = {
   customerEmail: string;
   customerName: string;
   currency: string;
+  prepaidAppliedMinor: number;
+  prepaidAppliedMajor: number;
   availableCreditMinor: number;
   availableCreditMajor: number;
   accountIds: string[];
@@ -481,8 +483,8 @@ export default function AiSpendPage() {
             <section className="stripe-ui__panel ui-reveal ui-reveal-2">
               <h2 className="stripe-ui__panel-title">Excluded enterprise prepaid customers</h2>
               <p className="stripe-ui__panel-subtitle">
-                AI spend is excluded for these Stripe customers because they are enterprise-linked and currently have
-                available prepaid credit balance.
+                AI spend is excluded for these Stripe customers because enterprise prepaid credit was applied during
+                the selected month window (based on invoice starting/ending balance changes).
               </p>
               <div className="stripe-ui__table-wrap">
                 <table className="stripe-ui__table">
@@ -492,7 +494,7 @@ export default function AiSpendPage() {
                       <th>Customer</th>
                       <th>Email</th>
                       <th>Enterprise account(s)</th>
-                      <th className="stripe-ui__num">Available credit</th>
+                      <th className="stripe-ui__num">Prepaid applied</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -513,7 +515,7 @@ export default function AiSpendPage() {
                                 ? row.accountIds.join(" | ")
                                 : "(blank)"}
                           </td>
-                          <td className="stripe-ui__num">{formatMoney(row.availableCreditMajor, row.currency || summaryCurrency)}</td>
+                          <td className="stripe-ui__num">{formatMoney(row.prepaidAppliedMajor, row.currency || summaryCurrency)}</td>
                         </tr>
                       ))
                     )}

@@ -1,8 +1,8 @@
 import { batchReadContacts, fetchContactIdsForCompanies } from "@/lib/hubspot";
 import { generateReport } from "@/lib/report";
 import {
-  queryStripeCustomerBalancesByEmailsFromBigQuery,
-  type StripeCustomerBalanceByEmailRow,
+  queryStripeCustomerInvoicePrepaidUsageByEmailsFromBigQuery,
+  type StripeCustomerInvoicePrepaidUsageByEmailRow,
 } from "@/lib/stripeBigquery";
 
 export type EnterprisePrepaidAiSpendExclusionRow = {
@@ -13,6 +13,8 @@ export type EnterprisePrepaidAiSpendExclusionRow = {
   customerEmail: string;
   customerName: string;
   currency: string;
+  prepaidAppliedMinor: number;
+  prepaidAppliedMajor: number;
   availableCreditMinor: number;
   availableCreditMajor: number;
   accountIds: string[];
@@ -127,10 +129,12 @@ function buildMonthWindows(startDate: string, endDate: string, asOfDateOverride?
   return windows;
 }
 
-function availableCreditMinor(row: StripeCustomerBalanceByEmailRow) {
-  const balance = Number(row.balanceMinor || 0);
-  const accountBalance = Number(row.accountBalanceMinor || 0);
-  return Math.max(0, -balance, -accountBalance);
+function availableCreditMinor(row: StripeCustomerInvoicePrepaidUsageByEmailRow) {
+  return Math.max(0, Number(row.maxAvailableCreditMinor || 0));
+}
+
+function prepaidAppliedMinor(row: StripeCustomerInvoicePrepaidUsageByEmailRow) {
+  return Math.max(0, Number(row.prepaidAppliedMinor || 0));
 }
 
 async function loadEnterpriseCompanyMapForPeriod(startDate: string, endDate: string) {
@@ -227,16 +231,22 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
 
   const rows: EnterprisePrepaidAiSpendExclusionRow[] = [];
   for (const monthWindow of monthWindows) {
-    const customerRows = await queryStripeCustomerBalancesByEmailsFromBigQuery(
-      { emails: allEmails, asOfDate: monthWindow.asOfDate },
+    const customerRows = await queryStripeCustomerInvoicePrepaidUsageByEmailsFromBigQuery(
+      {
+        emails: allEmails,
+        monthStartDate: monthWindow.monthStartDate,
+        monthEndDate: monthWindow.monthEndDate,
+        asOfDate: monthWindow.asOfDate,
+      },
       { profile: "stripe_arr_correct" },
     );
 
     for (const customerRow of customerRows) {
       const email = normalizeEmail(customerRow.email);
       if (!email) continue;
+      const appliedMinor = prepaidAppliedMinor(customerRow);
+      if (appliedMinor <= 0) continue;
       const creditMinor = availableCreditMinor(customerRow);
-      if (creditMinor <= 0) continue;
 
       const linkedCompanyIds = Array.from(companyIdsByEmail.get(email) || []).sort();
       if (!linkedCompanyIds.length) continue;
@@ -258,6 +268,8 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
         customerEmail: email,
         customerName: String(customerRow.name || "").trim() || "(blank)",
         currency: String(customerRow.currency || "").trim().toUpperCase() || "USD",
+        prepaidAppliedMinor: appliedMinor,
+        prepaidAppliedMajor: Math.round((appliedMinor / 100) * 100) / 100,
         availableCreditMinor: creditMinor,
         availableCreditMajor: Math.round((creditMinor / 100) * 100) / 100,
         accountIds: Array.from(accountIdSet).sort(),
@@ -268,6 +280,8 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
 
   rows.sort((a, b) => {
     if (a.monthKey !== b.monthKey) return a.monthKey.localeCompare(b.monthKey);
+    const prepaidDiff = b.prepaidAppliedMinor - a.prepaidAppliedMinor;
+    if (Math.abs(prepaidDiff) > 1e-9) return prepaidDiff;
     const creditDiff = b.availableCreditMinor - a.availableCreditMinor;
     if (Math.abs(creditDiff) > 1e-9) return creditDiff;
     return a.customerId.localeCompare(b.customerId);
