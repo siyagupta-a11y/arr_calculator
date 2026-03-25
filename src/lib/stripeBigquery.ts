@@ -5105,7 +5105,7 @@ LIMIT @detail_limit
     label: asString(row.period_label),
     periodStart: asString(row.period_start),
     periodEnd: asString(row.period_end),
-    revenue: asNumber(row.revenue),
+    revenue: Math.max(0, asNumber(row.revenue)),
     lineCount: asInt(row.line_count),
     customerCount: asInt(row.customer_count),
   }));
@@ -5113,14 +5113,14 @@ LIMIT @detail_limit
   const topCustomers: StripeAiSpendGroupRow[] = topCustomersRows.map((row) => ({
     key: asString(row.group_key) || "(blank)",
     label: asString(row.group_label) || "(blank)",
-    revenue: asNumber(row.revenue),
+    revenue: Math.max(0, asNumber(row.revenue)),
     lineCount: asInt(row.line_count),
   }));
 
   const topProducts: StripeAiSpendGroupRow[] = topProductsRows.map((row) => ({
     key: asString(row.group_key) || "(blank)",
     label: asString(row.group_label) || "(blank)",
-    revenue: asNumber(row.revenue),
+    revenue: Math.max(0, asNumber(row.revenue)),
     lineCount: asInt(row.line_count),
   }));
 
@@ -5129,7 +5129,7 @@ LIMIT @detail_limit
     priceLabel: asString(row.price_label) || "(blank)",
     productId: asString(row.product_id) || "(blank)",
     productLabel: asString(row.product_label) || "(blank)",
-    revenue: asNumber(row.revenue),
+    revenue: Math.max(0, asNumber(row.revenue)),
     lineCount: asInt(row.line_count),
   }));
 
@@ -5143,11 +5143,11 @@ LIMIT @detail_limit
     priceLabel: asString(row.price_label),
     productId: asString(row.product_id),
     productLabel: asString(row.product_label),
-    revenue: asNumber(row.revenue),
+    revenue: Math.max(0, asNumber(row.revenue)),
     quantity: asNumber(row.quantity),
   }));
 
-  const totalRevenue = points.reduce((sum, point) => sum + point.revenue, 0);
+  const totalRevenue = Math.max(0, points.reduce((sum, point) => sum + point.revenue, 0));
 
   return {
     startDate: startDateIso,
@@ -5629,7 +5629,7 @@ LEFT JOIN \`${table}\` t
   ];
   const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
   const first = rows[0] || {};
-  const amountMinorSum = asNumber(first.amount_minor_sum);
+  const amountMinorSum = Math.max(0, asNumber(first.amount_minor_sum));
 
   return {
     snapshotDate: asString(first.snapshot_date),
