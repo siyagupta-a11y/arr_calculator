@@ -141,7 +141,7 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
     resolveEnterprisePrepaidAiSpendExclusions({
       startDate: lastMonthStartDate,
       endDate: lastMonthEndDate,
-      asOfDate: lastMonthEndDate,
+      asOfDate: todayDate,
     }).catch(() => ({ customerIds: [], customerMonthPairs: [], rows: [] })),
   ]);
 

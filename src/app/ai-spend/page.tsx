@@ -484,7 +484,8 @@ export default function AiSpendPage() {
               <h2 className="stripe-ui__panel-title">Excluded enterprise prepaid customers</h2>
               <p className="stripe-ui__panel-subtitle">
                 AI spend is excluded for these Stripe customers because enterprise prepaid credit was applied during
-                the selected month window (based on invoice starting/ending balance changes).
+                the selected usage month window (using invoice starting/ending balance changes from the following
+                invoice month).
               </p>
               <div className="stripe-ui__table-wrap">
                 <table className="stripe-ui__table">

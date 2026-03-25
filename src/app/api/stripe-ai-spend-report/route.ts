@@ -80,7 +80,7 @@ async function validateAndRun(body: Partial<ApiBody>) {
   const exclusionsKey = `api:stripe-ai-spend:enterprise-prepaid-exclusions:${stableStringify({
     startDate: payload.startDate,
     endDate: payload.endDate,
-    asOfDate: payload.endDate,
+    invoiceMonthOffset: 1,
   })}`;
   const exclusions = await getOrSetCache(
     exclusionsKey,
@@ -89,7 +89,6 @@ async function validateAndRun(body: Partial<ApiBody>) {
       resolveEnterprisePrepaidAiSpendExclusions({
         startDate: payload.startDate,
         endDate: payload.endDate,
-        asOfDate: payload.endDate,
       }),
   ).catch(() => ({ customerIds: [], customerMonthPairs: [], rows: [] }));
   const requestPayload: StripeAiSpendRequest = {

@@ -38,6 +38,8 @@ type MonthWindow = {
   monthLabel: string;
   monthStartDate: string;
   monthEndDate: string;
+  invoiceMonthStartDate: string;
+  invoiceMonthEndDate: string;
   asOfDate: string;
 };
 
@@ -96,13 +98,19 @@ function minIsoDate(a: string, b: string) {
   return a <= b ? a : b;
 }
 
+function addUtcMonths(date: Date, deltaMonths: number) {
+  return new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + deltaMonths, 1, 0, 0, 0, 0),
+  );
+}
+
 function buildMonthWindows(startDate: string, endDate: string, asOfDateOverride?: string): MonthWindow[] {
   const start = parseIsoDateOnly(startDate);
   const end = parseIsoDateOnly(endDate);
   if (!start || !end || end.getTime() < start.getTime()) return [];
 
   const windows: MonthWindow[] = [];
-  const endIso = toIsoDateOnlyUtc(end);
+  const effectiveAsOfCap = asOfDateOverride || toIsoDateOnlyUtc(new Date());
 
   for (
     let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1, 0, 0, 0, 0));
@@ -114,14 +122,21 @@ function buildMonthWindows(startDate: string, endDate: string, asOfDateOverride?
     const monthKey = monthKeyFromDate(monthStart);
     const monthStartDate = toIsoDateOnlyUtc(monthStart);
     const monthEndDate = toIsoDateOnlyUtc(monthEnd);
-    const asOfDateBase = minIsoDate(monthEndDate, endIso);
-    const asOfDate = asOfDateOverride ? minIsoDate(asOfDateBase, asOfDateOverride) : asOfDateBase;
+    const invoiceMonthStart = addUtcMonths(monthStart, 1);
+    const invoiceMonthEnd = new Date(
+      Date.UTC(invoiceMonthStart.getUTCFullYear(), invoiceMonthStart.getUTCMonth() + 1, 0, 0, 0, 0, 0),
+    );
+    const invoiceMonthStartDate = toIsoDateOnlyUtc(invoiceMonthStart);
+    const invoiceMonthEndDate = toIsoDateOnlyUtc(invoiceMonthEnd);
+    const asOfDate = minIsoDate(invoiceMonthEndDate, effectiveAsOfCap);
 
     windows.push({
       monthKey,
       monthLabel: monthKey,
       monthStartDate,
       monthEndDate,
+      invoiceMonthStartDate,
+      invoiceMonthEndDate,
       asOfDate,
     });
   }
@@ -234,8 +249,8 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
     const customerRows = await queryStripeCustomerInvoicePrepaidUsageByEmailsFromBigQuery(
       {
         emails: allEmails,
-        monthStartDate: monthWindow.monthStartDate,
-        monthEndDate: monthWindow.monthEndDate,
+        monthStartDate: monthWindow.invoiceMonthStartDate,
+        monthEndDate: monthWindow.invoiceMonthEndDate,
         asOfDate: monthWindow.asOfDate,
       },
       { profile: "stripe_arr_correct" },
