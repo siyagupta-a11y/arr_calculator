@@ -5482,6 +5482,23 @@ salesled_email_companies AS (
     AND TRIM(cp.company_id) != ''
   GROUP BY cp.email
 ),
+latest_invoices AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      i.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY i.id
+        ORDER BY i.batch_timestamp DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.stripe.invoices\` i
+    WHERE DATE(i.date) >= DATE(@month_start_date)
+      AND DATE(i.date) <= DATE(@month_end_date)
+      AND (@as_of_date = '' OR DATE(i.date) <= DATE(@as_of_date))
+      AND LOWER(TRIM(COALESCE(CAST(i.status AS STRING), ''))) != 'void'
+  )
+  WHERE rn = 1
+),
 latest_customers AS (
   SELECT * EXCEPT(rn)
   FROM (
@@ -5499,7 +5516,7 @@ latest_customers AS (
   )
   WHERE rn = 1
 ),
-salesled_customers AS (
+salesled_customers_from_profiles AS (
   SELECT
     COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') AS customer_id,
     LOWER(TRIM(COALESCE(CAST(c.email AS STRING), ''))) AS email,
@@ -5511,22 +5528,39 @@ salesled_customers AS (
   JOIN salesled_email_companies sec
     ON sec.email = LOWER(TRIM(COALESCE(CAST(c.email AS STRING), '')))
 ),
-latest_invoices AS (
-  SELECT * EXCEPT(rn)
-  FROM (
-    SELECT
-      i.*,
-      ROW_NUMBER() OVER (
-        PARTITION BY i.id
-        ORDER BY i.batch_timestamp DESC
-      ) AS rn
-    FROM \`botpress-stripe-data-pipeline.stripe.invoices\` i
-    WHERE DATE(i.date) >= DATE(@month_start_date)
-      AND DATE(i.date) <= DATE(@month_end_date)
-      AND (@as_of_date = '' OR DATE(i.date) <= DATE(@as_of_date))
-      AND LOWER(TRIM(COALESCE(CAST(i.status AS STRING), ''))) != 'void'
-  )
-  WHERE rn = 1
+salesled_customers_from_invoices AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    LOWER(TRIM(COALESCE(CAST(i.customer_email AS STRING), ''))) AS email,
+    COALESCE(NULLIF(TRIM(CAST(i.customer_name AS STRING)), ''), '(blank)') AS name,
+    UPPER(TRIM(COALESCE(CAST(i.currency AS STRING), ''))) AS currency,
+    sec.account_ids,
+    sec.account_names
+  FROM latest_invoices i
+  JOIN salesled_email_companies sec
+    ON sec.email = LOWER(TRIM(COALESCE(CAST(i.customer_email AS STRING), '')))
+  WHERE COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '') != ''
+),
+salesled_customer_candidates AS (
+  SELECT customer_id, email, name, currency, account_ids, account_names
+  FROM salesled_customers_from_profiles
+  UNION ALL
+  SELECT customer_id, email, name, currency, account_ids, account_names
+  FROM salesled_customers_from_invoices
+),
+salesled_customers AS (
+  SELECT
+    c.customer_id,
+    COALESCE(NULLIF(MAX(c.email), ''), '(blank)') AS email,
+    COALESCE(MAX(IF(c.name != '(blank)', c.name, NULL)), '(blank)') AS name,
+    COALESCE(MAX(NULLIF(c.currency, '')), 'USD') AS currency,
+    ARRAY_AGG(DISTINCT account_id IGNORE NULLS) AS account_ids,
+    ARRAY_AGG(DISTINCT account_name IGNORE NULLS) AS account_names
+  FROM salesled_customer_candidates c
+  LEFT JOIN UNNEST(c.account_ids) AS account_id
+  LEFT JOIN UNNEST(c.account_names) AS account_name
+  WHERE c.customer_id != '(blank)'
+  GROUP BY c.customer_id
 )
 SELECT
   sc.customer_id,
