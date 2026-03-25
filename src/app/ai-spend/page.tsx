@@ -143,8 +143,8 @@ export default function AiSpendPage() {
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
   const [grain, setGrain] = useState<Grain>("monthly");
-  const [topLimit, setTopLimit] = useState(5000);
-  const [detailLimit, setDetailLimit] = useState(300);
+  const [topLimit, setTopLimit] = useState(300);
+  const [detailLimit, setDetailLimit] = useState(100);
 
   const [hasRunOnce, setHasRunOnce] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -200,8 +200,8 @@ export default function AiSpendPage() {
       startDate: defaults.startDate,
       endDate: defaults.endDate,
       grain: "monthly",
-      topLimit: 5000,
-      detailLimit: 300,
+      topLimit: 300,
+      detailLimit: 100,
     });
   }, [defaults.endDate, defaults.startDate, run]);
 

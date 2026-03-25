@@ -1,8 +1,6 @@
-import { batchReadContacts, fetchContactIdsForCompanies } from "@/lib/hubspot";
-import { generateReport } from "@/lib/report";
 import {
-  queryStripeCustomerInvoicePrepaidUsageByEmailsFromBigQuery,
-  type StripeCustomerInvoicePrepaidUsageByEmailRow,
+  queryStripeSalesLedCustomerInvoicePrepaidUsageFromBigQuery,
+  type StripeSalesLedCustomerInvoicePrepaidUsageRow,
 } from "@/lib/stripeBigquery";
 
 export type EnterprisePrepaidAiSpendExclusionRow = {
@@ -53,17 +51,6 @@ type MonthWindow = {
 function normalizeEmail(value: unknown) {
   const email = String(value || "").trim().toLowerCase();
   return email.includes("@") ? email : "";
-}
-
-function parseCompanyIds(rawAccountId: string) {
-  return Array.from(
-    new Set(
-      String(rawAccountId || "")
-        .split(/[,\s;|]+/)
-        .map((part) => part.trim())
-        .filter((part) => /^\d+$/.test(part)),
-    ),
-  );
 }
 
 function toIsoDateOnlyUtc(d: Date) {
@@ -147,72 +134,12 @@ function buildMonthWindows(startDate: string, endDate: string, asOfDateOverride?
   return windows;
 }
 
-function availableCreditMinor(row: StripeCustomerInvoicePrepaidUsageByEmailRow) {
+function availableCreditMinor(row: StripeSalesLedCustomerInvoicePrepaidUsageRow) {
   return Math.max(0, Number(row.maxAvailableCreditMinor || 0));
 }
 
-function prepaidAppliedMinor(row: StripeCustomerInvoicePrepaidUsageByEmailRow) {
+function prepaidAppliedMinor(row: StripeSalesLedCustomerInvoicePrepaidUsageRow) {
   return Math.max(0, Number(row.prepaidAppliedMinor || 0));
-}
-
-async function loadSalesLedCompanyMapForPeriod(startDate: string, endDate: string) {
-  const report = await generateReport({
-    startDate,
-    endDate,
-    mode: "contracted",
-    grain: "monthly",
-  });
-
-  const companies = new Map<string, { accountIds: Set<string>; accountNames: Set<string> }>();
-  for (const row of report.rows || []) {
-    const accountId = String(row.accountId || "").trim();
-    const accountName = String(row.accountName || "").trim();
-    const companyIds = parseCompanyIds(accountId);
-    if (!companyIds.length) continue;
-
-    for (const companyId of companyIds) {
-      if (!companies.has(companyId)) {
-        companies.set(companyId, { accountIds: new Set<string>(), accountNames: new Set<string>() });
-      }
-      const entry = companies.get(companyId)!;
-      if (accountId) entry.accountIds.add(accountId);
-      if (accountName) entry.accountNames.add(accountName);
-    }
-  }
-  return companies;
-}
-
-async function loadEnterpriseEmailsByCompany(companyIds: string[]) {
-  const out = new Map<string, Set<string>>();
-  if (!companyIds.length) return out;
-
-  const pairs = await fetchContactIdsForCompanies(companyIds);
-  const contactIds = Array.from(
-    new Set(
-      pairs.flatMap((pair) => pair.ids || []).map((id) => String(id || "").trim()).filter(Boolean),
-    ),
-  );
-  if (!contactIds.length) return out;
-
-  const contacts = await batchReadContacts(contactIds, ["email"]);
-  const emailByContactId = new Map<string, string>();
-  for (const [contactId, contact] of contacts.entries()) {
-    const email = normalizeEmail(contact.properties?.email);
-    if (email) emailByContactId.set(String(contactId || "").trim(), email);
-  }
-
-  for (const pair of pairs) {
-    const companyId = String(pair.companyId || "").trim();
-    if (!companyId) continue;
-    for (const contactId of pair.ids || []) {
-      const email = emailByContactId.get(String(contactId || "").trim());
-      if (!email) continue;
-      if (!out.has(companyId)) out.set(companyId, new Set<string>());
-      out.get(companyId)!.add(email);
-    }
-  }
-
-  return out;
 }
 
 export async function resolveEnterprisePrepaidAiSpendExclusions(
@@ -226,29 +153,10 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
   const monthWindows = buildMonthWindows(startDate, endDate, asOfDate || undefined);
   if (!monthWindows.length) return { customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] };
 
-  const salesLedCompanies = await loadSalesLedCompanyMapForPeriod(startDate, endDate);
-  const companyIds = Array.from(salesLedCompanies.keys());
-  if (!companyIds.length) return { customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] };
-
-  const emailsByCompany = await loadEnterpriseEmailsByCompany(companyIds);
-  const allEmails = Array.from(
-    new Set(Array.from(emailsByCompany.values()).flatMap((set) => Array.from(set.values()))),
-  );
-  if (!allEmails.length) return { customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] };
-
-  const companyIdsByEmail = new Map<string, Set<string>>();
-  for (const [companyId, emails] of emailsByCompany.entries()) {
-    for (const email of emails) {
-      if (!companyIdsByEmail.has(email)) companyIdsByEmail.set(email, new Set<string>());
-      companyIdsByEmail.get(email)!.add(companyId);
-    }
-  }
-
   const rows: EnterprisePrepaidAiSpendExclusionRow[] = [];
   for (const monthWindow of monthWindows) {
-    const customerRows = await queryStripeCustomerInvoicePrepaidUsageByEmailsFromBigQuery(
+    const customerRows = await queryStripeSalesLedCustomerInvoicePrepaidUsageFromBigQuery(
       {
-        emails: allEmails,
         monthStartDate: monthWindow.invoiceMonthStartDate,
         monthEndDate: monthWindow.invoiceMonthEndDate,
         asOfDate: monthWindow.asOfDate,
@@ -263,18 +171,6 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
       if (appliedMinor <= 0) continue;
       const creditMinor = availableCreditMinor(customerRow);
 
-      const linkedCompanyIds = Array.from(companyIdsByEmail.get(email) || []).sort();
-      if (!linkedCompanyIds.length) continue;
-
-      const accountIdSet = new Set<string>();
-      const accountNameSet = new Set<string>();
-      for (const companyId of linkedCompanyIds) {
-        const ref = salesLedCompanies.get(companyId);
-        if (!ref) continue;
-        for (const accountId of ref.accountIds) accountIdSet.add(accountId);
-        for (const accountName of ref.accountNames) accountNameSet.add(accountName);
-      }
-
       rows.push({
         monthKey: monthWindow.monthKey,
         monthLabel: monthWindow.monthLabel,
@@ -287,8 +183,10 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
         prepaidAppliedMajor: Math.round((appliedMinor / 100) * 100) / 100,
         availableCreditMinor: creditMinor,
         availableCreditMajor: Math.round((creditMinor / 100) * 100) / 100,
-        accountIds: Array.from(accountIdSet).sort(),
-        accountNames: Array.from(accountNameSet).sort(),
+        accountIds: Array.from(new Set((customerRow.accountIds || []).map((value) => String(value || "").trim()).filter(Boolean))).sort(),
+        accountNames: Array.from(
+          new Set((customerRow.accountNames || []).map((value) => String(value || "").trim()).filter(Boolean)),
+        ).sort(),
       });
     }
   }

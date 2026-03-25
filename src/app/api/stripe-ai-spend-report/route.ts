@@ -52,11 +52,11 @@ function parsePayload(raw: Partial<ApiBody>): StripeAiSpendRequest {
   const grainRaw = String(raw.grain || "monthly").trim().toLowerCase() as StripeAiSpendGrain;
   const grain = ALLOWED_GRAINS.has(grainRaw) ? grainRaw : "monthly";
 
-  const topLimitRaw = Number(raw.topLimit || 5000);
-  const topLimit = Number.isFinite(topLimitRaw) ? Math.max(1, Math.floor(topLimitRaw)) : 5000;
+  const topLimitRaw = Number(raw.topLimit || 300);
+  const topLimit = Number.isFinite(topLimitRaw) ? Math.max(1, Math.floor(topLimitRaw)) : 300;
 
-  const detailLimitRaw = Number(raw.detailLimit || 300);
-  const detailLimit = Number.isFinite(detailLimitRaw) ? Math.max(1, Math.floor(detailLimitRaw)) : 300;
+  const detailLimitRaw = Number(raw.detailLimit || 100);
+  const detailLimit = Number.isFinite(detailLimitRaw) ? Math.max(1, Math.floor(detailLimitRaw)) : 100;
 
   const targetCurrency =
     String(process.env.STRIPE_AI_SPEND_TARGET_CURRENCY || "").trim() ||
@@ -132,8 +132,8 @@ export async function GET(req: Request) {
       startDate: searchParams.get("startDate") || undefined,
       endDate: searchParams.get("endDate") || undefined,
       grain: searchParams.get("grain") || "monthly",
-      topLimit: Number(searchParams.get("topLimit") || 5000),
-      detailLimit: Number(searchParams.get("detailLimit") || 300),
+      topLimit: Number(searchParams.get("topLimit") || 300),
+      detailLimit: Number(searchParams.get("detailLimit") || 100),
     };
     const report = await validateAndRun(body);
     return NextResponse.json(report);
