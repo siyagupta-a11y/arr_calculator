@@ -170,6 +170,7 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
         grain: "monthly",
         groupBy: "none",
         targetCurrency,
+        includeCustomerArrRows: false,
       },
       { profile: "stripe_arr_correct" },
     ),

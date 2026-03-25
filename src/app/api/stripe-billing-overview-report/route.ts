@@ -41,7 +41,19 @@ type ApiBody = {
   endDate?: string;
   grain?: string;
   groupBy?: string;
+  includeCustomerArrRows?: boolean | string;
+  includeCurrentMonthProjection?: boolean | string;
 };
+
+function parseOptionalBoolean(value: unknown, defaultValue: boolean) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return defaultValue;
+}
 
 function parsePayload(raw: Partial<ApiBody>): StripeBillingOverviewRequest {
   const startDate = String(raw.startDate || "").trim();
@@ -67,6 +79,8 @@ function parsePayload(raw: Partial<ApiBody>): StripeBillingOverviewRequest {
     grain,
     groupBy,
     targetCurrency,
+    includeCustomerArrRows: parseOptionalBoolean(raw.includeCustomerArrRows, true),
+    includeCurrentMonthProjection: parseOptionalBoolean(raw.includeCurrentMonthProjection, true),
   };
 }
 
@@ -103,6 +117,8 @@ export async function GET(req: Request) {
       endDate: searchParams.get("endDate") || "",
       grain: searchParams.get("grain") || "monthly",
       groupBy: searchParams.get("groupBy") || "none",
+      includeCustomerArrRows: searchParams.get("includeCustomerArrRows") || undefined,
+      includeCurrentMonthProjection: searchParams.get("includeCurrentMonthProjection") || undefined,
     };
     const report = await validateAndRun(body);
     return NextResponse.json(report);

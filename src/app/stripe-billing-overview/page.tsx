@@ -1158,45 +1158,104 @@ export default function StripeBillingOverviewPage() {
   const [mrrGrowthWindow, setMrrGrowthWindow] = useState<string>(defaultGrowthWindowValue("monthly"));
 
   const [loading, setLoading] = useState(false);
+  const [deferredSectionsLoading, setDeferredSectionsLoading] = useState(false);
   const [hasRunOnce, setHasRunOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<OverviewResponse | null>(null);
   const [customerPage, setCustomerPage] = useState(1);
+  const runRequestRef = useRef(0);
 
   async function run() {
+    const requestId = runRequestRef.current + 1;
+    runRequestRef.current = requestId;
+    const isStale = () => runRequestRef.current !== requestId;
+
     setHasRunOnce(true);
     setLoading(true);
+    setDeferredSectionsLoading(false);
     setError(null);
     setCustomerPage(1);
 
     try {
-      const res = await fetch("/api/stripe-billing-overview-report", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startDate, endDate, grain, groupBy: chartGroupBy }),
-      });
+      const fetchJson = async (payload: {
+        startDate: string;
+        endDate: string;
+        grain: Grain;
+        groupBy: ChartGroupBy;
+        includeCustomerArrRows: boolean;
+        includeCurrentMonthProjection: boolean;
+      }) => {
+        const res = await fetch("/api/stripe-billing-overview-report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
 
-      const text = await res.text();
-      let json: unknown = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
-      }
-
-      if (!res.ok) {
-        if (json && typeof json === "object" && "error" in json) {
-          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+        const text = await res.text();
+        let json: unknown = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch {
+          json = null;
         }
-        throw new Error(text || `HTTP ${res.status}`);
-      }
 
-      if (!json || typeof json !== "object") throw new Error("Invalid API response");
-      setData(json as OverviewResponse);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Unknown error");
-    } finally {
+        if (!res.ok) {
+          if (json && typeof json === "object" && "error" in json) {
+            throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+          }
+          throw new Error(text || `HTTP ${res.status}`);
+        }
+
+        if (!json || typeof json !== "object") throw new Error("Invalid API response");
+        return json as OverviewResponse;
+      };
+
+      const basePromise = fetchJson({
+        startDate,
+        endDate,
+        grain,
+        groupBy: chartGroupBy,
+        includeCustomerArrRows: false,
+        includeCurrentMonthProjection: false,
+      });
+      const deferredPromise = fetchJson({
+        startDate,
+        endDate,
+        grain,
+        groupBy: chartGroupBy,
+        includeCustomerArrRows: true,
+        includeCurrentMonthProjection: true,
+      }).catch(() => null as OverviewResponse | null);
+
+      const baseData = await basePromise;
+      if (isStale()) return;
+      setData(baseData);
       setLoading(false);
+      setDeferredSectionsLoading(true);
+
+      void (async () => {
+        try {
+          const deferredData = await deferredPromise;
+          if (!deferredData) return;
+          if (isStale()) return;
+          setData((prev) => {
+            if (!prev) return deferredData;
+            return {
+              ...prev,
+              customerArrRows: deferredData.customerArrRows,
+              currentMonthProjection: deferredData.currentMonthProjection,
+            };
+          });
+        } catch {
+          // Keep already loaded base metrics visible if deferred sections fail.
+        } finally {
+          if (!isStale()) setDeferredSectionsLoading(false);
+        }
+      })();
+    } catch (e: unknown) {
+      if (!isStale()) setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      if (!isStale()) setLoading(false);
     }
   }
 
@@ -1627,7 +1686,9 @@ export default function StripeBillingOverviewPage() {
               <section className="stripe-ui__panel ui-reveal ui-reveal-2">
                 <h2 className="stripe-ui__panel-title">Projected MRR in current month</h2>
                 <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-                  No current-month projection available for the selected range.
+                  {deferredSectionsLoading
+                    ? "Loading projected MRR model..."
+                    : "No current-month projection available for the selected range."}
                 </p>
               </section>
             )}
@@ -1753,7 +1814,9 @@ export default function StripeBillingOverviewPage() {
 
             {customerPeriodColumns.length === 0 || customerArrMatrixRows.length === 0 ? (
               <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.9rem", marginBottom: 0 }}>
-                No customer ARR rows for selected range.
+                {deferredSectionsLoading
+                  ? "Loading customer ARR rows..."
+                  : "No customer ARR rows for selected range."}
               </p>
             ) : (
               <>

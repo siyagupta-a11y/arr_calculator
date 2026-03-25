@@ -1823,47 +1823,75 @@ export default function CombinedBillingOverviewPage() {
             .filter(Boolean),
         ),
       );
-      const [overview, liveArrData] = await Promise.all([
-        fetchJson<CombinedBillingOverviewReportResponse>("/api/combined-billing-overview-report", {
-          startDate,
-          endDate,
-          grain,
-          accountIds: normalizedSelectedCacAccountIds,
-          accountNames: selectedCacAccountNames,
-          includeCac: false,
-        }),
-        fetchJson<CombinedLiveArrResponse>("/api/combined-live-arr", {}),
-      ]);
+      const overviewPromise = fetchJson<CombinedBillingOverviewReportResponse>("/api/combined-billing-overview-report", {
+        startDate,
+        endDate,
+        grain,
+        accountIds: normalizedSelectedCacAccountIds,
+        accountNames: selectedCacAccountNames,
+        includeCac: false,
+      });
+      const liveArrPromise = fetchJson<CombinedLiveArrResponse>("/api/combined-live-arr", {}).catch(
+        () => null as CombinedLiveArrResponse | null,
+      );
+      const overview = await overviewPromise;
       if (isStale()) return;
 
       setCacNotice(overview.cacNotice);
       setCacCurrencyLayerNotice(overview.cacCurrencyLayerNotice);
       setCacCadNotice(overview.cacCadNotice);
 
-      setData({
+      setData((prev) => ({
         startDate: overview.startDate,
         endDate: overview.endDate,
         grain: overview.grain,
         targetCurrency: String(overview.targetCurrency || "USD").toUpperCase(),
         currentMrr: round2(overview.currentMrr || 0),
         currentArr: round2(overview.currentArr || 0),
-        liveArr: round2(liveArrData.liveArr || 0),
-        liveArrAsOfUtc: String(liveArrData.generatedAtUtc || ""),
-        projectedArr: round2(liveArrData.projectedArr || 0),
+        liveArr: round2(prev?.liveArr || 0),
+        liveArrAsOfUtc: String(prev?.liveArrAsOfUtc || ""),
+        projectedArr: round2(prev?.projectedArr || 0),
         projectedArrBreakdown: {
-          aiSpendAnnualizedArr: round2(liveArrData.projectedArrBreakdown?.aiSpendAnnualizedArr || 0),
-          selfserveProjectedArr: round2(liveArrData.projectedArrBreakdown?.selfserveProjectedArr || 0),
-          salesledCurrentArr: round2(liveArrData.projectedArrBreakdown?.salesledCurrentArr || 0),
+          aiSpendAnnualizedArr: round2(prev?.projectedArrBreakdown?.aiSpendAnnualizedArr || 0),
+          selfserveProjectedArr: round2(prev?.projectedArrBreakdown?.selfserveProjectedArr || 0),
+          salesledCurrentArr: round2(prev?.projectedArrBreakdown?.salesledCurrentArr || 0),
         },
-        projectedArrEomFlatAdjusted: round2(liveArrData.projectedArrEomFlatAdjusted || 0),
-        projectedArrEomFlatFlat: round2(liveArrData.projectedArrEomFlatFlat || 0),
+        projectedArrEomFlatAdjusted: round2(prev?.projectedArrEomFlatAdjusted || 0),
+        projectedArrEomFlatFlat: round2(prev?.projectedArrEomFlatFlat || 0),
         points: overview.points || [],
         retentionPoints: overview.retentionPoints || [],
         cacPoints: overview.cacPoints || [],
         cacCurrencyLayerPoints: overview.cacCurrencyLayerPoints || [],
         cacCadPoints: overview.cacCadPoints || [],
         cacCadCurrency: String(overview.cacCadCurrency || "CAD").toUpperCase(),
-      });
+      }));
+
+      setLoading(false);
+      void (async () => {
+        try {
+          const liveArrData = await liveArrPromise;
+          if (!liveArrData) return;
+          if (isStale()) return;
+          setData((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              liveArr: round2(liveArrData.liveArr || 0),
+              liveArrAsOfUtc: String(liveArrData.generatedAtUtc || ""),
+              projectedArr: round2(liveArrData.projectedArr || 0),
+              projectedArrBreakdown: {
+                aiSpendAnnualizedArr: round2(liveArrData.projectedArrBreakdown?.aiSpendAnnualizedArr || 0),
+                selfserveProjectedArr: round2(liveArrData.projectedArrBreakdown?.selfserveProjectedArr || 0),
+                salesledCurrentArr: round2(liveArrData.projectedArrBreakdown?.salesledCurrentArr || 0),
+              },
+              projectedArrEomFlatAdjusted: round2(liveArrData.projectedArrEomFlatAdjusted || 0),
+              projectedArrEomFlatFlat: round2(liveArrData.projectedArrEomFlatFlat || 0),
+            };
+          });
+        } catch {
+          // Keep overview visible even if live ARR request fails.
+        }
+      })();
 
       if (grain !== "monthly") {
         setLoading(false);

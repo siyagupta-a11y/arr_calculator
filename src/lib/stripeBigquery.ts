@@ -500,9 +500,16 @@ type StripeBigQueryOptions = {
   profile?: StripeBigQueryProfile;
 };
 
+type AccessTokenCacheEntry = {
+  token: string;
+  expiresAtMs: number;
+};
+
 const TOKEN_AUDIENCE = "https://oauth2.googleapis.com/token";
 const BQ_SCOPE = "https://www.googleapis.com/auth/bigquery";
 const BQ_MAX_RESULTS = Number(process.env.BIGQUERY_MAX_RESULTS || "50000");
+const ACCESS_TOKEN_FALLBACK_TTL_MS = 50 * 60 * 1000;
+const ACCESS_TOKEN_REFRESH_BUFFER_MS = 60 * 1000;
 const STRIPE_ARR_CORRECT_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.invoice_lines_helper";
 const STRIPE_ARR_CORRECT_MRR_CHANGE_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta";
@@ -526,6 +533,10 @@ const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   BIGQUERY_SERVING_TS_UNIT: "BIGQUERY_STRIPE_ARR_CORRECT_SERVING_TS_UNIT",
   BIGQUERY_TS_UNIT: "BIGQUERY_STRIPE_ARR_CORRECT_TS_UNIT",
 };
+
+const SERVICE_ACCOUNT_CACHE = new Map<StripeBigQueryProfile, ServiceAccount>();
+const ACCESS_TOKEN_CACHE = new Map<string, AccessTokenCacheEntry>();
+const ACCESS_TOKEN_IN_FLIGHT = new Map<string, Promise<string>>();
 
 function escapeSqlString(value: string) {
   return String(value || "").replace(/'/g, "''");
@@ -595,6 +606,9 @@ function mustEnv(name: string, profile: StripeBigQueryProfile = "default") {
 }
 
 function getServiceAccount(profile: StripeBigQueryProfile = "default"): ServiceAccount {
+  const cached = SERVICE_ACCOUNT_CACHE.get(profile);
+  if (cached) return cached;
+
   const raw = readEnv("GOOGLE_SERVICE_ACCOUNT_JSON", profile);
   const rawB64 = readEnv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", profile);
 
@@ -609,49 +623,77 @@ function getServiceAccount(profile: StripeBigQueryProfile = "default"): ServiceA
     throw new Error("Invalid Google service account JSON");
   }
 
-  return {
+  const serviceAccount = {
     client_email: parsed.client_email,
     private_key: parsed.private_key,
     project_id: parsed.project_id,
   };
+  SERVICE_ACCOUNT_CACHE.set(profile, serviceAccount);
+  return serviceAccount;
 }
 
 async function getAccessToken(sa: ServiceAccount) {
-  const now = Math.floor(Date.now() / 1000);
-  const header = { alg: "RS256", typ: "JWT" };
-  const payload = {
-    iss: sa.client_email,
-    sub: sa.client_email,
-    aud: TOKEN_AUDIENCE,
-    scope: BQ_SCOPE,
-    iat: now,
-    exp: now + 3600,
-  };
+  const cacheKey = `${sa.client_email}|${sa.project_id || ""}`;
+  const current = Date.now();
+  const cached = ACCESS_TOKEN_CACHE.get(cacheKey);
+  if (cached && cached.expiresAtMs - ACCESS_TOKEN_REFRESH_BUFFER_MS > current) {
+    return cached.token;
+  }
 
-  const unsigned = `${base64Url(JSON.stringify(header))}.${base64Url(JSON.stringify(payload))}`;
-  const signer = createSign("RSA-SHA256");
-  signer.update(unsigned);
-  signer.end();
-  const signature = signer.sign(sa.private_key);
-  const assertion = `${unsigned}.${base64Url(signature)}`;
+  const inFlight = ACCESS_TOKEN_IN_FLIGHT.get(cacheKey);
+  if (inFlight) return inFlight;
 
-  const body = new URLSearchParams({
-    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-    assertion,
-  });
+  const tokenPromise = (async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const header = { alg: "RS256", typ: "JWT" };
+    const payload = {
+      iss: sa.client_email,
+      sub: sa.client_email,
+      aud: TOKEN_AUDIENCE,
+      scope: BQ_SCOPE,
+      iat: now,
+      exp: now + 3600,
+    };
 
-  const res = await fetch(TOKEN_AUDIENCE, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-    cache: "no-store",
-  });
+    const unsigned = `${base64Url(JSON.stringify(header))}.${base64Url(JSON.stringify(payload))}`;
+    const signer = createSign("RSA-SHA256");
+    signer.update(unsigned);
+    signer.end();
+    const signature = signer.sign(sa.private_key);
+    const assertion = `${unsigned}.${base64Url(signature)}`;
 
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Google token error ${res.status}: ${text}`);
-  const json = JSON.parse(text) as { access_token?: string };
-  if (!json.access_token) throw new Error("Google token response missing access_token");
-  return json.access_token;
+    const body = new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    });
+
+    const res = await fetch(TOKEN_AUDIENCE, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+      cache: "no-store",
+    });
+
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Google token error ${res.status}: ${text}`);
+    const json = JSON.parse(text) as { access_token?: string; expires_in?: number };
+    if (!json.access_token) throw new Error("Google token response missing access_token");
+    const expiresInMs = Number.isFinite(json.expires_in) && Number(json.expires_in) > 0
+      ? Number(json.expires_in) * 1000
+      : ACCESS_TOKEN_FALLBACK_TTL_MS;
+    ACCESS_TOKEN_CACHE.set(cacheKey, {
+      token: json.access_token,
+      expiresAtMs: Date.now() + expiresInMs,
+    });
+    return json.access_token;
+  })();
+
+  ACCESS_TOKEN_IN_FLIGHT.set(cacheKey, tokenPromise);
+  try {
+    return await tokenPromise;
+  } finally {
+    ACCESS_TOKEN_IN_FLIGHT.delete(cacheKey);
+  }
 }
 
 function asString(v: unknown) {
@@ -4623,8 +4665,7 @@ ORDER BY local_date ASC
     { name: "group_limit", type: "INT64", value: "8" },
   ];
 
-  const [pointRows, stripeExactPointRows, customerArrRawRows, groupedSeriesRawRows, projectionDailyRows] = await Promise.all([
-    runBigQueryQueryRows(accessToken, projectId, location, pointsQuery, params),
+  const [stripeExactPointRows, customerArrRawRows, groupedSeriesRawRows, projectionDailyRows] = await Promise.all([
     runBigQueryQueryRows(accessToken, projectId, location, stripeExactPointsQuery, params),
     includeCustomerArrRows
       ? runBigQueryQueryRows(accessToken, projectId, location, customerArrQuery, params)
@@ -4636,6 +4677,10 @@ ORDER BY local_date ASC
       ? runBigQueryQueryRows(accessToken, projectId, location, currentMonthProjectionDailyQuery, projectionParams)
       : Promise.resolve([] as Record<string, unknown>[]),
   ]);
+  const pointRows =
+    stripeExactPointRows.length > 0
+      ? stripeExactPointRows
+      : await runBigQueryQueryRows(accessToken, projectId, location, pointsQuery, params);
 
   const allPoints: StripeBillingOverviewPoint[] = pointRows.map((row) => ({
     key: asString(row.period_key),
