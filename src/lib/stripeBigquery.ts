@@ -396,6 +396,19 @@ export type StripeSalesLedCustomerInvoicePrepaidUsageRow = {
   invoiceDateEnd: string;
 };
 
+export type StripeMeteredUsageByCustomerRequest = {
+  customerIds: string[];
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+};
+
+export type StripeMeteredUsageByCustomerRow = {
+  customerId: string;
+  usageMajor: number;
+  lineCount: number;
+};
+
 export type StripeUpcomingCurrentMonthRequest = {
   monthStartDate: string;
   nextMonthStartDate: string;
@@ -5579,6 +5592,138 @@ ORDER BY prepaid_applied_minor DESC, customer_id ASC
     maxAvailableCreditMinor: asNumber(row.max_available_credit_minor),
     invoiceDateStart: asString(row.invoice_date_start),
     invoiceDateEnd: asString(row.invoice_date_end),
+  }));
+}
+
+export async function queryStripeMeteredUsageByCustomerFromBigQuery(
+  request: StripeMeteredUsageByCustomerRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeMeteredUsageByCustomerRow[]> {
+  const customerIds = Array.from(
+    new Set(
+      (request.customerIds || [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  if (!customerIds.length) return [];
+
+  const startDate = parseIsoDateUtc(String(request.startDate || "").trim());
+  const endDate = parseIsoDateUtc(String(request.endDate || "").trim());
+  if (!startDate || !endDate) {
+    throw new Error("Invalid startDate/endDate");
+  }
+  if (endDate.getTime() < startDate.getTime()) {
+    throw new Error("endDate must be >= startDate");
+  }
+  const startDateIso = startDate.toISOString().slice(0, 10);
+  const endDateIso = endDate.toISOString().slice(0, 10);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+
+  const query = `
+WITH input_customers AS (
+  SELECT customer_id
+  FROM UNNEST([${customerIds.map((_, idx) => `@customer_id_${idx}`).join(", ")}]) AS customer_id
+),
+latest_invoice_lines AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      il.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY il.id
+        ORDER BY il.batch_timestamp DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.stripe.invoice_lines\` il
+  )
+  WHERE rn = 1
+),
+latest_prices AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      p.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY p.id
+        ORDER BY p.batch_timestamp DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.stripe.prices\` p
+  )
+  WHERE rn = 1
+),
+latest_invoices AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      i.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY i.id
+        ORDER BY i.batch_timestamp DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.stripe.invoices\` i
+  )
+  WHERE rn = 1
+),
+line_discounts AS (
+  SELECT
+    invoice_line_item_id,
+    SUM(COALESCE(amount, 0)) AS discount_amount
+  FROM \`botpress-stripe-data-pipeline.stripe.invoice_line_item_discount_amounts\`
+  GROUP BY invoice_line_item_id
+)
+SELECT
+  COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+  ROUND(
+    SUM(
+      CAST(COALESCE(il.amount, 0) - COALESCE(ld.discount_amount, 0) AS FLOAT64) / 100.0
+    ),
+    2
+  ) AS usage_major,
+  COUNT(*) AS line_count
+FROM latest_invoice_lines il
+JOIN latest_prices p
+  ON p.id = il.price_id
+LEFT JOIN line_discounts ld
+  ON ld.invoice_line_item_id = il.id
+LEFT JOIN latest_invoices i
+  ON i.id = il.invoice_id
+WHERE
+  LOWER(COALESCE(p.recurring_usage_type, '')) = 'metered'
+  AND LOWER(COALESCE(il.currency, '')) = @target_currency
+  AND DATE(il.period_start) BETWEEN DATE(@start_date) AND DATE(@end_date)
+  AND COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)') IN (
+    SELECT customer_id FROM input_customers
+  )
+GROUP BY customer_id
+HAVING SUM(
+  CAST(COALESCE(il.amount, 0) - COALESCE(ld.discount_amount, 0) AS FLOAT64) / 100.0
+) > 0
+ORDER BY usage_major DESC, customer_id ASC
+`;
+
+  const params: BigQueryNamedParameter[] = [
+    { name: "start_date", type: "STRING", value: startDateIso },
+    { name: "end_date", type: "STRING", value: endDateIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+    ...customerIds.map((customerId, idx) => ({
+      name: `customer_id_${idx}`,
+      type: "STRING" as const,
+      value: customerId,
+    })),
+  ];
+
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+  return rows.map((row) => ({
+    customerId: asString(row.customer_id),
+    usageMajor: Math.max(0, asNumber(row.usage_major)),
+    lineCount: asInt(row.line_count),
   }));
 }
 

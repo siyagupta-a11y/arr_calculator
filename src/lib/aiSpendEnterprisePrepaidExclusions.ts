@@ -1,4 +1,5 @@
 import {
+  queryStripeMeteredUsageByCustomerFromBigQuery,
   queryStripeSalesLedCustomerInvoicePrepaidUsageFromBigQuery,
   type StripeSalesLedCustomerInvoicePrepaidUsageRow,
 } from "@/lib/stripeBigquery";
@@ -36,6 +37,7 @@ export type EnterprisePrepaidAiSpendExclusionsRequest = {
   startDate?: string;
   endDate?: string;
   asOfDate?: string;
+  targetCurrency?: string;
 };
 
 type MonthWindow = {
@@ -149,6 +151,7 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
   const startDate = String(request?.startDate || defaults.startDate).trim();
   const endDate = String(request?.endDate || defaults.endDate).trim();
   const asOfDate = String(request?.asOfDate || "").trim();
+  const targetCurrency = String(request?.targetCurrency || "USD").trim().toLowerCase() || "usd";
 
   const monthWindows = buildMonthWindows(startDate, endDate, asOfDate || undefined);
   if (!monthWindows.length) return { customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] };
@@ -163,10 +166,28 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
       },
       { profile: "stripe_arr_correct" },
     );
+    if (!customerRows.length) continue;
+    const usageByCustomer = new Map(
+      (
+        await queryStripeMeteredUsageByCustomerFromBigQuery(
+          {
+            customerIds: customerRows.map((row) => String(row.customerId || "").trim()).filter(Boolean),
+            startDate: monthWindow.monthStartDate,
+            endDate: monthWindow.monthEndDate,
+            targetCurrency,
+          },
+          { profile: "stripe_arr_correct" },
+        )
+      ).map((row) => [String(row.customerId || "").trim(), Number(row.usageMajor || 0)]),
+    );
 
     for (const customerRow of customerRows) {
       const email = normalizeEmail(customerRow.email);
       if (!email) continue;
+      const customerId = String(customerRow.customerId || "").trim();
+      if (!customerId) continue;
+      const usageMajor = Number(usageByCustomer.get(customerId) || 0);
+      if (!Number.isFinite(usageMajor) || usageMajor <= 0) continue;
       const appliedMinor = prepaidAppliedMinor(customerRow);
       if (appliedMinor <= 0) continue;
       const creditMinor = availableCreditMinor(customerRow);
@@ -175,7 +196,7 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
         monthKey: monthWindow.monthKey,
         monthLabel: monthWindow.monthLabel,
         asOfDate: monthWindow.asOfDate,
-        customerId: String(customerRow.customerId || "").trim(),
+        customerId,
         customerEmail: email,
         customerName: String(customerRow.name || "").trim() || "(blank)",
         currency: String(customerRow.currency || "").trim().toUpperCase() || "USD",

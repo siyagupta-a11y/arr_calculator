@@ -89,6 +89,7 @@ async function validateAndRun(body: Partial<ApiBody>) {
       resolveEnterprisePrepaidAiSpendExclusions({
         startDate: payload.startDate,
         endDate: payload.endDate,
+        targetCurrency: payload.targetCurrency,
       }),
   ).catch(() => ({ customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] }));
   const requestPayload: StripeAiSpendRequest = {
