@@ -24,6 +24,13 @@ export type EnterprisePrepaidAiSpendExclusionRow = {
 export type EnterprisePrepaidAiSpendExclusions = {
   customerIds: string[];
   customerMonthPairs: string[];
+  customerMonthPrepaidOffsets: Array<{
+    pairKey: string;
+    customerId: string;
+    monthKey: string;
+    prepaidAppliedMinor: number;
+    prepaidAppliedMajor: number;
+  }>;
   rows: EnterprisePrepaidAiSpendExclusionRow[];
 };
 
@@ -224,17 +231,17 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
   const asOfDate = String(request?.asOfDate || "").trim();
 
   const monthWindows = buildMonthWindows(startDate, endDate, asOfDate || undefined);
-  if (!monthWindows.length) return { customerIds: [], customerMonthPairs: [], rows: [] };
+  if (!monthWindows.length) return { customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] };
 
   const enterpriseCompanies = await loadEnterpriseCompanyMapForPeriod(startDate, endDate);
   const companyIds = Array.from(enterpriseCompanies.keys());
-  if (!companyIds.length) return { customerIds: [], customerMonthPairs: [], rows: [] };
+  if (!companyIds.length) return { customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] };
 
   const emailsByCompany = await loadEnterpriseEmailsByCompany(companyIds);
   const allEmails = Array.from(
     new Set(Array.from(emailsByCompany.values()).flatMap((set) => Array.from(set.values()))),
   );
-  if (!allEmails.length) return { customerIds: [], customerMonthPairs: [], rows: [] };
+  if (!allEmails.length) return { customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] };
 
   const companyIdsByEmail = new Map<string, Set<string>>();
   for (const [companyId, emails] of emailsByCompany.entries()) {
@@ -319,5 +326,36 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
     new Set(rows.map((row) => String(row.customerId || "").trim()).filter(Boolean)),
   ).sort();
 
-  return { customerIds, customerMonthPairs, rows };
+  const offsetsMap = new Map<
+    string,
+    { pairKey: string; customerId: string; monthKey: string; prepaidAppliedMinor: number; prepaidAppliedMajor: number }
+  >();
+  for (const row of rows) {
+    const customerId = String(row.customerId || "").trim();
+    const monthKey = String(row.monthKey || "").trim();
+    if (!customerId || !monthKey) continue;
+    const pairKey = `${customerId}|${monthKey}`;
+    const current = offsetsMap.get(pairKey);
+    if (!current) {
+      offsetsMap.set(pairKey, {
+        pairKey,
+        customerId,
+        monthKey,
+        prepaidAppliedMinor: row.prepaidAppliedMinor,
+        prepaidAppliedMajor: row.prepaidAppliedMajor,
+      });
+      continue;
+    }
+    const nextMinor = current.prepaidAppliedMinor + row.prepaidAppliedMinor;
+    current.prepaidAppliedMinor = nextMinor;
+    current.prepaidAppliedMajor = Math.round((nextMinor / 100) * 100) / 100;
+  }
+  const customerMonthPrepaidOffsets = Array.from(offsetsMap.values()).sort((a, b) => {
+    if (a.monthKey !== b.monthKey) return a.monthKey.localeCompare(b.monthKey);
+    const diff = b.prepaidAppliedMinor - a.prepaidAppliedMinor;
+    if (Math.abs(diff) > 1e-9) return diff;
+    return a.customerId.localeCompare(b.customerId);
+  });
+
+  return { customerIds, customerMonthPairs, customerMonthPrepaidOffsets, rows };
 }

@@ -431,7 +431,7 @@ export default function AiSpendPage() {
                 <p className="stripe-ui__stat-value">{uniqueCustomersShown}</p>
               </article>
               <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Enterprise prepaid exclusions</p>
+                <p className="stripe-ui__stat-label">Enterprise prepaid offsets</p>
                 <p className="stripe-ui__stat-value">{excludedCustomerCount}</p>
               </article>
             </div>
@@ -441,7 +441,7 @@ export default function AiSpendPage() {
                 onClick={() => setShowExclusions((prev) => !prev)}
                 disabled={excludedCustomerCount === 0}
               >
-                {showExclusions ? "Hide exclusion list" : "Show exclusion list"}
+                {showExclusions ? "Hide offset list" : "Show offset list"}
               </button>
             </div>
 
@@ -481,11 +481,10 @@ export default function AiSpendPage() {
 
           {showExclusions ? (
             <section className="stripe-ui__panel ui-reveal ui-reveal-2">
-              <h2 className="stripe-ui__panel-title">Excluded enterprise prepaid customers</h2>
+              <h2 className="stripe-ui__panel-title">Enterprise prepaid customer offsets</h2>
               <p className="stripe-ui__panel-subtitle">
-                AI spend is excluded for these Stripe customers because enterprise prepaid credit was applied during
-                the selected usage month window (using invoice starting/ending balance changes from the following
-                invoice month).
+                AI spend is reduced for these Stripe customers by prepaid balance consumption in the selected usage
+                month window (using invoice starting/ending balance changes from the following invoice month).
               </p>
               <div className="stripe-ui__table-wrap">
                 <table className="stripe-ui__table">
@@ -501,7 +500,7 @@ export default function AiSpendPage() {
                   <tbody>
                     {excludedCustomers.length === 0 ? (
                       <tr>
-                        <td colSpan={5}>No excluded enterprise prepaid customers for this run.</td>
+                        <td colSpan={5}>No enterprise prepaid offsets for this run.</td>
                       </tr>
                     ) : (
                       excludedCustomers.map((row) => (

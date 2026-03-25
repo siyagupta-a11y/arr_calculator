@@ -137,13 +137,22 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
       startDate: monthStartDate,
       endDate: monthEndDate,
       asOfDate: todayDate,
-    }).catch(() => ({ customerIds: [], customerMonthPairs: [], rows: [] })),
+    }).catch(() => ({ customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] })),
     resolveEnterprisePrepaidAiSpendExclusions({
       startDate: lastMonthStartDate,
       endDate: lastMonthEndDate,
       asOfDate: todayDate,
-    }).catch(() => ({ customerIds: [], customerMonthPairs: [], rows: [] })),
+    }).catch(() => ({ customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] })),
   ]);
+
+  const currentMonthPrepaidOffsetByCustomer = Array.from(
+    (currentMonthExclusions.customerMonthPrepaidOffsets || []).reduce((acc, row) => {
+      const customerId = String(row.customerId || "").trim();
+      if (!customerId) return acc;
+      acc.set(customerId, (acc.get(customerId) || 0) + Number(row.prepaidAppliedMajor || 0));
+      return acc;
+    }, new Map<string, number>()),
+  ).map(([customerId, prepaidAppliedMajor]) => ({ customerId, prepaidAppliedMajor }));
 
   const [hubspotTodayReport, stripeReport, aiSpendUpcoming, aiSpendLastMonth] = await Promise.all([
     generateReport({
@@ -168,7 +177,8 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
         nextMonthStartDate,
         targetCurrency,
         productDescriptionIncludes: ["ai tokens", "web search and crawl"],
-        excludeCustomerIds: currentMonthExclusions.customerIds,
+        excludeCustomerIds: [],
+        prepaidOffsetByCustomerIds: currentMonthPrepaidOffsetByCustomer,
       },
       { profile: "stripe_arr_correct" },
     ),
@@ -181,7 +191,11 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
         topLimit: 1,
         detailLimit: 1,
         excludeCustomerIds: [],
-        excludeCustomerMonthPairs: lastMonthExclusions.customerMonthPairs,
+        excludeCustomerMonthPairs: [],
+        prepaidOffsetByCustomerMonthPairs: (lastMonthExclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
+          pairKey: entry.pairKey,
+          prepaidAppliedMajor: entry.prepaidAppliedMajor,
+        })),
       },
       { profile: "stripe_arr_correct" },
     ),

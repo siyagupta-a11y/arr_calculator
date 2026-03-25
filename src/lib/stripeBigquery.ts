@@ -280,6 +280,10 @@ export type StripeAiSpendRequest = {
   detailLimit?: number;
   excludeCustomerIds?: string[];
   excludeCustomerMonthPairs?: string[];
+  prepaidOffsetByCustomerMonthPairs?: Array<{
+    pairKey: string;
+    prepaidAppliedMajor: number;
+  }>;
 };
 
 export type StripeAiSpendPoint = {
@@ -391,6 +395,10 @@ export type StripeUpcomingCurrentMonthDescriptionAmountRequest = {
   targetCurrency: string;
   productDescriptionIncludes: string[];
   excludeCustomerIds?: string[];
+  prepaidOffsetByCustomerIds?: Array<{
+    customerId: string;
+    prepaidAppliedMajor: number;
+  }>;
 };
 
 export type StripeUpcomingCurrentMonthDescriptionAmountResult = {
@@ -4715,6 +4723,17 @@ export async function queryStripeAiSpendFromBigQuery(
         .filter((value) => /^\S+\|\d{4}-\d{2}$/.test(value)),
     ),
   );
+  const prepaidOffsetByCustomerMonthPairs = Array.from(
+    (request.prepaidOffsetByCustomerMonthPairs || [])
+      .map((entry) => {
+        const pairKey = String(entry?.pairKey || "").trim();
+        const prepaidAppliedMajor = Number(entry?.prepaidAppliedMajor || 0);
+        if (!/^\S+\|\d{4}-\d{2}$/.test(pairKey)) return null;
+        if (!Number.isFinite(prepaidAppliedMajor) || prepaidAppliedMajor <= 0) return null;
+        return { pairKey, prepaidAppliedMajor };
+      })
+      .filter((entry): entry is { pairKey: string; prepaidAppliedMajor: number } => !!entry),
+  );
 
   const profile = normalizeProfile(options?.profile);
   const sa = getServiceAccount(profile);
@@ -4756,6 +4775,22 @@ export async function queryStripeAiSpendFromBigQuery(
       SELECT pair_key FROM excluded_customer_month_pairs
     )`
     : "";
+  const prepaidOffsetsCteSql = prepaidOffsetByCustomerMonthPairs.length
+    ? `prepaid_offsets AS (
+  SELECT
+    pair_key,
+    CAST(prepaid_applied_major AS FLOAT64) AS prepaid_applied_major
+  FROM UNNEST([${prepaidOffsetByCustomerMonthPairs
+    .map(
+      (_, idx) =>
+        `STRUCT(@prepaid_pair_key_${idx} AS pair_key, CAST(@prepaid_pair_amount_${idx} AS FLOAT64) AS prepaid_applied_major)`,
+    )
+    .join(", ")}])
+),`
+    : `prepaid_offsets AS (
+  SELECT pair_key, prepaid_applied_major
+  FROM UNNEST(CAST([] AS ARRAY<STRUCT<pair_key STRING, prepaid_applied_major FLOAT64>>))
+),`;
 
   const baseCte = `
 WITH latest_invoice_lines AS (
@@ -4806,7 +4841,8 @@ line_discounts AS (
 ),
 ${excludedCustomersCteSql}
 ${excludedCustomerMonthPairsCteSql}
-metered_lines AS (
+${prepaidOffsetsCteSql}
+metered_lines_raw AS (
   SELECT
     DATE(il.period_start) AS event_date,
     COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)') AS customer_id,
@@ -4838,6 +4874,49 @@ metered_lines AS (
     AND DATE(il.period_start) BETWEEN DATE(@start_date) AND DATE(@end_date)
 ${exclusionWhereSql}
 ${exclusionByMonthWhereSql}
+),
+metered_lines_with_offsets AS (
+  SELECT
+    ml.*,
+    COALESCE(po.prepaid_applied_major, 0.0) AS prepaid_applied_major,
+    SUM(ml.revenue_major) OVER (
+      PARTITION BY ml.customer_id, FORMAT_DATE('%Y-%m', ml.event_date)
+      ORDER BY ml.event_date, ml.line_item_id
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_revenue_major,
+    COALESCE(
+      SUM(ml.revenue_major) OVER (
+        PARTITION BY ml.customer_id, FORMAT_DATE('%Y-%m', ml.event_date)
+        ORDER BY ml.event_date, ml.line_item_id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+      ),
+      0.0
+    ) AS prev_running_revenue_major
+  FROM metered_lines_raw ml
+  LEFT JOIN prepaid_offsets po
+    ON po.pair_key = CONCAT(ml.customer_id, '|', FORMAT_DATE('%Y-%m', ml.event_date))
+),
+metered_lines AS (
+  SELECT
+    event_date,
+    customer_id,
+    customer_name,
+    line_item_id,
+    line_item_description,
+    price_id,
+    price_label,
+    product_id,
+    product_label,
+    GREATEST(
+      revenue_major - GREATEST(LEAST(running_revenue_major, prepaid_applied_major) - prev_running_revenue_major, 0.0),
+      0.0
+    ) AS revenue_major,
+    quantity
+  FROM metered_lines_with_offsets
+  WHERE GREATEST(
+    revenue_major - GREATEST(LEAST(running_revenue_major, prepaid_applied_major) - prev_running_revenue_major, 0.0),
+    0.0
+  ) > 0
 )
 `;
 
@@ -4963,6 +5042,20 @@ LIMIT @detail_limit
         type: "STRING",
         value: pair,
       }),
+    ),
+    ...prepaidOffsetByCustomerMonthPairs.flatMap(
+      (entry, idx): BigQueryNamedParameter[] => [
+        {
+          name: `prepaid_pair_key_${idx}`,
+          type: "STRING",
+          value: entry.pairKey,
+        },
+        {
+          name: `prepaid_pair_amount_${idx}`,
+          type: "STRING",
+          value: String(entry.prepaidAppliedMajor),
+        },
+      ],
     ),
   ];
 
@@ -5351,6 +5444,17 @@ export async function queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQue
         .filter(Boolean),
     ),
   );
+  const prepaidOffsetByCustomerIds = Array.from(
+    (request.prepaidOffsetByCustomerIds || [])
+      .map((entry) => {
+        const customerId = String(entry?.customerId || "").trim();
+        const prepaidAppliedMajor = Number(entry?.prepaidAppliedMajor || 0);
+        if (!customerId) return null;
+        if (!Number.isFinite(prepaidAppliedMajor) || prepaidAppliedMajor <= 0) return null;
+        return { customerId, prepaidAppliedMajor };
+      })
+      .filter((entry): entry is { customerId: string; prepaidAppliedMajor: number } => !!entry),
+  );
   const includes = Array.from(
     new Set(
       (request.productDescriptionIncludes || [])
@@ -5394,6 +5498,22 @@ export async function queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQue
       SELECT customer_id FROM excluded_customers
     )`
     : "";
+  const prepaidOffsetsCteSql = prepaidOffsetByCustomerIds.length
+    ? `prepaid_offsets AS (
+  SELECT
+    customer_id,
+    CAST(prepaid_applied_minor AS FLOAT64) AS prepaid_applied_minor
+  FROM UNNEST([${prepaidOffsetByCustomerIds
+    .map(
+      (_, idx) =>
+        `STRUCT(@prepaid_customer_${idx} AS customer_id, CAST(@prepaid_customer_amount_minor_${idx} AS FLOAT64) AS prepaid_applied_minor)`,
+    )
+    .join(", ")}])
+),`
+    : `prepaid_offsets AS (
+  SELECT customer_id, prepaid_applied_minor
+  FROM UNNEST(CAST([] AS ARRAY<STRUCT<customer_id STRING, prepaid_applied_minor FLOAT64>>))
+),`;
   const query = `
 WITH latest_snapshot AS (
   SELECT MAX(snapshot_date) AS snapshot_date
@@ -5410,9 +5530,11 @@ products_lookup AS (
   FROM \`${productsTable}\`
 ),
 ${excludedCustomersCteSql}
+${prepaidOffsetsCteSql}
 matched_lines AS (
   SELECT
     ls.snapshot_date,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
     t.amount_minor
   FROM latest_snapshot ls
   JOIN \`${table}\` t
@@ -5428,14 +5550,33 @@ ${excludedCustomerWhereSql}
       '(blank)'
     )
     AND (${descriptionTermsSql.join(" OR ")})
+),
+customer_totals AS (
+  SELECT
+    snapshot_date,
+    customer_id,
+    COUNT(*) AS line_count,
+    COALESCE(SUM(CAST(amount_minor AS FLOAT64)), 0.0) AS amount_minor_sum
+  FROM matched_lines
+  GROUP BY snapshot_date, customer_id
+),
+net_customer_totals AS (
+  SELECT
+    ct.snapshot_date,
+    ct.customer_id,
+    ct.line_count,
+    GREATEST(ct.amount_minor_sum - COALESCE(po.prepaid_applied_minor, 0.0), 0.0) AS net_amount_minor_sum
+  FROM customer_totals ct
+  LEFT JOIN prepaid_offsets po
+    ON po.customer_id = ct.customer_id
 )
 SELECT
   CAST(MAX(ls.snapshot_date) AS STRING) AS snapshot_date,
-  COUNT(ml.amount_minor) AS line_count,
-  COALESCE(SUM(CAST(ml.amount_minor AS FLOAT64)), 0.0) AS amount_minor_sum
+  COALESCE(SUM(nct.line_count), 0) AS line_count,
+  COALESCE(SUM(nct.net_amount_minor_sum), 0.0) AS amount_minor_sum
 FROM latest_snapshot ls
-LEFT JOIN matched_lines ml
-  ON ml.snapshot_date = ls.snapshot_date
+LEFT JOIN net_customer_totals nct
+  ON nct.snapshot_date = ls.snapshot_date
 `;
   const params: BigQueryNamedParameter[] = [
     { name: "month_start_date", type: "STRING", value: monthStartIso },
@@ -5447,6 +5588,18 @@ LEFT JOIN matched_lines ml
       type: "STRING" as const,
       value: customerId,
     })),
+    ...prepaidOffsetByCustomerIds.flatMap((entry, idx) => [
+      {
+        name: `prepaid_customer_${idx}`,
+        type: "STRING" as const,
+        value: entry.customerId,
+      },
+      {
+        name: `prepaid_customer_amount_minor_${idx}`,
+        type: "STRING" as const,
+        value: String(Math.round(entry.prepaidAppliedMajor * 100)),
+      },
+    ]),
   ];
   const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
   const first = rows[0] || {};

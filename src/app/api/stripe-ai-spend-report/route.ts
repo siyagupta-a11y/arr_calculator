@@ -90,11 +90,15 @@ async function validateAndRun(body: Partial<ApiBody>) {
         startDate: payload.startDate,
         endDate: payload.endDate,
       }),
-  ).catch(() => ({ customerIds: [], customerMonthPairs: [], rows: [] }));
+  ).catch(() => ({ customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] }));
   const requestPayload: StripeAiSpendRequest = {
     ...payload,
     excludeCustomerIds: [],
-    excludeCustomerMonthPairs: exclusions.customerMonthPairs || [],
+    excludeCustomerMonthPairs: [],
+    prepaidOffsetByCustomerMonthPairs: (exclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
+      pairKey: entry.pairKey,
+      prepaidAppliedMajor: entry.prepaidAppliedMajor,
+    })),
   };
   const key = `api:stripe-ai-spend:${stableStringify(requestPayload)}`;
   return getOrSetCache(key, CACHE_TTL_MS, async () => {
