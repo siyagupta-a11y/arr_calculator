@@ -531,6 +531,21 @@ function escapeSqlString(value: string) {
   return String(value || "").replace(/'/g, "''");
 }
 
+function buildUpcomingSnapshotTimestampSql(snapshotTsRef: string, snapshotDateRef: string) {
+  const snapshotTsTextExpr = `NULLIF(TRIM(CAST(${snapshotTsRef} AS STRING)), '')`;
+  return `COALESCE(
+  SAFE_CAST(${snapshotTsTextExpr} AS TIMESTAMP),
+  CASE
+    WHEN REGEXP_CONTAINS(${snapshotTsTextExpr}, r'^\\d{13,}$') THEN TIMESTAMP_MILLIS(SAFE_CAST(${snapshotTsTextExpr} AS INT64))
+    WHEN REGEXP_CONTAINS(${snapshotTsTextExpr}, r'^\\d{10}$') THEN TIMESTAMP_SECONDS(SAFE_CAST(${snapshotTsTextExpr} AS INT64))
+    ELSE NULL
+  END,
+  SAFE.PARSE_TIMESTAMP('%Y%m%d%H', CAST(${snapshotDateRef} AS STRING)),
+  SAFE.PARSE_TIMESTAMP('%Y%m%d', CAST(${snapshotDateRef} AS STRING)),
+  SAFE_CAST(CAST(${snapshotDateRef} AS STRING) AS TIMESTAMP)
+)`;
+}
+
 const COUNTRY_KEY_TO_CODE_SQL_WHENS = countryNameKeyToCodeEntries()
   .map(({ key, code }) => `WHEN '${escapeSqlString(key)}' THEN '${escapeSqlString(code)}'`)
   .join("\n      ");
@@ -6075,19 +6090,40 @@ export async function queryStripeUpcomingCurrentMonthFromBigQuery(
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
+  const snapshotKeyExpr = "CAST(t.snapshot_date AS STRING)";
+  const snapshotTsExpr = buildUpcomingSnapshotTimestampSql("t.snapshot_ts", "t.snapshot_date");
 
   const query = `
-WITH latest_snapshot AS (
-  SELECT MAX(snapshot_date) AS snapshot_date
+WITH table_rows AS (
+  SELECT
+    t.*,
+    ${snapshotKeyExpr} AS snapshot_key,
+    ${snapshotTsExpr} AS snapshot_ts_norm
   FROM \`${table}\`
+  AS t
+),
+latest_snapshot AS (
+  SELECT snapshot_key, snapshot_batch_ts
+  FROM (
+    SELECT DISTINCT
+      snapshot_key,
+      TIMESTAMP_TRUNC(snapshot_ts_norm, MINUTE) AS snapshot_batch_ts
+    FROM table_rows
+  )
+  ORDER BY snapshot_batch_ts DESC, snapshot_key DESC
+  LIMIT 1
 )
 SELECT
-  CAST(MAX(ls.snapshot_date) AS STRING) AS snapshot_date,
-  COUNTIF(t.snapshot_date IS NOT NULL) AS line_count,
+  MAX(ls.snapshot_key) AS snapshot_date,
+  COUNTIF(t.snapshot_key IS NOT NULL) AS line_count,
   COALESCE(SUM(CAST(t.amount_minor AS FLOAT64)), 0.0) AS amount_minor_sum
 FROM latest_snapshot ls
-LEFT JOIN \`${table}\` t
-  ON t.snapshot_date = ls.snapshot_date
+LEFT JOIN table_rows t
+  ON t.snapshot_key = ls.snapshot_key
+  AND (
+    TIMESTAMP_TRUNC(t.snapshot_ts_norm, MINUTE) = ls.snapshot_batch_ts
+    OR (t.snapshot_ts_norm IS NULL AND ls.snapshot_batch_ts IS NULL)
+  )
   AND t.period_start >= TIMESTAMP(@month_start_date)
   AND t.period_start < TIMESTAMP(@next_month_start_date)
   AND LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
@@ -6169,6 +6205,8 @@ export async function queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQue
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
+  const snapshotKeyExpr = "CAST(t.snapshot_date AS STRING)";
+  const snapshotTsExpr = buildUpcomingSnapshotTimestampSql("t.snapshot_ts", "t.snapshot_date");
 
   const descriptionTermsSql = includes.map(
     (_, idx) => `STRPOS(LOWER(COALESCE(CAST(pl.product_description AS STRING), '')), @desc_${idx}) > 0`,
@@ -6204,9 +6242,33 @@ export async function queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQue
   FROM UNNEST(CAST([] AS ARRAY<STRUCT<customer_id STRING, prepaid_applied_minor FLOAT64>>))
 ),`;
   const query = `
-WITH latest_snapshot AS (
-  SELECT MAX(snapshot_date) AS snapshot_date
-  FROM \`${table}\`
+WITH table_rows AS (
+  SELECT
+    t.*,
+    ${snapshotKeyExpr} AS snapshot_key,
+    ${snapshotTsExpr} AS snapshot_ts_norm
+  FROM \`${table}\` AS t
+),
+latest_snapshot AS (
+  SELECT snapshot_key, snapshot_batch_ts
+  FROM (
+    SELECT DISTINCT
+      snapshot_key,
+      TIMESTAMP_TRUNC(snapshot_ts_norm, MINUTE) AS snapshot_batch_ts
+    FROM table_rows
+  )
+  ORDER BY snapshot_batch_ts DESC, snapshot_key DESC
+  LIMIT 1
+),
+matched_snapshot_rows AS (
+  SELECT t.*
+  FROM latest_snapshot ls
+  JOIN table_rows t
+    ON t.snapshot_key = ls.snapshot_key
+    AND (
+      TIMESTAMP_TRUNC(t.snapshot_ts_norm, MINUTE) = ls.snapshot_batch_ts
+      OR (t.snapshot_ts_norm IS NULL AND ls.snapshot_batch_ts IS NULL)
+    )
 ),
 products_lookup AS (
   SELECT
@@ -6222,12 +6284,12 @@ ${excludedCustomersCteSql}
 ${prepaidOffsetsCteSql}
 matched_lines AS (
   SELECT
-    ls.snapshot_date,
+    ls.snapshot_key AS snapshot_date,
     COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
     t.amount_minor
   FROM latest_snapshot ls
-  JOIN \`${table}\` t
-    ON t.snapshot_date = ls.snapshot_date
+  JOIN matched_snapshot_rows t
+    ON TRUE
     AND t.period_start >= TIMESTAMP(@month_start_date)
     AND t.period_start < TIMESTAMP(@next_month_start_date)
     AND LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
@@ -6260,12 +6322,12 @@ net_customer_totals AS (
     ON po.customer_id = ct.customer_id
 )
 SELECT
-  CAST(MAX(ls.snapshot_date) AS STRING) AS snapshot_date,
+  MAX(ls.snapshot_key) AS snapshot_date,
   COALESCE(SUM(nct.line_count), 0) AS line_count,
   COALESCE(SUM(nct.net_amount_minor_sum), 0.0) AS amount_minor_sum
 FROM latest_snapshot ls
 LEFT JOIN net_customer_totals nct
-  ON nct.snapshot_date = ls.snapshot_date
+  ON nct.snapshot_date = ls.snapshot_key
 `;
   const params: BigQueryNamedParameter[] = [
     { name: "month_start_date", type: "STRING", value: monthStartIso },
@@ -6326,15 +6388,40 @@ export async function queryStripeUpcomingProjectedArrFromBigQuery(
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
+  const snapshotKeyExpr = "CAST(t.snapshot_date AS STRING)";
+  const snapshotTsExpr = buildUpcomingSnapshotTimestampSql("t.snapshot_ts", "t.snapshot_date");
 
   const latestSnapshotRows = await runBigQueryQueryRows(
     accessToken,
     projectId,
     location,
-    `SELECT CAST(MAX(snapshot_date) AS STRING) AS snapshot_date FROM \`${table}\``,
+    `
+WITH table_rows AS (
+  SELECT
+    ${snapshotKeyExpr} AS snapshot_key,
+    ${snapshotTsExpr} AS snapshot_ts
+  FROM \`${table}\` AS t
+),
+latest_snapshot AS (
+  SELECT snapshot_key, snapshot_batch_ts
+  FROM (
+    SELECT DISTINCT
+      snapshot_key,
+      TIMESTAMP_TRUNC(snapshot_ts, MINUTE) AS snapshot_batch_ts
+    FROM table_rows
+  )
+  ORDER BY snapshot_batch_ts DESC, snapshot_key DESC
+  LIMIT 1
+)
+SELECT
+  snapshot_key AS snapshot_date,
+  CAST(snapshot_batch_ts AS STRING) AS snapshot_batch_ts
+FROM latest_snapshot
+`,
     [],
   );
   const snapshotDate = asString(latestSnapshotRows[0]?.snapshot_date);
+  const snapshotBatchTs = asString(latestSnapshotRows[0]?.snapshot_batch_ts);
   if (!snapshotDate) {
     return {
       snapshotDate: "",
@@ -6353,13 +6440,22 @@ SELECT
   CAST(UNIX_MILLIS(period_end) AS INT64) AS period_end_ts
 FROM \`${table}\`
 WHERE
-  snapshot_date = @snapshot_date
+  CAST(snapshot_date AS STRING) = @snapshot_date
+  AND (
+    TIMESTAMP_TRUNC(${buildUpcomingSnapshotTimestampSql("snapshot_ts", "snapshot_date")}, MINUTE) =
+      SAFE_CAST(@snapshot_batch_ts AS TIMESTAMP)
+    OR (
+      ${buildUpcomingSnapshotTimestampSql("snapshot_ts", "snapshot_date")} IS NULL
+      AND @snapshot_batch_ts = ''
+    )
+  )
   AND period_start >= TIMESTAMP(@month_start_date)
   AND period_start < TIMESTAMP(@next_month_start_date)
   AND LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
 `;
   const params: BigQueryNamedParameter[] = [
     { name: "snapshot_date", type: "STRING", value: snapshotDate },
+    { name: "snapshot_batch_ts", type: "STRING", value: snapshotBatchTs },
     { name: "month_start_date", type: "STRING", value: monthStartIso },
     { name: "next_month_start_date", type: "STRING", value: nextMonthStartIso },
     { name: "target_currency", type: "STRING", value: targetCurrency },
@@ -6414,34 +6510,33 @@ export async function cleanupStripeUpcomingSnapshotsForDay(
   const dryRun = !!request.dryRun;
 
   const snapshotKeyExpr = "CAST(snapshot_date AS STRING)";
-  const snapshotTsExpr = `COALESCE(
-  SAFE.PARSE_TIMESTAMP('%Y%m%d%H', ${snapshotKeyExpr}),
-  SAFE.PARSE_TIMESTAMP('%Y%m%d', ${snapshotKeyExpr}),
-  SAFE_CAST(${snapshotKeyExpr} AS TIMESTAMP)
-)`;
+  const snapshotTsExpr = buildUpcomingSnapshotTimestampSql("snapshot_ts", "snapshot_date");
+  const snapshotBatchExpr = `TIMESTAMP_TRUNC(${snapshotTsExpr}, MINUTE)`;
   const snapshotDayExpr = `COALESCE(
+  DATE(${snapshotBatchExpr}),
   DATE(${snapshotTsExpr}),
   SAFE.PARSE_DATE('%Y%m%d', ${snapshotKeyExpr}),
   SAFE_CAST(${snapshotKeyExpr} AS DATE)
 )`;
 
   const latestSnapshotQuery = `
-SELECT snapshot_key
+SELECT snapshot_key, CAST(snapshot_batch_ts AS STRING) AS snapshot_batch_ts
 FROM (
   SELECT DISTINCT
     ${snapshotKeyExpr} AS snapshot_key,
-    ${snapshotTsExpr} AS snapshot_ts,
+    ${snapshotBatchExpr} AS snapshot_batch_ts,
     ${snapshotDayExpr} AS snapshot_day
   FROM \`${table}\`
 )
 WHERE snapshot_day = @target_date
-ORDER BY snapshot_ts DESC, snapshot_key DESC
+ORDER BY snapshot_batch_ts DESC, snapshot_key DESC
 LIMIT 1
 `;
   const latestSnapshotRows = await runBigQueryQueryRows(accessToken, projectId, location, latestSnapshotQuery, [
     { name: "target_date", type: "STRING", value: targetDate },
   ]);
   const latestSnapshotKey = asString(latestSnapshotRows[0]?.snapshot_key);
+  const latestSnapshotBatchTs = asString(latestSnapshotRows[0]?.snapshot_batch_ts);
 
   if (!latestSnapshotKey) {
     return {
@@ -6458,6 +6553,7 @@ LIMIT 1
   const params: BigQueryNamedParameter[] = [
     { name: "target_date", type: "STRING", value: targetDate },
     { name: "latest_snapshot_key", type: "STRING", value: latestSnapshotKey },
+    { name: "latest_snapshot_batch_ts", type: "STRING", value: latestSnapshotBatchTs },
   ];
 
   const candidateCountQuery = `
@@ -6465,7 +6561,13 @@ SELECT COUNT(*) AS row_count
 FROM \`${table}\`
 WHERE
   ${snapshotDayExpr} = @target_date
-  AND ${snapshotKeyExpr} != @latest_snapshot_key
+  AND (
+    ${snapshotKeyExpr} != @latest_snapshot_key
+    OR NOT (
+      ${snapshotBatchExpr} = SAFE_CAST(@latest_snapshot_batch_ts AS TIMESTAMP)
+      OR (${snapshotBatchExpr} IS NULL AND @latest_snapshot_batch_ts = '')
+    )
+  )
 `;
   const candidateRows = await runBigQueryQueryRows(accessToken, projectId, location, candidateCountQuery, params);
   const candidateCount = asInt(candidateRows[0]?.row_count);
@@ -6475,7 +6577,13 @@ WHERE
 DELETE FROM \`${table}\`
 WHERE
   ${snapshotDayExpr} = @target_date
-  AND ${snapshotKeyExpr} != @latest_snapshot_key
+  AND (
+    ${snapshotKeyExpr} != @latest_snapshot_key
+    OR NOT (
+      ${snapshotBatchExpr} = SAFE_CAST(@latest_snapshot_batch_ts AS TIMESTAMP)
+      OR (${snapshotBatchExpr} IS NULL AND @latest_snapshot_batch_ts = '')
+    )
+  )
 `;
     await runBigQueryQueryRows(accessToken, projectId, location, deleteQuery, params);
   }
