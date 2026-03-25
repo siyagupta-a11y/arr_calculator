@@ -19,6 +19,7 @@ This is a Next.js ARR dashboard.
 - `GET|POST /api/stripe-sync` Stripe sync API
 - `GET /api/stripe-sync/status` Stripe sync health/status API
 - `GET|POST /api/stripe-bigquery-refresh` Rebuild Stripe external BigQuery tables from GCS bucket folders
+- `GET|POST /api/stripe-upcoming-sync` Trigger Cloud Run upcoming-invoice snapshot sync job
 - `GET|POST /api/stripe-upcoming-snapshots-cleanup` Delete older same-day upcoming-invoice snapshots in BigQuery (keep latest snapshot for the day)
 - `GET /api/quickbooks/connect` Start Intuit OAuth
 - `GET /api/quickbooks/callback` Intuit OAuth callback
@@ -35,6 +36,7 @@ Vercel cron runs Stripe sync automatically every 5 minutes:
 
 - `*/5 * * * *` (`/api/stripe-sync`)
 - `0 1-23/2 * * *` (`/api/stripe-bigquery-refresh`) refresh of bucket-backed external Stripe tables every 2 hours
+- `10 */2 * * *` (`/api/stripe-upcoming-sync`) trigger upcoming invoice snapshot Cloud Run job every 2 hours
 - `55 23 * * *` (`/api/stripe-upcoming-snapshots-cleanup`) end-of-day cleanup: keep only latest same-day upcoming snapshot
 - `5 * * * *` (`/api/hubspot-current-metrics-sync`) hourly HubSpot deal metric property update
 - `0 */6 * * *` (`/api/quickbooks/keepalive`) QuickBooks OAuth token keepalive
@@ -87,6 +89,24 @@ Notes:
 - `targetDate` is optional (`YYYY-MM-DD`, UTC). If omitted, current UTC date is used.
 - `profile` supports `stripe_arr_correct` (default) or `default`.
 - The cleanup keeps the latest snapshot key for the target day and deletes other rows for that same day.
+
+`/api/stripe-upcoming-sync` accepts:
+
+```json
+{
+  "projectId": "botpress-stripe-data-pipeline",
+  "region": "northamerica-northeast1",
+  "jobName": "stripe-upcoming-line-sync"
+}
+```
+
+Notes:
+
+- All fields are optional; defaults come from env vars:
+  - `STRIPE_UPCOMING_SYNC_PROJECT_ID`
+  - `STRIPE_UPCOMING_SYNC_REGION`
+  - `STRIPE_UPCOMING_SYNC_JOB`
+- Route is cron-authenticated with `CRON_SECRET` and triggers Cloud Run Jobs API using `GOOGLE_SERVICE_ACCOUNT_JSON` credentials.
 
 `/api/hubspot-current-metrics-sync` accepts:
 
@@ -250,6 +270,7 @@ This script creates/replaces **external tables** named from each immediate child
 If your Stripe lake lands in GCS and BigQuery tables are external tables over those folders, this app now includes a 2-hour cron:
 
 - `0 1-23/2 * * *` -> `GET /api/stripe-bigquery-refresh`
+- `10 */2 * * *` -> `GET /api/stripe-upcoming-sync` (trigger upcoming invoice snapshot writer)
 - `55 23 * * *` -> `GET /api/stripe-upcoming-snapshots-cleanup` (daily prune to keep latest same-day snapshot)
 
 Required env vars for this job:
