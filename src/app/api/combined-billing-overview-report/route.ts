@@ -812,10 +812,10 @@ async function buildCombinedBillingOverview(
   } else {
     let cadRawCosts: QuickBooksSalesMarketingCostResponse | null = null;
     try {
-      cadRawCosts = await fetchQuickBooksSalesMarketingCostsByMonth(startDate, endDate, {
+      cadRawCosts = (await fetchQuickBooksSalesMarketingCostsByMonth(startDate, endDate, {
         selectedAccountIds: accountIds,
         selectedAccountNames: accountNames,
-      });
+      })) as QuickBooksSalesMarketingCostResponse;
     } catch (error: unknown) {
       const reason = conciseErrorMessage(error, "QuickBooks cost query failed.");
       cacNotice = `CAC unavailable: ${reason}`;
