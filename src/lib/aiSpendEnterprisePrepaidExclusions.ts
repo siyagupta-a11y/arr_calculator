@@ -1,4 +1,5 @@
 import {
+  queryStripeSalesLedCustomerLatestInvoiceCreditFromBigQuery,
   queryStripeMeteredUsageByCustomerFromBigQuery,
   queryStripeSalesLedCustomerInvoicePrepaidUsageFromBigQuery,
   type StripeSalesLedCustomerInvoicePrepaidUsageRow,
@@ -158,14 +159,37 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
 
   const rows: EnterprisePrepaidAiSpendExclusionRow[] = [];
   for (const monthWindow of monthWindows) {
-    const customerRows = await queryStripeSalesLedCustomerInvoicePrepaidUsageFromBigQuery(
-      {
-        monthStartDate: monthWindow.invoiceMonthStartDate,
-        monthEndDate: monthWindow.invoiceMonthEndDate,
-        asOfDate: monthWindow.asOfDate,
-      },
-      { profile: "stripe_arr_correct" },
-    );
+    const useLatestInvoiceCreditFallback = monthWindow.asOfDate < monthWindow.invoiceMonthStartDate;
+    const customerRows = useLatestInvoiceCreditFallback
+      ? (
+          await queryStripeSalesLedCustomerLatestInvoiceCreditFromBigQuery(
+            {
+              asOfDate: monthWindow.asOfDate,
+            },
+            { profile: "stripe_arr_correct" },
+          )
+        ).map((row) => ({
+          customerId: row.customerId,
+          email: row.email,
+          name: row.name,
+          currency: row.currency,
+          accountIds: row.accountIds,
+          accountNames: row.accountNames,
+          invoiceCount: 1,
+          creditInvoiceCount: row.availableCreditMinor > 0 ? 1 : 0,
+          prepaidAppliedMinor: row.availableCreditMinor,
+          maxAvailableCreditMinor: row.availableCreditMinor,
+          invoiceDateStart: row.invoiceDate,
+          invoiceDateEnd: row.invoiceDate,
+        }))
+      : await queryStripeSalesLedCustomerInvoicePrepaidUsageFromBigQuery(
+          {
+            monthStartDate: monthWindow.invoiceMonthStartDate,
+            monthEndDate: monthWindow.invoiceMonthEndDate,
+            asOfDate: monthWindow.asOfDate,
+          },
+          { profile: "stripe_arr_correct" },
+        );
     if (!customerRows.length) continue;
     const usageByCustomer = new Map(
       (
@@ -188,9 +212,13 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
       if (!customerId) continue;
       const usageMajor = Number(usageByCustomer.get(customerId) || 0);
       if (!Number.isFinite(usageMajor) || usageMajor <= 0) continue;
-      const appliedMinor = prepaidAppliedMinor(customerRow);
-      if (appliedMinor <= 0) continue;
       const creditMinor = availableCreditMinor(customerRow);
+      const usageMinor = Math.max(0, Math.round(usageMajor * 100));
+      const rawAppliedMinor = useLatestInvoiceCreditFallback
+        ? Math.min(creditMinor, usageMinor)
+        : prepaidAppliedMinor(customerRow);
+      const appliedMinor = Math.max(0, rawAppliedMinor);
+      if (appliedMinor <= 0) continue;
 
       rows.push({
         monthKey: monthWindow.monthKey,

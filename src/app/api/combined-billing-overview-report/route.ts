@@ -95,6 +95,7 @@ type RequestBody = {
   grain?: string;
   accountIds?: string[];
   accountNames?: string[];
+  includeCac?: boolean;
 };
 
 function round2(n: number) {
@@ -417,18 +418,10 @@ function pickTargetCurrency() {
   );
 }
 
-async function fetchQuickBooksSalesMarketingCostsWithFx(
-  startDate: string,
-  endDate: string,
-  accountIds: string[],
-  accountNames: string[],
+async function convertQuickBooksSalesMarketingCostsWithFx(
+  payload: QuickBooksSalesMarketingCostResponse,
   fxProvider: CacFxProvider,
 ) {
-  const payload = await fetchQuickBooksSalesMarketingCostsByMonth(startDate, endDate, {
-    selectedAccountIds: accountIds,
-    selectedAccountNames: accountNames,
-  });
-
   const sourceCurrency = String(payload.currency || "").trim().toUpperCase();
   const targetCurrency = String(FX_TARGET_CURRENCY || "USD").trim().toUpperCase();
   const monthlyRateForMonth =
@@ -470,18 +463,6 @@ async function fetchQuickBooksSalesMarketingCostsWithFx(
   return payload;
 }
 
-async function fetchQuickBooksSalesMarketingCostsNoFx(
-  startDate: string,
-  endDate: string,
-  accountIds: string[],
-  accountNames: string[],
-) {
-  return fetchQuickBooksSalesMarketingCostsByMonth(startDate, endDate, {
-    selectedAccountIds: accountIds,
-    selectedAccountNames: accountNames,
-  });
-}
-
 function conciseErrorMessage(error: unknown, fallback: string) {
   const message = error instanceof Error ? error.message : fallback;
   const trimmed = String(message || fallback).trim();
@@ -508,6 +489,7 @@ function parsePayload(raw: Partial<RequestBody>) {
     grain: grainRaw as CombinedGrain,
     accountIds: normalizeIdList(raw.accountIds),
     accountNames: normalizeNames(raw.accountNames),
+    includeCac: raw.includeCac !== false,
   };
 }
 
@@ -517,6 +499,7 @@ async function buildCombinedBillingOverview(
   grain: CombinedGrain,
   accountIds: string[],
   accountNames: string[],
+  includeCac: boolean,
 ) {
   const previousRange = previousPeriodRangeForGrain(startDate, grain);
   const targetCurrency = pickTargetCurrency();
@@ -528,35 +511,38 @@ async function buildCombinedBillingOverview(
       grain,
       groupBy: "none",
       targetCurrency,
+      includeCustomerArrRows: includeCac,
+      includeCurrentMonthProjection: false,
     },
     { profile: "stripe_arr_correct" },
   );
-  const hubspotMain = await generateReport({ startDate, endDate, mode: "contracted", grain });
-  const [hubspotBaseline, stripeMain] = await Promise.all([
-    generateReport({
-      startDate: previousRange.startDate,
-      endDate: previousRange.endDate,
-      mode: "contracted",
-      grain,
-    }),
+  const hubspotMainPromise = generateReport({ startDate, endDate, mode: "contracted", grain });
+  const hubspotBaselinePromise = generateReport({
+    startDate: previousRange.startDate,
+    endDate: previousRange.endDate,
+    mode: "contracted",
+    grain,
+  });
+  const stripeBaselinePromise: Promise<Awaited<ReturnType<typeof queryStripeBillingOverviewFromBigQuery>> | null> = includeCac
+    ? queryStripeBillingOverviewFromBigQuery(
+        {
+          startDate: previousRange.startDate,
+          endDate: previousRange.endDate,
+          grain,
+          groupBy: "none",
+          targetCurrency,
+          includeCustomerArrRows: true,
+          includeCurrentMonthProjection: false,
+        },
+        { profile: "stripe_arr_correct" },
+      ).catch(() => null)
+    : Promise.resolve(null);
+  const [hubspotMain, hubspotBaseline, stripeMain, stripeBaseline] = await Promise.all([
+    hubspotMainPromise,
+    hubspotBaselinePromise,
     stripeMainPromise,
+    stripeBaselinePromise,
   ]);
-
-  let stripeBaseline: Awaited<ReturnType<typeof queryStripeBillingOverviewFromBigQuery>> | null = null;
-  try {
-    stripeBaseline = await queryStripeBillingOverviewFromBigQuery(
-      {
-        startDate: previousRange.startDate,
-        endDate: previousRange.endDate,
-        grain,
-        groupBy: "none",
-        targetCurrency,
-      },
-      { profile: "stripe_arr_correct" },
-    );
-  } catch {
-    stripeBaseline = null;
-  }
 
   const periodOrder: PeriodRef[] = (hubspotMain.periods || []).map((period) => ({
     key: String(period.key || ""),
@@ -727,76 +713,77 @@ async function buildCombinedBillingOverview(
     };
   });
 
-  const hubNewCustomerCountByPeriod = new Map<string, number>();
-  periodOrder.forEach((period, idx) => {
-    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
-    const prevKey = idx > 0 ? periodOrder[idx - 1].key : "";
-    let count = 0;
-    for (const [accountKey, accountTotals] of accountArrByPeriod.entries()) {
-      const currArr = round2(accountTotals[period.key] || 0);
-      const prevArr = round2(
-        idx === 0
-          ? baselineAccountArrByAccount.get(accountKey) || 0
-          : prevKey
-            ? accountTotals[prevKey] || 0
-            : 0,
-      );
-      const currHas = Math.abs(currArr) > 1e-9;
-      const prevHas = Math.abs(prevArr) > 1e-9;
-      if (!prevHas && currHas) count += 1;
-    }
-    hubNewCustomerCountByPeriod.set(key, count);
-  });
-
-  const stripeArrByCustomer = new Map<string, Map<string, number>>();
-  for (const row of stripeMain.customerArrRows || []) {
-    const customerId = String(row.customerId || "").trim();
-    const key = canonicalStripeCustomerPeriodKey(row, grain);
-    if (!customerId || !key) continue;
-    if (!stripeArrByCustomer.has(customerId)) stripeArrByCustomer.set(customerId, new Map<string, number>());
-    const valuesByPeriod = stripeArrByCustomer.get(customerId)!;
-    valuesByPeriod.set(key, round2((valuesByPeriod.get(key) || 0) + Number(row.arr || 0)));
-  }
-
-  const stripeBaselineArrByCustomer = new Map<string, number>();
-  for (const row of stripeBaseline?.customerArrRows || []) {
-    const customerId = String(row.customerId || "").trim();
-    if (!customerId) continue;
-    stripeBaselineArrByCustomer.set(
-      customerId,
-      round2((stripeBaselineArrByCustomer.get(customerId) || 0) + Number(row.arr || 0)),
-    );
-  }
-
-  const stripeNewCustomerCountByPeriod = new Map<string, number>();
-  periodOrder.forEach((period, idx) => {
-    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
-    const prevKey =
-      idx > 0 ? canonicalHubPeriodKey(periodOrder[idx - 1].key, grain) || periodOrder[idx - 1].key : "";
-    let count = 0;
-    for (const [customerId, valuesByPeriod] of stripeArrByCustomer.entries()) {
-      const currArr = round2(valuesByPeriod.get(key) || 0);
-      const prevArr = round2(
-        idx === 0
-          ? stripeBaselineArrByCustomer.get(customerId) || 0
-          : prevKey
-            ? valuesByPeriod.get(prevKey) || 0
-            : 0,
-      );
-      const currHas = Math.abs(currArr) > 1e-9;
-      const prevHas = Math.abs(prevArr) > 1e-9;
-      if (!prevHas && currHas) count += 1;
-    }
-    stripeNewCustomerCountByPeriod.set(key, count);
-  });
-
   const combinedNewCustomerCountByPeriod = new Map<string, number>();
-  periodOrder.forEach((period) => {
-    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
-    const count = (hubNewCustomerCountByPeriod.get(key) || 0) + (stripeNewCustomerCountByPeriod.get(key) || 0);
-    combinedNewCustomerCountByPeriod.set(key, count);
-  });
+  if (includeCac) {
+    const hubNewCustomerCountByPeriod = new Map<string, number>();
+    periodOrder.forEach((period, idx) => {
+      const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+      const prevKey = idx > 0 ? periodOrder[idx - 1].key : "";
+      let count = 0;
+      for (const [accountKey, accountTotals] of accountArrByPeriod.entries()) {
+        const currArr = round2(accountTotals[period.key] || 0);
+        const prevArr = round2(
+          idx === 0
+            ? baselineAccountArrByAccount.get(accountKey) || 0
+            : prevKey
+              ? accountTotals[prevKey] || 0
+              : 0,
+        );
+        const currHas = Math.abs(currArr) > 1e-9;
+        const prevHas = Math.abs(prevArr) > 1e-9;
+        if (!prevHas && currHas) count += 1;
+      }
+      hubNewCustomerCountByPeriod.set(key, count);
+    });
 
+    const stripeArrByCustomer = new Map<string, Map<string, number>>();
+    for (const row of stripeMain.customerArrRows || []) {
+      const customerId = String(row.customerId || "").trim();
+      const key = canonicalStripeCustomerPeriodKey(row, grain);
+      if (!customerId || !key) continue;
+      if (!stripeArrByCustomer.has(customerId)) stripeArrByCustomer.set(customerId, new Map<string, number>());
+      const valuesByPeriod = stripeArrByCustomer.get(customerId)!;
+      valuesByPeriod.set(key, round2((valuesByPeriod.get(key) || 0) + Number(row.arr || 0)));
+    }
+
+    const stripeBaselineArrByCustomer = new Map<string, number>();
+    for (const row of stripeBaseline?.customerArrRows || []) {
+      const customerId = String(row.customerId || "").trim();
+      if (!customerId) continue;
+      stripeBaselineArrByCustomer.set(
+        customerId,
+        round2((stripeBaselineArrByCustomer.get(customerId) || 0) + Number(row.arr || 0)),
+      );
+    }
+
+    const stripeNewCustomerCountByPeriod = new Map<string, number>();
+    periodOrder.forEach((period, idx) => {
+      const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+      const prevKey =
+        idx > 0 ? canonicalHubPeriodKey(periodOrder[idx - 1].key, grain) || periodOrder[idx - 1].key : "";
+      let count = 0;
+      for (const [customerId, valuesByPeriod] of stripeArrByCustomer.entries()) {
+        const currArr = round2(valuesByPeriod.get(key) || 0);
+        const prevArr = round2(
+          idx === 0
+            ? stripeBaselineArrByCustomer.get(customerId) || 0
+            : prevKey
+              ? valuesByPeriod.get(prevKey) || 0
+              : 0,
+        );
+        const currHas = Math.abs(currArr) > 1e-9;
+        const prevHas = Math.abs(prevArr) > 1e-9;
+        if (!prevHas && currHas) count += 1;
+      }
+      stripeNewCustomerCountByPeriod.set(key, count);
+    });
+
+    periodOrder.forEach((period) => {
+      const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+      const count = (hubNewCustomerCountByPeriod.get(key) || 0) + (stripeNewCustomerCountByPeriod.get(key) || 0);
+      combinedNewCustomerCountByPeriod.set(key, count);
+    });
+  }
   const emptyCacSeries = buildCacSeries(periodOrder, grain, new Map<string, number>(), combinedNewCustomerCountByPeriod);
 
   let cacPoints: CacPoint[] = [];
@@ -815,50 +802,72 @@ async function buildCombinedBillingOverview(
     cacPoints = emptyCacSeries;
     cacCurrencyLayerPoints = emptyCacSeries;
     cacCadPoints = emptyCacSeries;
+  } else if (!includeCac) {
+    cacNotice = "Loading CAC data...";
+    cacCurrencyLayerNotice = "Loading Currencylayer CAC data...";
+    cacCadNotice = "Loading CAD CAC data...";
+    cacPoints = emptyCacSeries;
+    cacCurrencyLayerPoints = emptyCacSeries;
+    cacCadPoints = emptyCacSeries;
   } else {
-    const [frankfurterResult, currencyLayerResult, cadRawResult] = await Promise.allSettled([
-      fetchQuickBooksSalesMarketingCostsWithFx(startDate, endDate, accountIds, accountNames, "frankfurter"),
-      fetchQuickBooksSalesMarketingCostsWithFx(startDate, endDate, accountIds, accountNames, "currencylayer"),
-      fetchQuickBooksSalesMarketingCostsNoFx(startDate, endDate, accountIds, accountNames),
-    ]);
-
-    if (frankfurterResult.status === "fulfilled") {
-      const frankfurterCosts = frankfurterResult.value as QuickBooksSalesMarketingCostResponse;
-      cacPoints = buildCacSeries(
-        periodOrder,
-        grain,
-        buildCostByMonth(frankfurterCosts.points || []),
-        combinedNewCustomerCountByPeriod,
-      );
-      cacNotice = buildCacAccountMatchNotice(frankfurterCosts, accountIds);
-    } else {
-      cacNotice = `CAC unavailable: ${conciseErrorMessage(
-        frankfurterResult.reason,
-        "QuickBooks cost query failed.",
-      )}`;
+    let cadRawCosts: QuickBooksSalesMarketingCostResponse | null = null;
+    try {
+      cadRawCosts = await fetchQuickBooksSalesMarketingCostsByMonth(startDate, endDate, {
+        selectedAccountIds: accountIds,
+        selectedAccountNames: accountNames,
+      });
+    } catch (error: unknown) {
+      const reason = conciseErrorMessage(error, "QuickBooks cost query failed.");
+      cacNotice = `CAC unavailable: ${reason}`;
+      cacCurrencyLayerNotice = `Currencylayer CAC unavailable: ${reason}`;
+      cacCadNotice = `CAD CAC unavailable: ${reason}`;
       cacPoints = emptyCacSeries;
-    }
-
-    if (currencyLayerResult.status === "fulfilled") {
-      const currencyLayerCosts = currencyLayerResult.value as QuickBooksSalesMarketingCostResponse;
-      cacCurrencyLayerPoints = buildCacSeries(
-        periodOrder,
-        grain,
-        buildCostByMonth(currencyLayerCosts.points || []),
-        combinedNewCustomerCountByPeriod,
-      );
-      const accountMatchNotice = buildCacAccountMatchNotice(currencyLayerCosts, accountIds);
-      cacCurrencyLayerNotice = accountMatchNotice ? `Currencylayer CAC: ${accountMatchNotice}` : null;
-    } else {
-      cacCurrencyLayerNotice = `Currencylayer CAC unavailable: ${conciseErrorMessage(
-        currencyLayerResult.reason,
-        "QuickBooks cost query failed.",
-      )}`;
       cacCurrencyLayerPoints = emptyCacSeries;
+      cacCadPoints = emptyCacSeries;
+      cadRawCosts = null;
     }
 
-    if (cadRawResult.status === "fulfilled") {
-      const cadRawCosts = cadRawResult.value as QuickBooksSalesMarketingCostResponse;
+    if (cadRawCosts) {
+      const [frankfurterResult, currencyLayerResult] = await Promise.allSettled([
+        convertQuickBooksSalesMarketingCostsWithFx(cadRawCosts, "frankfurter"),
+        convertQuickBooksSalesMarketingCostsWithFx(cadRawCosts, "currencylayer"),
+      ]);
+
+      if (frankfurterResult.status === "fulfilled") {
+        const frankfurterCosts = frankfurterResult.value as QuickBooksSalesMarketingCostResponse;
+        cacPoints = buildCacSeries(
+          periodOrder,
+          grain,
+          buildCostByMonth(frankfurterCosts.points || []),
+          combinedNewCustomerCountByPeriod,
+        );
+        cacNotice = buildCacAccountMatchNotice(frankfurterCosts, accountIds);
+      } else {
+        cacNotice = `CAC unavailable: ${conciseErrorMessage(
+          frankfurterResult.reason,
+          "FX conversion failed.",
+        )}`;
+        cacPoints = emptyCacSeries;
+      }
+
+      if (currencyLayerResult.status === "fulfilled") {
+        const currencyLayerCosts = currencyLayerResult.value as QuickBooksSalesMarketingCostResponse;
+        cacCurrencyLayerPoints = buildCacSeries(
+          periodOrder,
+          grain,
+          buildCostByMonth(currencyLayerCosts.points || []),
+          combinedNewCustomerCountByPeriod,
+        );
+        const accountMatchNotice = buildCacAccountMatchNotice(currencyLayerCosts, accountIds);
+        cacCurrencyLayerNotice = accountMatchNotice ? `Currencylayer CAC: ${accountMatchNotice}` : null;
+      } else {
+        cacCurrencyLayerNotice = `Currencylayer CAC unavailable: ${conciseErrorMessage(
+          currencyLayerResult.reason,
+          "FX conversion failed.",
+        )}`;
+        cacCurrencyLayerPoints = emptyCacSeries;
+      }
+
       cacCadCurrency = String(cadRawCosts.currency || "CAD").trim().toUpperCase() || "CAD";
       cacCadPoints = buildCacSeries(
         periodOrder,
@@ -868,12 +877,6 @@ async function buildCombinedBillingOverview(
       );
       const accountMatchNotice = buildCacAccountMatchNotice(cadRawCosts, accountIds);
       cacCadNotice = accountMatchNotice ? `CAD CAC: ${accountMatchNotice}` : null;
-    } else {
-      cacCadNotice = `CAD CAC unavailable: ${conciseErrorMessage(
-        cadRawResult.reason,
-        "QuickBooks cost query failed.",
-      )}`;
-      cacCadPoints = emptyCacSeries;
     }
   }
 
@@ -906,6 +909,7 @@ async function validateAndRun(body: Partial<RequestBody>) {
       payload.grain,
       payload.accountIds,
       payload.accountNames,
+      payload.includeCac,
     ),
   );
 }
@@ -943,6 +947,7 @@ export async function GET(req: Request) {
         .split(",")
         .map((value) => value.trim())
         .filter(Boolean),
+      includeCac: (searchParams.get("includeCac") || "").toLowerCase() !== "false",
     };
     const report = await validateAndRun(body);
     return NextResponse.json(report);

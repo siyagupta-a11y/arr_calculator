@@ -485,7 +485,8 @@ export default function AiSpendPage() {
               <p className="stripe-ui__panel-subtitle">
                 AI spend is reduced for these Stripe customers when they are linked to a HubSpot sales-led account and
                 have prepaid balance consumption in the selected usage month window (using invoice starting/ending
-                balance changes from the following invoice month).
+                balance changes from the following invoice month). For the live current month, it falls back to the
+                latest invoice ending balance credit per customer.
               </p>
               <div className="stripe-ui__table-wrap">
                 <table className="stripe-ui__table">

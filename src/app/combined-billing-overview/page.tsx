@@ -1617,6 +1617,7 @@ export default function CombinedBillingOverviewPage() {
   const [grain, setGrain] = useState<CombinedGrain>("monthly");
 
   const [loading, setLoading] = useState(false);
+  const [cacLoading, setCacLoading] = useState(false);
   const [hasRunOnce, setHasRunOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<CombinedOverviewData | null>(null);
@@ -1778,6 +1779,7 @@ export default function CombinedBillingOverviewPage() {
 
     setHasRunOnce(true);
     setLoading(true);
+    setCacLoading(false);
     setError(null);
     setCacNotice(null);
     setCacCurrencyLayerNotice(null);
@@ -1828,6 +1830,7 @@ export default function CombinedBillingOverviewPage() {
           grain,
           accountIds: normalizedSelectedCacAccountIds,
           accountNames: selectedCacAccountNames,
+          includeCac: false,
         }),
         fetchJson<CombinedLiveArrResponse>("/api/combined-live-arr", {}),
       ]);
@@ -1861,6 +1864,51 @@ export default function CombinedBillingOverviewPage() {
         cacCadPoints: overview.cacCadPoints || [],
         cacCadCurrency: String(overview.cacCadCurrency || "CAD").toUpperCase(),
       });
+
+      if (grain !== "monthly") {
+        setLoading(false);
+        setCacLoading(false);
+        return;
+      }
+      setLoading(false);
+      setCacLoading(true);
+      void (async () => {
+        try {
+          const overviewWithCac = await fetchJson<CombinedBillingOverviewReportResponse>(
+            "/api/combined-billing-overview-report",
+            {
+              startDate,
+              endDate,
+              grain,
+              accountIds: normalizedSelectedCacAccountIds,
+              accountNames: selectedCacAccountNames,
+              includeCac: true,
+            },
+          );
+          if (isStale()) return;
+          setCacNotice(overviewWithCac.cacNotice);
+          setCacCurrencyLayerNotice(overviewWithCac.cacCurrencyLayerNotice);
+          setCacCadNotice(overviewWithCac.cacCadNotice);
+          setData((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              cacPoints: overviewWithCac.cacPoints || [],
+              cacCurrencyLayerPoints: overviewWithCac.cacCurrencyLayerPoints || [],
+              cacCadPoints: overviewWithCac.cacCadPoints || [],
+              cacCadCurrency: String(overviewWithCac.cacCadCurrency || prev.cacCadCurrency || "CAD").toUpperCase(),
+            };
+          });
+        } catch (e: unknown) {
+          if (isStale()) return;
+          const message = conciseErrorMessage(e, "Failed to load CAC details.");
+          setCacNotice(`CAC unavailable: ${message}`);
+          setCacCurrencyLayerNotice(`Currencylayer CAC unavailable: ${message}`);
+          setCacCadNotice(`CAD CAC unavailable: ${message}`);
+        } finally {
+          if (!isStale()) setCacLoading(false);
+        }
+      })();
     } catch (e: unknown) {
       if (isStale()) return;
       setError(e instanceof Error ? e.message : "Unknown error");
@@ -2142,7 +2190,7 @@ export default function CombinedBillingOverviewPage() {
               currency={currency}
               expenseAccounts={cacExpenseAccounts}
               selectedAccountIds={selectedCacAccountIds}
-              runLoading={loading}
+              runLoading={loading || cacLoading}
               accountMenuOpen={cacAccountMenuTarget === "frankfurter"}
               accountsLoading={cacExpenseAccountsLoading}
               accountsError={cacExpenseAccountsError}
@@ -2171,7 +2219,7 @@ export default function CombinedBillingOverviewPage() {
               tableAriaLabel="CAC table using Currencylayer FX"
               expenseAccounts={cacExpenseAccounts}
               selectedAccountIds={selectedCacAccountIds}
-              runLoading={loading}
+              runLoading={loading || cacLoading}
               accountMenuOpen={cacAccountMenuTarget === "currencylayer"}
               accountsLoading={cacExpenseAccountsLoading}
               accountsError={cacExpenseAccountsError}
@@ -2201,7 +2249,7 @@ export default function CombinedBillingOverviewPage() {
               showAccountSelector={false}
               expenseAccounts={cacExpenseAccounts}
               selectedAccountIds={selectedCacAccountIds}
-              runLoading={loading}
+              runLoading={loading || cacLoading}
               accountMenuOpen={false}
               accountsLoading={cacExpenseAccountsLoading}
               accountsError={cacExpenseAccountsError}

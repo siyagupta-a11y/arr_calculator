@@ -199,6 +199,8 @@ export type StripeBillingOverviewRequest = {
   grain: StripeBillingOverviewGrain;
   targetCurrency: string;
   groupBy?: StripeBillingOverviewGroupBy;
+  includeCustomerArrRows?: boolean;
+  includeCurrentMonthProjection?: boolean;
 };
 
 export type StripeBillingOverviewPoint = {
@@ -394,6 +396,22 @@ export type StripeSalesLedCustomerInvoicePrepaidUsageRow = {
   maxAvailableCreditMinor: number;
   invoiceDateStart: string;
   invoiceDateEnd: string;
+};
+
+export type StripeSalesLedCustomerLatestInvoiceCreditRequest = {
+  asOfDate?: string;
+};
+
+export type StripeSalesLedCustomerLatestInvoiceCreditRow = {
+  customerId: string;
+  email: string;
+  name: string;
+  currency: string;
+  accountIds: string[];
+  accountNames: string[];
+  invoiceId: string;
+  invoiceDate: string;
+  availableCreditMinor: number;
 };
 
 export type StripeMeteredUsageByCustomerRequest = {
@@ -3332,6 +3350,8 @@ export async function queryStripeBillingOverviewFromBigQuery(
   const endDateIso = endDate.toISOString().slice(0, 10);
   const grain = normalizeStripeBillingOverviewGrain(request.grain);
   const groupBy = normalizeStripeBillingOverviewGroupBy(request.groupBy);
+  const includeCustomerArrRows = request.includeCustomerArrRows !== false;
+  const includeCurrentMonthProjection = request.includeCurrentMonthProjection !== false;
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
   const todayUtc = new Date();
   const currentMonthStartUtc = startOfMonthUtc(todayUtc);
@@ -4591,11 +4611,15 @@ ORDER BY local_date ASC
   const [pointRows, stripeExactPointRows, customerArrRawRows, groupedSeriesRawRows, projectionDailyRows] = await Promise.all([
     runBigQueryQueryRows(accessToken, projectId, location, pointsQuery, params),
     runBigQueryQueryRows(accessToken, projectId, location, stripeExactPointsQuery, params),
-    runBigQueryQueryRows(accessToken, projectId, location, customerArrQuery, params),
+    includeCustomerArrRows
+      ? runBigQueryQueryRows(accessToken, projectId, location, customerArrQuery, params)
+      : Promise.resolve([] as Record<string, unknown>[]),
     groupedSeriesQuery
       ? runBigQueryQueryRows(accessToken, projectId, location, groupedSeriesQuery, groupedParams)
       : Promise.resolve([] as Record<string, unknown>[]),
-    runBigQueryQueryRows(accessToken, projectId, location, currentMonthProjectionDailyQuery, projectionParams),
+    includeCurrentMonthProjection
+      ? runBigQueryQueryRows(accessToken, projectId, location, currentMonthProjectionDailyQuery, projectionParams)
+      : Promise.resolve([] as Record<string, unknown>[]),
   ]);
 
   const allPoints: StripeBillingOverviewPoint[] = pointRows.map((row) => ({
@@ -4679,11 +4703,13 @@ ORDER BY local_date ASC
     date: asString(row.period_start),
     mrrEnd: asNumber(row.mrr_end),
   }));
-  const currentMonthProjection = buildStripeCurrentMonthProjection({
-    dailyPoints: projectionDailyPoints,
-    requestedEndDateIso: endDateIso,
-    todayUtc,
-  });
+  const currentMonthProjection = includeCurrentMonthProjection
+    ? buildStripeCurrentMonthProjection({
+        dailyPoints: projectionDailyPoints,
+        requestedEndDateIso: endDateIso,
+        todayUtc,
+      })
+    : null;
 
   const historyPoints = allPoints.filter((point) => point.periodStart < startDateIso);
   const points = allPoints.filter((point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso);
@@ -5668,6 +5694,229 @@ ORDER BY prepaid_applied_minor DESC, customer_id ASC
     maxAvailableCreditMinor: asNumber(row.max_available_credit_minor),
     invoiceDateStart: asString(row.invoice_date_start),
     invoiceDateEnd: asString(row.invoice_date_end),
+  }));
+}
+
+export async function queryStripeSalesLedCustomerLatestInvoiceCreditFromBigQuery(
+  request: StripeSalesLedCustomerLatestInvoiceCreditRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeSalesLedCustomerLatestInvoiceCreditRow[]> {
+  const asOfDate = String(request.asOfDate || "").trim();
+  if (asOfDate && !parseIsoDateUtc(asOfDate)) {
+    throw new Error("Invalid asOfDate");
+  }
+  const includedDealstage = String(process.env.INCLUDED_DEALSTAGE || "").trim();
+  if (!includedDealstage) {
+    throw new Error("Missing INCLUDED_DEALSTAGE");
+  }
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const customersTable = getStripeCustomersTable();
+
+  const query = `
+WITH latest_contacts AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      c.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY c.id
+        ORDER BY c.updatedAt DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.hubspot.contacts\` c
+    WHERE LOWER(TRIM(COALESCE(CAST(c.properties_email AS STRING), ''))) LIKE '%@%'
+      AND COALESCE(c.archived, FALSE) = FALSE
+  )
+  WHERE rn = 1
+),
+latest_companies AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      co.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY co.id
+        ORDER BY co.updatedAt DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.hubspot.companies\` co
+    WHERE COALESCE(co.archived, FALSE) = FALSE
+  )
+  WHERE rn = 1
+),
+latest_deals AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      d.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY d.id
+        ORDER BY d.updatedAt DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.hubspot.deals\` d
+    WHERE COALESCE(d.archived, FALSE) = FALSE
+      AND TRIM(COALESCE(CAST(d.properties_dealstage AS STRING), '')) = @included_dealstage
+  )
+  WHERE rn = 1
+),
+included_salesled_companies AS (
+  SELECT DISTINCT company_id
+  FROM (
+    SELECT
+      REGEXP_EXTRACT(TRIM(COALESCE(CAST(d.properties_hs_primary_associated_company AS STRING), '')), r'\\d+') AS company_id
+    FROM latest_deals d
+    UNION ALL
+    SELECT
+      REGEXP_EXTRACT(company_id_raw, r'\\d+') AS company_id
+    FROM latest_deals d
+    CROSS JOIN UNNEST(
+      CASE
+        WHEN d.companies IS NULL THEN CAST([] AS ARRAY<STRING>)
+        ELSE JSON_VALUE_ARRAY(d.companies, '$')
+      END
+    ) AS company_id_raw
+  )
+  WHERE company_id IS NOT NULL
+    AND TRIM(company_id) != ''
+),
+contact_company_pairs AS (
+  SELECT
+    LOWER(TRIM(COALESCE(CAST(c.properties_email AS STRING), ''))) AS email,
+    REGEXP_EXTRACT(company_id_raw, r'\\d+') AS company_id
+  FROM latest_contacts c
+  CROSS JOIN UNNEST(
+    CASE
+      WHEN c.companies IS NULL THEN CAST([] AS ARRAY<STRING>)
+      ELSE JSON_VALUE_ARRAY(c.companies, '$')
+    END
+  ) AS company_id_raw
+),
+salesled_email_companies AS (
+  SELECT
+    cp.email,
+    ARRAY_AGG(DISTINCT cp.company_id IGNORE NULLS) AS account_ids,
+    ARRAY_AGG(
+      DISTINCT COALESCE(
+        NULLIF(TRIM(CAST(co.properties_name AS STRING)), ''),
+        cp.company_id
+      ) IGNORE NULLS
+    ) AS account_names
+  FROM contact_company_pairs cp
+  JOIN included_salesled_companies isc
+    ON isc.company_id = cp.company_id
+  LEFT JOIN latest_companies co
+    ON co.id = cp.company_id
+  WHERE cp.email != ''
+    AND cp.company_id IS NOT NULL
+    AND TRIM(cp.company_id) != ''
+  GROUP BY cp.email
+),
+latest_customers AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      c.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY c.id
+        ORDER BY c.batch_timestamp DESC
+      ) AS rn
+    FROM \`${customersTable}\` c
+    WHERE (@as_of_date = '' OR c.batch_timestamp < TIMESTAMP(DATE_ADD(DATE(@as_of_date), INTERVAL 1 DAY)))
+  )
+  WHERE rn = 1
+),
+latest_customer_emails AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') AS customer_id,
+    LOWER(TRIM(COALESCE(CAST(c.email AS STRING), ''))) AS email
+  FROM latest_customers c
+),
+latest_invoices_all AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      i.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY i.id
+        ORDER BY i.batch_timestamp DESC
+      ) AS rn
+    FROM \`botpress-stripe-data-pipeline.stripe.invoices\` i
+    WHERE (@as_of_date = '' OR DATE(i.date) <= DATE(@as_of_date))
+      AND LOWER(TRIM(COALESCE(CAST(i.status AS STRING), ''))) != 'void'
+  )
+  WHERE rn = 1
+),
+ranked_latest_invoice_by_customer AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    COALESCE(
+      NULLIF(LOWER(TRIM(CAST(i.customer_email AS STRING))), ''),
+      NULLIF(lce.email, ''),
+      ''
+    ) AS email,
+    COALESCE(NULLIF(TRIM(CAST(i.customer_name AS STRING)), ''), '(blank)') AS name,
+    UPPER(TRIM(COALESCE(CAST(i.currency AS STRING), ''))) AS currency,
+    COALESCE(NULLIF(TRIM(CAST(i.id AS STRING)), ''), '(blank)') AS invoice_id,
+    CAST(DATE(i.date) AS STRING) AS invoice_date,
+    CAST(COALESCE(i.ending_balance, 0) AS FLOAT64) AS ending_balance_minor,
+    ROW_NUMBER() OVER (
+      PARTITION BY COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)')
+      ORDER BY DATE(i.date) DESC, i.date DESC, i.batch_timestamp DESC, i.id DESC
+    ) AS rn
+  FROM latest_invoices_all i
+  LEFT JOIN latest_customer_emails lce
+    ON lce.customer_id = COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)')
+  WHERE COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)') != '(blank)'
+),
+latest_invoice_credit_by_customer AS (
+  SELECT
+    r.customer_id,
+    r.email,
+    r.name,
+    COALESCE(NULLIF(r.currency, ''), 'USD') AS currency,
+    r.invoice_id,
+    r.invoice_date,
+    GREATEST(-r.ending_balance_minor, 0.0) AS available_credit_minor
+  FROM ranked_latest_invoice_by_customer r
+  WHERE r.rn = 1
+)
+SELECT
+  lic.customer_id,
+  lic.email,
+  lic.name,
+  lic.currency,
+  sec.account_ids,
+  sec.account_names,
+  lic.invoice_id,
+  lic.invoice_date,
+  CAST(lic.available_credit_minor AS FLOAT64) AS available_credit_minor
+FROM latest_invoice_credit_by_customer lic
+JOIN salesled_email_companies sec
+  ON sec.email = lic.email
+WHERE lic.email != ''
+  AND lic.available_credit_minor > 0
+ORDER BY available_credit_minor DESC, customer_id ASC
+`;
+  const params: BigQueryNamedParameter[] = [
+    { name: "as_of_date", type: "STRING", value: asOfDate },
+    { name: "included_dealstage", type: "STRING", value: includedDealstage },
+  ];
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+
+  return rows.map((row) => ({
+    customerId: asString(row.customer_id),
+    email: asString(row.email),
+    name: asString(row.name),
+    currency: asString(row.currency),
+    accountIds: asStringArray(row.account_ids),
+    accountNames: asStringArray(row.account_names),
+    invoiceId: asString(row.invoice_id),
+    invoiceDate: asString(row.invoice_date),
+    availableCreditMinor: asNumber(row.available_credit_minor),
   }));
 }
 
