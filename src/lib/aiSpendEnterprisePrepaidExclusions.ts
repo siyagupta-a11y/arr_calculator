@@ -66,10 +66,6 @@ function parseCompanyIds(rawAccountId: string) {
   );
 }
 
-function isCloudDeploymentType(value: string) {
-  return String(value || "").trim().toLowerCase() === "cloud";
-}
-
 function toIsoDateOnlyUtc(d: Date) {
   return d.toISOString().slice(0, 10);
 }
@@ -159,7 +155,7 @@ function prepaidAppliedMinor(row: StripeCustomerInvoicePrepaidUsageByEmailRow) {
   return Math.max(0, Number(row.prepaidAppliedMinor || 0));
 }
 
-async function loadEnterpriseCompanyMapForPeriod(startDate: string, endDate: string) {
+async function loadSalesLedCompanyMapForPeriod(startDate: string, endDate: string) {
   const report = await generateReport({
     startDate,
     endDate,
@@ -169,9 +165,6 @@ async function loadEnterpriseCompanyMapForPeriod(startDate: string, endDate: str
 
   const companies = new Map<string, { accountIds: Set<string>; accountNames: Set<string> }>();
   for (const row of report.rows || []) {
-    if (!isCloudDeploymentType(String(row.deploymentType || ""))) continue;
-    if (String(row.plan || "").trim().toLowerCase() !== "enterprise") continue;
-
     const accountId = String(row.accountId || "").trim();
     const accountName = String(row.accountName || "").trim();
     const companyIds = parseCompanyIds(accountId);
@@ -233,8 +226,8 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
   const monthWindows = buildMonthWindows(startDate, endDate, asOfDate || undefined);
   if (!monthWindows.length) return { customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] };
 
-  const enterpriseCompanies = await loadEnterpriseCompanyMapForPeriod(startDate, endDate);
-  const companyIds = Array.from(enterpriseCompanies.keys());
+  const salesLedCompanies = await loadSalesLedCompanyMapForPeriod(startDate, endDate);
+  const companyIds = Array.from(salesLedCompanies.keys());
   if (!companyIds.length) return { customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] };
 
   const emailsByCompany = await loadEnterpriseEmailsByCompany(companyIds);
@@ -276,7 +269,7 @@ export async function resolveEnterprisePrepaidAiSpendExclusions(
       const accountIdSet = new Set<string>();
       const accountNameSet = new Set<string>();
       for (const companyId of linkedCompanyIds) {
-        const ref = enterpriseCompanies.get(companyId);
+        const ref = salesLedCompanies.get(companyId);
         if (!ref) continue;
         for (const accountId of ref.accountIds) accountIdSet.add(accountId);
         for (const accountName of ref.accountNames) accountNameSet.add(accountName);

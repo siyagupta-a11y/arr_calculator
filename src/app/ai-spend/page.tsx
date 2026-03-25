@@ -431,7 +431,7 @@ export default function AiSpendPage() {
                 <p className="stripe-ui__stat-value">{uniqueCustomersShown}</p>
               </article>
               <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Enterprise prepaid offsets</p>
+                <p className="stripe-ui__stat-label">Sales-led prepaid offsets</p>
                 <p className="stripe-ui__stat-value">{excludedCustomerCount}</p>
               </article>
             </div>
@@ -481,10 +481,11 @@ export default function AiSpendPage() {
 
           {showExclusions ? (
             <section className="stripe-ui__panel ui-reveal ui-reveal-2">
-              <h2 className="stripe-ui__panel-title">Enterprise prepaid customer offsets</h2>
+              <h2 className="stripe-ui__panel-title">Sales-led customer prepaid offsets</h2>
               <p className="stripe-ui__panel-subtitle">
-                AI spend is reduced for these Stripe customers by prepaid balance consumption in the selected usage
-                month window (using invoice starting/ending balance changes from the following invoice month).
+                AI spend is reduced for these Stripe customers when they are linked to a HubSpot sales-led account and
+                have prepaid balance consumption in the selected usage month window (using invoice starting/ending
+                balance changes from the following invoice month).
               </p>
               <div className="stripe-ui__table-wrap">
                 <table className="stripe-ui__table">
@@ -500,7 +501,7 @@ export default function AiSpendPage() {
                   <tbody>
                     {excludedCustomers.length === 0 ? (
                       <tr>
-                        <td colSpan={5}>No enterprise prepaid offsets for this run.</td>
+                        <td colSpan={5}>No sales-led prepaid offsets for this run.</td>
                       </tr>
                     ) : (
                       excludedCustomers.map((row) => (
