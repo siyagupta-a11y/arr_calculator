@@ -152,7 +152,8 @@ function findEarliestNonOneTimeLineItemStart(
   liIds: string[],
   lineItemsById: Map<string, HubspotLineItem>,
 ) {
-  let best: { liId: string; start: Date } | null = null;
+  let bestStart: Date | null = null;
+  let bestLiIds = new Set<string>();
 
   for (const liId of liIds) {
     const li = lineItemsById.get(liId);
@@ -167,10 +168,19 @@ function findEarliestNonOneTimeLineItemStart(
     const start = w?.start ? new Date(w.start) : null;
     if (!start || isNaN(start.getTime())) continue;
 
-    if (!best || start < best.start) best = { liId, start };
+    if (!bestStart || start < bestStart) {
+      bestStart = start;
+      bestLiIds = new Set([liId]);
+      continue;
+    }
+
+    if (bestStart && start.getTime() === bestStart.getTime()) {
+      bestLiIds.add(liId);
+    }
   }
 
-  return best;
+  if (!bestStart) return null;
+  return { start: bestStart, liIds: Array.from(bestLiIds) };
 }
 
 export async function generateReport(
@@ -503,7 +513,7 @@ export async function generateReport(
     const earliest =
       body.mode === "contracted" ? findEarliestNonOneTimeLineItemStart(liIds, lineItemsById) : null;
 
-    const earliestLiId = earliest?.liId || null;
+    const earliestLiIdSet = new Set(earliest?.liIds || []);
     const earliestStart = earliest?.start || null;
 
     const allowCarry =
@@ -521,7 +531,7 @@ export async function generateReport(
 
       const liArr = computeCalculatedArrForLineItem(p);
       const liArrFx = fx.rate && liArr ? round2(liArr * fx.rate) : 0;
-      const isEarliestRecurring = earliestLiId && liId === earliestLiId;
+      const isEarliestRecurring = earliestLiIdSet.has(liId);
       const earliestStartDay = earliestStart
         ? new Date(earliestStart.getFullYear(), earliestStart.getMonth(), earliestStart.getDate())
         : null;
