@@ -398,6 +398,7 @@ const STRIPE_ARR_CORRECT_MRR_CHANGE_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta";
 const STRIPE_PRODUCTS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.products";
 const STRIPE_CUSTOMERS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.customers";
+const STRIPE_CUSTOMERS_METADATA_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.customers_metadata";
 const STRIPE_CHARGES_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.charges";
 const STRIPE_PAYMENT_METHODS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.payment_methods";
 const STRIPE_UPCOMING_SNAPSHOTS_DEFAULT_TABLE =
@@ -408,6 +409,7 @@ const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   BIGQUERY_PROJECT_ID: "BIGQUERY_STRIPE_ARR_CORRECT_PROJECT_ID",
   BIGQUERY_LOCATION: "BIGQUERY_STRIPE_ARR_CORRECT_LOCATION",
   BIGQUERY_STRIPE_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_TABLE",
+  BIGQUERY_STRIPE_CUSTOMERS_METADATA_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_CUSTOMERS_METADATA_TABLE",
   BIGQUERY_STRIPE_CHARGES_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_CHARGES_TABLE",
   BIGQUERY_STRIPE_PAYMENT_METHODS_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_PAYMENT_METHODS_TABLE",
   BIGQUERY_STRIPE_SERVING_TABLE: "BIGQUERY_STRIPE_ARR_CORRECT_SERVING_TABLE",
@@ -788,6 +790,15 @@ function getBigQuerySourceConfig(profile: StripeBigQueryProfile = "default"): Bi
 function getStripeCustomersTable() {
   const configured = String(process.env.BIGQUERY_STRIPE_CUSTOMERS_TABLE || "").trim();
   return configured || STRIPE_CUSTOMERS_DEFAULT_TABLE;
+}
+
+function getStripeCustomersMetadataTable(profile: StripeBigQueryProfile = "default") {
+  const envName =
+    profile === "stripe_arr_correct"
+      ? "BIGQUERY_STRIPE_ARR_CORRECT_CUSTOMERS_METADATA_TABLE"
+      : "BIGQUERY_STRIPE_CUSTOMERS_METADATA_TABLE";
+  const configured = String(process.env[envName] || "").trim();
+  return configured || STRIPE_CUSTOMERS_METADATA_DEFAULT_TABLE;
 }
 
 function getStripeChargesTable(profile: StripeBigQueryProfile = "default") {
@@ -2086,6 +2097,7 @@ function buildStripeThroughMrrDetailBaseCte(
   table: string,
   productsTable: string,
   customersTable: string,
+  customersMetadataTable: string,
   chargesTable: string,
   paymentMethodsTable: string,
 ) {
@@ -2168,21 +2180,37 @@ products_lookup AS (
     ) AS product_description_table
   FROM \`${productsTable}\`
 ) ,
+customers_workspace_lookup AS (
+  SELECT
+    customer_id,
+    workspace_id
+  FROM (
+    SELECT
+      COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+      NULLIF(TRIM(CAST(m.value AS STRING)), '') AS workspace_id,
+      COALESCE(NULLIF(TRIM(CAST(m.batch_timestamp AS STRING)), ''), '') AS batch_timestamp_value,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)')
+        ORDER BY
+          COALESCE(NULLIF(TRIM(CAST(m.batch_timestamp AS STRING)), ''), '') DESC,
+          NULLIF(TRIM(CAST(m.value AS STRING)), '') DESC
+      ) AS rn
+    FROM \`${customersMetadataTable}\` m
+    WHERE LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
+  )
+  WHERE rn = 1
+) ,
 customers_lookup AS (
   SELECT
     COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS customer_id,
     COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '') AS customer_email,
     COALESCE(NULLIF(TRIM(CAST(address_country AS STRING)), ''), '') AS address_country,
     COALESCE(NULLIF(TRIM(CAST(shipping_address_country AS STRING)), ''), '') AS shipping_address_country,
-    COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.workspace_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.workspaceId')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.metadata.workspace_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.metadata.workspaceId')), ''),
-      ''
-    ) AS customer_workspace_id,
+    COALESCE(NULLIF(TRIM(cwl.workspace_id), ''), '') AS customer_workspace_id,
     created AS customer_created
   FROM \`${customersTable}\` c
+  LEFT JOIN customers_workspace_lookup cwl
+    ON cwl.customer_id = COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)')
 ) ,
 customer_ids_in_scope AS (
   SELECT DISTINCT customer_id FROM parsed
@@ -2348,7 +2376,7 @@ enriched AS (
     p.mrr_change_major,
     p.customer_id,
     COALESCE(cc.customer_email, '') AS customer_email,
-    COALESCE(NULLIF(TRIM(p.event_workspace_id), ''), COALESCE(cc.customer_workspace_id, '')) AS customer_workspace_id,
+    COALESCE(NULLIF(TRIM(cc.customer_workspace_id), ''), NULLIF(TRIM(p.event_workspace_id), ''), '') AS customer_workspace_id,
     cc.customer_created AS customer_created,
     COALESCE(cc.customer_country, 'N/A') AS customer_country,
     COALESCE(cc.customer_country_code, '') AS customer_country_code,
@@ -2431,6 +2459,7 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const table = getStripeArrCorrectMrrChangeTable();
   const productsTable = getStripeProductsTable(profile);
   const customersTable = getStripeCustomersTable();
+  const customersMetadataTable = getStripeCustomersMetadataTable(profile);
   const chargesTable = getStripeChargesTable(profile);
   const paymentMethodsTable = getStripePaymentMethodsTable(profile);
 
@@ -2618,6 +2647,7 @@ WHERE
     table,
     productsTable,
     customersTable,
+    customersMetadataTable,
     chargesTable,
     paymentMethodsTable,
   );
@@ -2873,7 +2903,7 @@ history_enriched AS (
   SELECT
     hs.*,
     COALESCE(cc.customer_email, '') AS customer_email,
-    COALESCE(NULLIF(TRIM(hs.event_workspace_id), ''), COALESCE(cc.customer_workspace_id, '')) AS customer_workspace_id,
+    COALESCE(NULLIF(TRIM(cc.customer_workspace_id), ''), NULLIF(TRIM(hs.event_workspace_id), ''), '') AS customer_workspace_id,
     cc.customer_created AS customer_created,
     COALESCE(cc.customer_country, 'N/A') AS customer_country,
     COALESCE(cc.customer_country_code, '') AS customer_country_code,
@@ -3144,6 +3174,7 @@ export async function queryStripeThroughMrrCustomerArrFromBigQuery(
   const accessToken = await getAccessToken(sa);
   const table = getStripeArrCorrectMrrChangeTable();
   const customersTable = getStripeCustomersTable();
+  const customersMetadataTable = getStripeCustomersMetadataTable(profile);
 
   const query = `
 WITH bounds AS (
@@ -3162,18 +3193,34 @@ buckets AS (
   FROM bounds b
   CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.first_bucket_start, b.last_bucket_start, INTERVAL 1 MONTH)) AS month_start
 ),
+customers_workspace_lookup AS (
+  SELECT
+    customer_id,
+    workspace_id
+  FROM (
+    SELECT
+      COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+      NULLIF(TRIM(CAST(m.value AS STRING)), '') AS workspace_id,
+      COALESCE(NULLIF(TRIM(CAST(m.batch_timestamp AS STRING)), ''), '') AS batch_timestamp_value,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)')
+        ORDER BY
+          COALESCE(NULLIF(TRIM(CAST(m.batch_timestamp AS STRING)), ''), '') DESC,
+          NULLIF(TRIM(CAST(m.value AS STRING)), '') DESC
+      ) AS rn
+    FROM \`${customersMetadataTable}\` m
+    WHERE LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
+  )
+  WHERE rn = 1
+),
 customers_lookup AS (
   SELECT
     COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS customer_id,
     LOWER(COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '')) AS customer_email,
-    COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.workspace_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.workspaceId')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.metadata.workspace_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.metadata.workspaceId')), ''),
-      ''
-    ) AS customer_workspace_id
+    COALESCE(NULLIF(TRIM(cwl.workspace_id), ''), '') AS customer_workspace_id
   FROM \`${customersTable}\` c
+  LEFT JOIN customers_workspace_lookup cwl
+    ON cwl.customer_id = COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)')
 ),
 events_base AS (
   SELECT
@@ -3187,12 +3234,12 @@ events_base AS (
       )
     ) AS customer_key,
     COALESCE(
+      NULLIF(TRIM(cl.customer_workspace_id), ''),
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspace_id')), ''),
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspaceId')), ''),
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspace.id')), ''),
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.metadata.workspace_id')), ''),
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.metadata.workspaceId')), ''),
-      NULLIF(TRIM(cl.customer_workspace_id), ''),
       ''
     ) AS workspace_id,
     CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
