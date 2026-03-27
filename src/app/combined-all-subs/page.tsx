@@ -11,6 +11,7 @@ type CombinedAllSubsRow = {
   customerLabel: string;
   accountId: string;
   accountName: string;
+  salesAssist: "yes" | "no";
   stripeKeys: string[];
   matchedStripeKeys: string[];
   hubspotValuesByPeriod: Record<string, number>;
@@ -162,6 +163,7 @@ export default function CombinedAllSubsPage() {
         "customer_label",
         "account_id",
         "account_name",
+        "sales_assist",
         "matched_stripe_keys",
         "hubspot_latest_arr",
         "stripe_latest_arr",
@@ -173,6 +175,7 @@ export default function CombinedAllSubsPage() {
         row.customerLabel,
         row.accountId,
         row.accountName,
+        row.salesAssist,
         row.matchedStripeKeys.join(" | "),
         Number(row.hubspotValuesByPeriod[lastKey] || 0),
         Number(row.stripeValuesByPeriod[lastKey] || 0),
@@ -190,6 +193,7 @@ export default function CombinedAllSubsPage() {
       "customer_label",
       "account_id",
       "account_name",
+      "sales_assist",
       "stripe_keys",
       "matched_stripe_keys",
     ];
@@ -207,6 +211,7 @@ export default function CombinedAllSubsPage() {
         row.customerLabel,
         row.accountId,
         row.accountName,
+        row.salesAssist,
         row.stripeKeys.join(" | "),
         row.matchedStripeKeys.join(" | "),
       ];
@@ -229,6 +234,7 @@ export default function CombinedAllSubsPage() {
       "customer_label",
       "account_id",
       "account_name",
+      "sales_assist",
     ];
     for (const period of data.periods) {
       header.push(`combined_arr_${period.key}`);
@@ -242,6 +248,7 @@ export default function CombinedAllSubsPage() {
         row.customerLabel,
         row.accountId,
         row.accountName,
+        row.salesAssist,
       ];
       for (const period of data.periods) {
         cells.push(Number(row.valuesByPeriod[period.key] || 0));
@@ -437,6 +444,7 @@ export default function CombinedAllSubsPage() {
                   <tr>
                     <th>Customer</th>
                     <th>Source</th>
+                    <th>Sales assist</th>
                     <th>Matched Stripe Emails</th>
                     <th className="stripe-ui__num">HubSpot ({lastKey || "latest"})</th>
                     <th className="stripe-ui__num">Stripe ({lastKey || "latest"})</th>
@@ -458,6 +466,7 @@ export default function CombinedAllSubsPage() {
                       <tr key={row.id}>
                         <td>{row.customerLabel}</td>
                         <td>{row.source === "hubspot_account" ? "HubSpot account" : "Stripe only"}</td>
+                        <td>{row.salesAssist}</td>
                         <td>
                           {row.matchedStripeKeys.length > 0
                             ? row.matchedStripeKeys.join(", ")
@@ -478,7 +487,7 @@ export default function CombinedAllSubsPage() {
                   })}
                   <tr>
                     <td style={{ fontWeight: 700 }}>Totals</td>
-                    <td colSpan={5} />
+                    <td colSpan={6} />
                     {data?.periods.map((period) => (
                       <td key={`totals:${period.key}`} className="stripe-ui__num" style={{ fontWeight: 700 }}>
                         {formatMoney(

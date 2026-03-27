@@ -1,4 +1,5 @@
 import { createSign } from "node:crypto";
+import { fetchWorkspaceIdsForDealStageLabel } from "@/lib/hubspot";
 import {
   canonicalCountryLabel,
   canonicalTerritoryLabel,
@@ -125,6 +126,8 @@ export type StripeThroughMrrGroupedDetailRow = {
   monthEndMrr: number;
   monthEndArr: number;
   associatedCustomerIds?: string[];
+  associatedWorkspaceIds?: string[];
+  salesAssist?: "yes" | "no";
 };
 
 export type StripeThroughMrrReportRequest = {
@@ -164,6 +167,7 @@ export type StripeThroughMrrReportResult = {
 export type StripeThroughMrrCustomerArrRow = {
   customerKey: string;
   customerIds: string[];
+  workspaceIds: string[];
   periodKey: string;
   periodLabel: string;
   periodStart: string;
@@ -528,6 +532,10 @@ async function getAccessToken(sa: ServiceAccount) {
 function asString(v: unknown) {
   if (v == null) return "";
   return String(v);
+}
+
+function normalizeWorkspaceIdToken(value: string) {
+  return String(value || "").trim().toLowerCase();
 }
 
 function asStringArray(v: unknown): string[] {
@@ -1956,7 +1964,7 @@ WHERE
 
 const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
   Exclude<StripeThroughMrrGroupBy, "none">,
-  { keyExpr: string; labelExpr: string; customerIdsExpr?: string }
+  { keyExpr: string; labelExpr: string; customerIdsExpr?: string; workspaceIdsExpr?: string }
 > = {
   customer_id: {
     keyExpr: "customer_id",
@@ -1997,6 +2005,8 @@ const STRIPE_THROUGH_MRR_GROUP_BY_SQL: Record<
     labelExpr: "COALESCE(NULLIF(TRIM(customer_email), ''), '(no email)')",
     customerIdsExpr:
       "ARRAY_AGG(NULLIF(customer_id, '(blank)') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC)",
+    workspaceIdsExpr:
+      "ARRAY_AGG(NULLIF(customer_workspace_id, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC)",
   },
 };
 
@@ -2099,6 +2109,14 @@ parsed AS (
     mrr_change_major,
     COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_id')), ''), '(blank)') AS customer_id,
     COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.workspace.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.metadata.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.metadata.workspaceId')), ''),
+      ''
+    ) AS event_workspace_id,
+    COALESCE(
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_id')), ''),
       '(blank)'
     ) AS subscription_id,
@@ -2156,8 +2174,15 @@ customers_lookup AS (
     COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '') AS customer_email,
     COALESCE(NULLIF(TRIM(CAST(address_country AS STRING)), ''), '') AS address_country,
     COALESCE(NULLIF(TRIM(CAST(shipping_address_country AS STRING)), ''), '') AS shipping_address_country,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.metadata.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.metadata.workspaceId')), ''),
+      ''
+    ) AS customer_workspace_id,
     created AS customer_created
-  FROM \`${customersTable}\`
+  FROM \`${customersTable}\` c
 ) ,
 customer_ids_in_scope AS (
   SELECT DISTINCT customer_id FROM parsed
@@ -2256,6 +2281,7 @@ customer_country_inputs AS (
       )
     ) AS raw_country_key,
     COALESCE(cl.customer_email, '') AS customer_email,
+    COALESCE(cl.customer_workspace_id, '') AS customer_workspace_id,
     cl.customer_created AS customer_created
   FROM customer_ids_in_scope ids
   LEFT JOIN customers_lookup cl
@@ -2292,6 +2318,7 @@ customer_countries AS (
       )
     END AS customer_country_code,
     cci.customer_email AS customer_email,
+    cci.customer_workspace_id AS customer_workspace_id,
     cci.customer_created AS customer_created
   FROM customer_country_inputs cci
 ),
@@ -2310,6 +2337,7 @@ customer_countries_enriched AS (
       )
     END AS customer_territory,
     COALESCE(cc.customer_email, '') AS customer_email,
+    COALESCE(cc.customer_workspace_id, '') AS customer_workspace_id,
     cc.customer_created AS customer_created
   FROM customer_countries cc
 ),
@@ -2320,6 +2348,7 @@ enriched AS (
     p.mrr_change_major,
     p.customer_id,
     COALESCE(cc.customer_email, '') AS customer_email,
+    COALESCE(NULLIF(TRIM(p.event_workspace_id), ''), COALESCE(cc.customer_workspace_id, '')) AS customer_workspace_id,
     cc.customer_created AS customer_created,
     COALESCE(cc.customer_country, 'N/A') AS customer_country,
     COALESCE(cc.customer_country_code, '') AS customer_country_code,
@@ -2768,6 +2797,7 @@ FROM all_group_totals`;
     event_type,
     mrr_change_major,
     customer_id,
+    customer_workspace_id,
     customer_created
   FROM enriched
 ),
@@ -2776,7 +2806,8 @@ group_totals AS (
     group_key,
     group_label,
     ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
-    ${groupSql.customerIdsExpr ?? "ARRAY_AGG(NULLIF(customer_id, '(blank)') IGNORE NULLS LIMIT 1)"} AS associated_customer_ids
+    ${groupSql.customerIdsExpr ?? "ARRAY_AGG(NULLIF(customer_id, '(blank)') IGNORE NULLS LIMIT 1)"} AS associated_customer_ids,
+    ${groupSql.workspaceIdsExpr ?? "ARRAY_AGG(NULLIF(customer_workspace_id, '') IGNORE NULLS LIMIT 1)"} AS associated_workspace_ids
   FROM grouped_source
   GROUP BY group_key, group_label
 ),
@@ -2785,6 +2816,14 @@ history_source AS (
     UPPER(CAST(event_type AS STRING)) AS event_type,
     CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major,
     COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspace.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.metadata.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.metadata.workspaceId')), ''),
+      ''
+    ) AS event_workspace_id,
     COALESCE(
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_id')), ''),
       '(blank)'
@@ -2834,6 +2873,7 @@ history_enriched AS (
   SELECT
     hs.*,
     COALESCE(cc.customer_email, '') AS customer_email,
+    COALESCE(NULLIF(TRIM(hs.event_workspace_id), ''), COALESCE(cc.customer_workspace_id, '')) AS customer_workspace_id,
     cc.customer_created AS customer_created,
     COALESCE(cc.customer_country, 'N/A') AS customer_country,
     COALESCE(cc.customer_country_code, '') AS customer_country_code,
@@ -2852,18 +2892,20 @@ history_by_group AS (
     ${groupSql.keyExpr} AS group_key,
     ${groupSql.labelExpr} AS group_label,
     COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr,
-    ${groupSql.customerIdsExpr ?? "ARRAY_AGG(NULLIF(customer_id, '(blank)') IGNORE NULLS LIMIT 1)"} AS associated_customer_ids
+    ${groupSql.customerIdsExpr ?? "ARRAY_AGG(NULLIF(customer_id, '(blank)') IGNORE NULLS LIMIT 1)"} AS associated_customer_ids,
+    ${groupSql.workspaceIdsExpr ?? "ARRAY_AGG(NULLIF(customer_workspace_id, '') IGNORE NULLS LIMIT 1)"} AS associated_workspace_ids
   FROM history_enriched
   GROUP BY group_key, group_label
 ),
 all_group_totals AS (
-  SELECT group_key, group_label, net_mrr_change, associated_customer_ids FROM group_totals
+  SELECT group_key, group_label, net_mrr_change, associated_customer_ids, associated_workspace_ids FROM group_totals
   UNION ALL
   SELECT
     hbg.group_key,
     hbg.group_label,
     0.0 AS net_mrr_change,
-    hbg.associated_customer_ids
+    hbg.associated_customer_ids,
+    hbg.associated_workspace_ids
   FROM history_by_group hbg
   WHERE ${historyGroupFilterSql}
     AND NOT EXISTS (
@@ -2876,7 +2918,8 @@ paged_groups AS (
     group_key,
     group_label,
     net_mrr_change,
-    associated_customer_ids
+    associated_customer_ids,
+    associated_workspace_ids
   FROM all_group_totals
   ORDER BY net_mrr_change DESC, group_label ASC
   LIMIT @limit_rows
@@ -2899,6 +2942,7 @@ group_monthly AS (
     pg.group_label,
     pg.net_mrr_change AS group_total_net_mrr_change,
     ANY_VALUE(pg.associated_customer_ids) AS associated_customer_ids,
+    ANY_VALUE(pg.associated_workspace_ids) AS associated_workspace_ids,
     m.month_start,
     COUNT(gs.event_timestamp) AS event_count,
     COALESCE(SUM(gs.mrr_change_major), 0.0) AS net_mrr_change,
@@ -2923,6 +2967,7 @@ group_monthly_with_base AS (
     gm.group_key,
     gm.group_label,
     gm.associated_customer_ids,
+    gm.associated_workspace_ids,
     gm.group_total_net_mrr_change,
     gm.month_start,
     gm.event_count,
@@ -2941,6 +2986,7 @@ SELECT
   gmb.group_key,
   gmb.group_label,
   gmb.associated_customer_ids,
+  gmb.associated_workspace_ids,
   FORMAT_DATE('%Y-%m', gmb.month_start) AS month_key,
   FORMAT_DATE('%b %Y', gmb.month_start) AS month_label,
   gmb.event_count,
@@ -2988,6 +3034,23 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
     if (groupBy === "territory") return canonicalTerritoryLabel(raw) || raw || "N/A";
     return rawLabel || rawKey || "(blank)";
   };
+  let transactionalWorkspaceIds = new Set<string>();
+  if (detailMode === "grouped" && groupBy === "email") {
+    try {
+      const fetchedWorkspaceIds = await fetchWorkspaceIdsForDealStageLabel();
+      transactionalWorkspaceIds = new Set(
+        Array.from(fetchedWorkspaceIds)
+          .map((workspaceId) => normalizeWorkspaceIdToken(workspaceId))
+          .filter(Boolean),
+      );
+    } catch (error) {
+      console.warn(
+        `Stripe through MRR: failed to fetch transactional workspace ids: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
   const detailRows: Array<StripeThroughMrrRawDetailRow | StripeThroughMrrGroupedDetailRow> =
     detailMode === "raw"
       ? detailRowsRaw.map((row) => ({
@@ -3007,21 +3070,31 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
           priceId: asString(row.price_id),
           priceDescription: asString(row.price_description),
         }))
-      : detailRowsRaw.map((row) => ({
-          groupKey: asString(row.group_key),
-          groupLabel: groupLabelForDisplay(asString(row.group_key), asString(row.group_label)),
-          monthKey: asString(row.month_key),
-          monthLabel: asString(row.month_label),
-          eventCount: asInt(row.event_count),
-          netMrrChange: asNumber(row.net_mrr_change),
-          newMrr: asNumber(row.new_mrr),
-          expansionMrr: asNumber(row.expansion_mrr),
-          contractionMrr: asNumber(row.contraction_mrr),
-          churnMrr: asNumber(row.churn_mrr),
-          monthEndMrr: asNumber(row.month_end_mrr),
-          monthEndArr: asNumber(row.month_end_arr),
-          associatedCustomerIds: asStringArray(row.associated_customer_ids),
-        }));
+      : detailRowsRaw.map((row) => {
+          const associatedWorkspaceIds = asStringArray(row.associated_workspace_ids);
+          const hasSalesAssist =
+            groupBy === "email" &&
+            associatedWorkspaceIds.some((workspaceId) =>
+              transactionalWorkspaceIds.has(normalizeWorkspaceIdToken(workspaceId)),
+            );
+          return {
+            groupKey: asString(row.group_key),
+            groupLabel: groupLabelForDisplay(asString(row.group_key), asString(row.group_label)),
+            monthKey: asString(row.month_key),
+            monthLabel: asString(row.month_label),
+            eventCount: asInt(row.event_count),
+            netMrrChange: asNumber(row.net_mrr_change),
+            newMrr: asNumber(row.new_mrr),
+            expansionMrr: asNumber(row.expansion_mrr),
+            contractionMrr: asNumber(row.contraction_mrr),
+            churnMrr: asNumber(row.churn_mrr),
+            monthEndMrr: asNumber(row.month_end_mrr),
+            monthEndArr: asNumber(row.month_end_arr),
+            associatedCustomerIds: asStringArray(row.associated_customer_ids),
+            associatedWorkspaceIds,
+            salesAssist: groupBy === "email" ? (hasSalesAssist ? "yes" : "no") : undefined,
+          };
+        });
 
   return {
     startDate: startDateIso,
@@ -3092,8 +3165,15 @@ buckets AS (
 customers_lookup AS (
   SELECT
     COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS customer_id,
-    LOWER(COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '')) AS customer_email
-  FROM \`${customersTable}\`
+    LOWER(COALESCE(NULLIF(TRIM(CAST(email AS STRING)), ''), '')) AS customer_email,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.metadata.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.metadata.workspaceId')), ''),
+      ''
+    ) AS customer_workspace_id
+  FROM \`${customersTable}\` c
 ),
 events_base AS (
   SELECT
@@ -3106,6 +3186,15 @@ events_base AS (
         '(blank)'
       )
     ) AS customer_key,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspace.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.metadata.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.metadata.workspaceId')), ''),
+      NULLIF(TRIM(cl.customer_workspace_id), ''),
+      ''
+    ) AS workspace_id,
     CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
   FROM \`${table}\` AS t
   LEFT JOIN customers_lookup cl
@@ -3118,7 +3207,8 @@ events_base AS (
 customer_ids_by_key AS (
   SELECT
     customer_key,
-    ARRAY_AGG(DISTINCT customer_id IGNORE NULLS ORDER BY customer_id ASC) AS customer_ids
+    ARRAY_AGG(DISTINCT customer_id IGNORE NULLS ORDER BY customer_id ASC) AS customer_ids,
+    ARRAY_AGG(DISTINCT IF(workspace_id = '', NULL, workspace_id) IGNORE NULLS ORDER BY workspace_id ASC) AS workspace_ids
   FROM events_base
   WHERE customer_id <> '(blank)'
   GROUP BY customer_key
@@ -3184,6 +3274,7 @@ snapshot_rows AS (
 SELECT
   sr.customer_key,
   COALESCE(cik.customer_ids, ARRAY<STRING>[]) AS customer_ids,
+  COALESCE(cik.workspace_ids, ARRAY<STRING>[]) AS workspace_ids,
   FORMAT_DATE('%Y-%m', sr.bucket_start) AS period_key,
   FORMAT_DATE('%b %Y', sr.bucket_start) AS period_label,
   FORMAT_DATE('%Y-%m-%d', sr.effective_start) AS period_start,
@@ -3210,6 +3301,7 @@ ORDER BY sr.customer_key ASC, sr.bucket_start ASC
     rows: rows.map((row) => ({
       customerKey: asString(row.customer_key),
       customerIds: asStringArray(row.customer_ids),
+      workspaceIds: asStringArray(row.workspace_ids),
       periodKey: asString(row.period_key),
       periodLabel: asString(row.period_label),
       periodStart: asString(row.period_start),

@@ -20,6 +20,7 @@ type CacheEntry<T> = { value: T; expiresAt: number };
 
 const DEALS_CACHE = new Map<string, CacheEntry<HubspotDeal[]>>();
 const DEAL_STAGE_LABELS_CACHE = new Map<string, CacheEntry<Array<[string, string]>>>();
+const DEAL_STAGE_WORKSPACE_IDS_CACHE = new Map<string, CacheEntry<string[]>>();
 const DEAL_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
 const COMPANY_CONTACT_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
 const CONTACT_COMPANY_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
@@ -65,6 +66,18 @@ function parseRetryAfterMs(raw: string | null) {
   if (Number.isNaN(asDate)) return null;
   const delta = asDate - Date.now();
   return delta > 0 ? delta : 0;
+}
+
+function normalizeWorkspaceId(value: string) {
+  return String(value || "").trim();
+}
+
+function firstNonEmptyProperty(properties: Record<string, unknown>, candidates: string[]) {
+  for (const key of candidates) {
+    const value = String(properties[key] || "").trim();
+    if (value) return value;
+  }
+  return "";
 }
 
 async function hsFetch(url: string, init?: RequestInit) {
@@ -239,6 +252,51 @@ export async function fetchDealStageIdToLabelMap() {
 
   writeCache(DEAL_STAGE_LABELS_CACHE, cacheKey, Array.from(out.entries()));
   return out;
+}
+
+export async function fetchWorkspaceIdsForDealStageLabel(
+  stageLabel = String(process.env.HUBSPOT_TRANSACTIONAL_STAGE_LABEL || "Closed Won (Transactional Pipeline)"),
+) {
+  const normalizedLabel = String(stageLabel || "").trim().toLowerCase();
+  if (!normalizedLabel) return new Set<string>();
+
+  const cached = readCache(DEAL_STAGE_WORKSPACE_IDS_CACHE, normalizedLabel);
+  if (cached) return new Set<string>(cached);
+
+  const stageIdToLabel = await fetchDealStageIdToLabelMap();
+  const matchingStageIds = Array.from(stageIdToLabel.entries())
+    .filter(([, label]) => String(label || "").trim().toLowerCase() === normalizedLabel)
+    .map(([stageId]) => stageId);
+
+  if (!matchingStageIds.length) {
+    writeCache(DEAL_STAGE_WORKSPACE_IDS_CACHE, normalizedLabel, []);
+    return new Set<string>();
+  }
+
+  const workspaceProp = String(process.env.DEAL_WORKSPACE_ID_PROP || "workspace_id").trim() || "workspace_id";
+  const workspacePropCandidates = Array.from(new Set([workspaceProp, "workspace_id", "workspaceId"]));
+  const workspaceIds = new Set<string>();
+
+  for (const stageId of matchingStageIds) {
+    let deals: HubspotDeal[] = [];
+    try {
+      deals = await fetchDealsInStage(workspacePropCandidates, stageId);
+    } catch (error) {
+      if (workspacePropCandidates.length <= 1 || workspacePropCandidates[0] === "workspace_id") {
+        throw error;
+      }
+      deals = await fetchDealsInStage(["workspace_id"], stageId);
+    }
+
+    for (const deal of deals || []) {
+      const properties = (deal.properties || {}) as Record<string, unknown>;
+      const workspaceId = normalizeWorkspaceId(firstNonEmptyProperty(properties, workspacePropCandidates));
+      if (workspaceId) workspaceIds.add(workspaceId);
+    }
+  }
+
+  writeCache(DEAL_STAGE_WORKSPACE_IDS_CACHE, normalizedLabel, Array.from(workspaceIds));
+  return workspaceIds;
 }
 
 export async function fetchLineItemIdsForDeal(dealId: string) {

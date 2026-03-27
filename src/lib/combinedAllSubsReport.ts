@@ -1,4 +1,4 @@
-import { fetchCompanyIdsForContactEmails } from "@/lib/hubspot";
+import { fetchCompanyIdsForContactEmails, fetchWorkspaceIdsForDealStageLabel } from "@/lib/hubspot";
 import { generateReport } from "@/lib/report";
 import {
   queryStripeThroughMrrCustomerArrFromBigQuery,
@@ -21,6 +21,7 @@ export type CombinedAllSubsRow = {
   customerLabel: string;
   accountId: string;
   accountName: string;
+  salesAssist: "yes" | "no";
   stripeKeys: string[];
   matchedStripeKeys: string[];
   hubspotValuesByPeriod: Record<string, number>;
@@ -53,6 +54,7 @@ type HubspotAccountAggregate = {
   companyIds: Set<string>;
   stripeKeys: Set<string>;
   matchedStripeKeys: Set<string>;
+  matchedStripeWorkspaceIds: Set<string>;
   hubspotValuesByPeriod: Record<string, number>;
   stripeValuesByPeriod: Record<string, number>;
   valuesByPeriod: Record<string, number>;
@@ -61,6 +63,7 @@ type HubspotAccountAggregate = {
 type StripeCustomerAggregate = {
   customerKey: string;
   matchingKeys: Set<string>;
+  workspaceIds: Set<string>;
   valuesByPeriod: Record<string, number>;
 };
 
@@ -126,6 +129,10 @@ function normalizeStripeKey(value: string) {
   return String(value || "").trim().toLowerCase();
 }
 
+function normalizeWorkspaceId(value: string) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function isCloudDeploymentType(value: string) {
   return String(value || "").trim().toLowerCase() === "cloud";
 }
@@ -163,6 +170,7 @@ function buildHubspotAccountMap(report: ReportResponse) {
         companyIds: new Set<string>(),
         stripeKeys: new Set<string>(),
         matchedStripeKeys: new Set<string>(),
+        matchedStripeWorkspaceIds: new Set<string>(),
         hubspotValuesByPeriod: {},
         stripeValuesByPeriod: {},
         valuesByPeriod: {},
@@ -226,12 +234,17 @@ function buildStripeCustomerMap(rows: StripeThroughMrrCustomerArrRow[]) {
       customers.set(key, {
         customerKey: key,
         matchingKeys: new Set<string>([key]),
+        workspaceIds: new Set<string>(),
         valuesByPeriod: {},
       });
     }
 
     const bucket = customers.get(key)!;
     aliasesToCustomerKey.set(key, key);
+    for (const workspaceId of row.workspaceIds || []) {
+      const normalizedWorkspaceId = normalizeWorkspaceId(workspaceId);
+      if (normalizedWorkspaceId) bucket.workspaceIds.add(normalizedWorkspaceId);
+    }
     const periodKey = String(row.periodKey || "").trim();
     if (!periodKey) continue;
     const arr = round2(Number(row.arr || 0));
@@ -262,6 +275,9 @@ function mergeStripeIntoHubspotAccounts(
       claimedStripeCustomerKeys.add(canonicalStripeKey);
       for (const matchingKey of stripeCustomer.matchingKeys) {
         account.matchedStripeKeys.add(matchingKey);
+      }
+      for (const workspaceId of stripeCustomer.workspaceIds) {
+        account.matchedStripeWorkspaceIds.add(workspaceId);
       }
 
       for (const period of periods) {
@@ -338,6 +354,18 @@ export async function generateCombinedAllSubsReport(
   const { periods, accounts, companyIdToAccountKey } = buildHubspotAccountMap(hubspotReport);
   const { customers: stripeCustomers, aliasesToCustomerKey } = buildStripeCustomerMap(stripeCustomerArr.rows || []);
   const warnings: string[] = [];
+  let transactionalWorkspaceIds = new Set<string>();
+  try {
+    transactionalWorkspaceIds = new Set(
+      Array.from(await fetchWorkspaceIdsForDealStageLabel())
+        .map((workspaceId) => normalizeWorkspaceId(workspaceId))
+        .filter(Boolean),
+    );
+  } catch (error: unknown) {
+    warnings.push(
+      `Sales-assist flag is temporarily unavailable. Cause: ${summarizeErrorMessage(error)}`,
+    );
+  }
   let effectiveCombineMode: CombinedAllSubsCombineMode = combineMode;
   let matchedStripeCustomerKeys = new Set<string>();
 
@@ -366,6 +394,12 @@ export async function generateCombinedAllSubsReport(
       customerLabel: customerLabel(account.accountName, account.accountId),
       accountId: account.accountId,
       accountName: account.accountName,
+      salesAssist:
+        Array.from(account.matchedStripeWorkspaceIds).some((workspaceId) =>
+          transactionalWorkspaceIds.has(normalizeWorkspaceId(workspaceId)),
+        )
+          ? "yes"
+          : "no",
       stripeKeys: Array.from(account.stripeKeys).sort(),
       matchedStripeKeys: Array.from(account.matchedStripeKeys).sort(),
       hubspotValuesByPeriod: account.hubspotValuesByPeriod,
@@ -388,6 +422,12 @@ export async function generateCombinedAllSubsReport(
       customerLabel: customerKey,
       accountId: "",
       accountName: "",
+      salesAssist:
+        Array.from(stripeCustomer.workspaceIds).some((workspaceId) =>
+          transactionalWorkspaceIds.has(normalizeWorkspaceId(workspaceId)),
+        )
+          ? "yes"
+          : "no",
       stripeKeys: Array.from(stripeCustomer.matchingKeys).sort(),
       matchedStripeKeys: [],
       hubspotValuesByPeriod: {},
