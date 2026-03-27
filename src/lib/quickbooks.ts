@@ -43,6 +43,7 @@ type QuickBooksSalesMarketingCostPoint = {
   totalCost: number;
   matchedAccounts: string[];
   accountCostsByAccountId?: Record<string, number>;
+  costByCurrency?: Record<string, number>;
 };
 
 type QuickBooksDepartment = {
@@ -909,9 +910,13 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
       totalCost: number;
       matchedAccounts: Set<string>;
       accountCostsByAccountId: Map<string, number>;
+      costByCurrency: Map<string, number>;
     }
   >();
   const matchedAccounts = new Set<string>();
+  const currencies = new Set<string>();
+  const realmCurrencyByRealmId = new Map<string, string>();
+  const accountCurrencyByAccountId = new Map<string, string>();
   let reportCurrency = "";
   let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
 
@@ -930,6 +935,7 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
         totalCost: 0,
         matchedAccounts: new Set<string>(),
         accountCostsByAccountId: new Map<string, number>(),
+        costByCurrency: new Map<string, number>(),
       });
     }
 
@@ -999,22 +1005,26 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
         connection,
         `/v3/company/${encodeURIComponent(realmId)}/reports/ProfitAndLoss?${qs.toString()}`,
       );
-      const realmCurrency = clean(
+      const rawRealmCurrency = clean(
         (
           reportPayload as {
             Header?: { Currency?: string };
           } | null
         )?.Header?.Currency,
       );
-      if (realmCurrency) {
-        if (!reportCurrency) {
-          reportCurrency = realmCurrency;
-        } else if (reportCurrency.toUpperCase() !== realmCurrency.toUpperCase()) {
-          throw new Error(
-            `QuickBooks companies have mixed currencies (${reportCurrency} and ${realmCurrency}). Use one currency for CAC aggregation.`,
-          );
-        }
+      if (rawRealmCurrency) {
+        realmCurrencyByRealmId.set(realmId, rawRealmCurrency.toUpperCase());
       }
+      const realmCurrency = (
+        realmCurrencyByRealmId.get(realmId) ||
+        rawRealmCurrency ||
+        reportCurrency ||
+        "USD"
+      ).toUpperCase();
+      if (!reportCurrency && realmCurrency) {
+        reportCurrency = realmCurrency;
+      }
+      currencies.add(realmCurrency);
 
       const parsed = parseSalesMarketingCostsFromProfitAndLoss(
         reportPayload,
@@ -1030,11 +1040,18 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
 
       const monthBucket = pointsByMonth.get(monthKey)!;
       monthBucket.totalCost = Math.round((monthBucket.totalCost + parsed.total) * 100) / 100;
+      monthBucket.costByCurrency.set(
+        realmCurrency,
+        Math.round(((monthBucket.costByCurrency.get(realmCurrency) || 0) + parsed.total) * 100) / 100,
+      );
       for (const accountName of parsed.matchedAccounts) {
         matchedAccounts.add(accountName);
         monthBucket.matchedAccounts.add(accountName);
       }
       for (const [accountId, amount] of Object.entries(parsed.accountCostsByAccountId || {})) {
+        if (!accountCurrencyByAccountId.has(accountId)) {
+          accountCurrencyByAccountId.set(accountId, realmCurrency);
+        }
         monthBucket.accountCostsByAccountId.set(
           accountId,
           Math.round(((monthBucket.accountCostsByAccountId.get(accountId) || 0) + Number(amount || 0)) * 100) / 100,
@@ -1055,6 +1072,7 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
       totalCost: Math.round(point.totalCost * 100) / 100,
       matchedAccounts: Array.from(point.matchedAccounts).sort(),
       accountCostsByAccountId: Object.fromEntries(point.accountCostsByAccountId.entries()),
+      costByCurrency: Object.fromEntries(point.costByCurrency.entries()),
     }));
 
   return {
@@ -1071,6 +1089,9 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
     keywords: keywordMatchers,
     accountingMethod,
     currency: reportCurrency || "USD",
+    currencies: Array.from(currencies).sort(),
+    realmCurrencyByRealmId: Object.fromEntries(realmCurrencyByRealmId.entries()),
+    accountCurrencyByAccountId: Object.fromEntries(accountCurrencyByAccountId.entries()),
     points,
     matchedAccounts: Array.from(matchedAccounts).sort(),
   };
