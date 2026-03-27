@@ -176,6 +176,8 @@ async function loadExpandedTofuSource(request: TofuRequest): Promise<{
     displayMode: "arr",
     includePlanData: normalizeTofuGroupBy(request.groupBy) === "plan",
     planGrain: "monthly",
+    groupedMatchStrategy: normalizeTofuGroupBy(request.groupBy) === "plan" ? "workspace_only" : "full",
+    includeSalesAssist: false,
   });
 
   const allPeriods = (expanded.periods || []).map((period) => ({

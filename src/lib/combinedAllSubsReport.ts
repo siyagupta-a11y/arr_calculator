@@ -16,6 +16,8 @@ export type CombinedAllSubsRequest = {
   displayMode?: CombinedAllSubsDisplayMode;
   planGrain?: CombinedAllSubsPlanGrain;
   includePlanData?: boolean;
+  groupedMatchStrategy?: "full" | "workspace_only";
+  includeSalesAssist?: boolean;
 };
 
 export type CombinedAllSubsCombineMode = "grouped" | "simple";
@@ -98,6 +100,10 @@ function normalizeDisplayMode(mode: string | undefined): CombinedAllSubsDisplayM
 
 function normalizePlanGrain(grain: string | undefined): CombinedAllSubsPlanGrain {
   return String(grain || "").trim().toLowerCase() === "daily" ? "daily" : "monthly";
+}
+
+function normalizeGroupedMatchStrategy(value: string | undefined): "full" | "workspace_only" {
+  return String(value || "").trim().toLowerCase() === "workspace_only" ? "workspace_only" : "full";
 }
 
 function round2(value: number) {
@@ -274,8 +280,11 @@ async function attachStripeKeysFromHubspotContacts(
   accounts: Map<string, HubspotAccountAggregate>,
   companyIdToAccountKey: Map<string, string>,
   stripeCustomers: Map<string, StripeCustomerAggregate>,
+  excludeCustomerKeys?: Set<string>,
 ) {
-  const candidateEmails = Array.from(stripeCustomers.keys()).filter((key) => key.includes("@"));
+  const candidateEmails = Array.from(stripeCustomers.keys()).filter(
+    (key) => key.includes("@") && !excludeCustomerKeys?.has(key),
+  );
   if (!candidateEmails.length) return;
 
   const companyEmails = await fetchCompanyIdsForContactEmails(candidateEmails);
@@ -357,8 +366,8 @@ function mergeStripeIntoHubspotAccounts(
   accounts: Map<string, HubspotAccountAggregate>,
   stripeCustomers: Map<string, StripeCustomerAggregate>,
   aliasesToCustomerKey: Map<string, string>,
+  claimedStripeCustomerKeys: Set<string> = new Set<string>(),
 ) {
-  const claimedStripeCustomerKeys = new Set<string>();
   const sortedAccounts = Array.from(accounts.values()).sort((a, b) => a.accountKey.localeCompare(b.accountKey));
 
   for (const account of sortedAccounts) {
@@ -389,6 +398,60 @@ function mergeStripeIntoHubspotAccounts(
           account.stripePlansByPeriod[period.key],
         );
       }
+    }
+  }
+
+  return claimedStripeCustomerKeys;
+}
+
+function mergeStripeIntoHubspotAccountsByWorkspace(
+  periods: Array<{ key: string; label: string }>,
+  accounts: Map<string, HubspotAccountAggregate>,
+  stripeCustomers: Map<string, StripeCustomerAggregate>,
+  claimedStripeCustomerKeys: Set<string> = new Set<string>(),
+) {
+  const workspaceIdToAccountKey = new Map<string, string>();
+  for (const account of accounts.values()) {
+    for (const companyId of account.companyIds) {
+      const normalizedCompanyId = normalizeWorkspaceId(companyId);
+      if (!normalizedCompanyId) continue;
+      if (!workspaceIdToAccountKey.has(normalizedCompanyId)) {
+        workspaceIdToAccountKey.set(normalizedCompanyId, account.accountKey);
+      }
+    }
+  }
+
+  const sortedStripeCustomers = Array.from(stripeCustomers.entries()).sort(([a], [b]) => a.localeCompare(b));
+  for (const [customerKey, stripeCustomer] of sortedStripeCustomers) {
+    if (claimedStripeCustomerKeys.has(customerKey)) continue;
+    const matchedAccountKeys = Array.from(
+      new Set(
+        Array.from(stripeCustomer.workspaceIds)
+          .map((workspaceId) => workspaceIdToAccountKey.get(normalizeWorkspaceId(workspaceId)))
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ).sort((a, b) => a.localeCompare(b));
+    if (!matchedAccountKeys.length) continue;
+    const account = accounts.get(matchedAccountKeys[0]);
+    if (!account) continue;
+
+    claimedStripeCustomerKeys.add(customerKey);
+    for (const matchingKey of stripeCustomer.matchingKeys) {
+      account.matchedStripeKeys.add(matchingKey);
+    }
+    for (const workspaceId of stripeCustomer.workspaceIds) {
+      account.matchedStripeWorkspaceIds.add(workspaceId);
+    }
+    for (const period of periods) {
+      const value = round2(Number(stripeCustomer.valuesByPeriod[period.key] || 0));
+      account.stripeValuesByPeriod[period.key] = round2((account.stripeValuesByPeriod[period.key] || 0) + value);
+      account.valuesByPeriod[period.key] = round2((account.valuesByPeriod[period.key] || 0) + value);
+      const stripePlan = stripeCustomer.plansByPeriod[period.key] || "free";
+      account.stripePlansByPeriod[period.key] = betterPlan(account.stripePlansByPeriod[period.key], stripePlan);
+      account.plansByPeriod[period.key] = betterPlan(
+        account.hubspotPlansByPeriod[period.key],
+        account.stripePlansByPeriod[period.key],
+      );
     }
   }
 
@@ -459,6 +522,8 @@ export async function generateCombinedAllSubsReport(
   const displayMode = normalizeDisplayMode(request.displayMode);
   const planGrain = normalizePlanGrain(request.planGrain);
   const includePlanData = Boolean(request.includePlanData);
+  const groupedMatchStrategy = normalizeGroupedMatchStrategy(request.groupedMatchStrategy);
+  const includeSalesAssist = request.includeSalesAssist !== false;
   const target = targetCurrency();
 
   const [hubspotReport, stripeCustomerArr, stripeCustomerPlan] = await Promise.all([
@@ -508,29 +573,45 @@ export async function generateCombinedAllSubsReport(
   );
   const warnings: string[] = [];
   let transactionalWorkspaceIds = new Set<string>();
-  try {
-    transactionalWorkspaceIds = new Set(
-      Array.from(await fetchWorkspaceIdsForDealStageLabel())
-        .map((workspaceId) => normalizeWorkspaceId(workspaceId))
-        .filter(Boolean),
-    );
-  } catch (error: unknown) {
-    warnings.push(
-      `Sales-assist flag is temporarily unavailable. Cause: ${summarizeErrorMessage(error)}`,
-    );
+  if (includeSalesAssist) {
+    try {
+      transactionalWorkspaceIds = new Set(
+        Array.from(await fetchWorkspaceIdsForDealStageLabel())
+          .map((workspaceId) => normalizeWorkspaceId(workspaceId))
+          .filter(Boolean),
+      );
+    } catch (error: unknown) {
+      warnings.push(
+        `Sales-assist flag is temporarily unavailable. Cause: ${summarizeErrorMessage(error)}`,
+      );
+    }
   }
   let effectiveCombineMode: CombinedAllSubsCombineMode = combineMode;
   let matchedStripeCustomerKeys = new Set<string>();
 
   if (combineMode === "grouped") {
     try {
-      await attachStripeKeysFromHubspotContacts(accounts, companyIdToAccountKey, stripeCustomers);
-      matchedStripeCustomerKeys = mergeStripeIntoHubspotAccounts(
+      matchedStripeCustomerKeys = mergeStripeIntoHubspotAccountsByWorkspace(
         periods,
         accounts,
         stripeCustomers,
-        aliasesToCustomerKey,
+        matchedStripeCustomerKeys,
       );
+      if (groupedMatchStrategy === "full") {
+        await attachStripeKeysFromHubspotContacts(
+          accounts,
+          companyIdToAccountKey,
+          stripeCustomers,
+          matchedStripeCustomerKeys,
+        );
+        matchedStripeCustomerKeys = mergeStripeIntoHubspotAccounts(
+          periods,
+          accounts,
+          stripeCustomers,
+          aliasesToCustomerKey,
+          matchedStripeCustomerKeys,
+        );
+      }
     } catch (error: unknown) {
       effectiveCombineMode = "simple";
       warnings.push(
