@@ -72,12 +72,30 @@ function normalizeWorkspaceId(value: string) {
   return String(value || "").trim();
 }
 
+function normalizeStageLabelKey(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
 function firstNonEmptyProperty(properties: Record<string, unknown>, candidates: string[]) {
   for (const key of candidates) {
     const value = String(properties[key] || "").trim();
     if (value) return value;
   }
   return "";
+}
+
+function isUnknownPropertyError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  const message = String(error.message || "").toLowerCase();
+  return (
+    message.includes("property") &&
+    (message.includes("does not exist") ||
+      message.includes("no property found") ||
+      message.includes("not a valid property"))
+  );
 }
 
 async function hsFetch(url: string, init?: RequestInit) {
@@ -257,7 +275,7 @@ export async function fetchDealStageIdToLabelMap() {
 export async function fetchWorkspaceIdsForDealStageLabel(
   stageLabel = String(process.env.HUBSPOT_TRANSACTIONAL_STAGE_LABEL || "Closed Won (Transactional Pipeline)"),
 ) {
-  const normalizedLabel = String(stageLabel || "").trim().toLowerCase();
+  const normalizedLabel = normalizeStageLabelKey(stageLabel);
   if (!normalizedLabel) return new Set<string>();
 
   const cached = readCache(DEAL_STAGE_WORKSPACE_IDS_CACHE, normalizedLabel);
@@ -265,7 +283,7 @@ export async function fetchWorkspaceIdsForDealStageLabel(
 
   const stageIdToLabel = await fetchDealStageIdToLabelMap();
   const matchingStageIds = Array.from(stageIdToLabel.entries())
-    .filter(([, label]) => String(label || "").trim().toLowerCase() === normalizedLabel)
+    .filter(([, label]) => normalizeStageLabelKey(label || "") === normalizedLabel)
     .map(([stageId]) => stageId);
 
   if (!matchingStageIds.length) {
@@ -274,18 +292,36 @@ export async function fetchWorkspaceIdsForDealStageLabel(
   }
 
   const workspaceProp = String(process.env.DEAL_WORKSPACE_ID_PROP || "workspace_id").trim() || "workspace_id";
-  const workspacePropCandidates = Array.from(new Set([workspaceProp, "workspace_id", "workspaceId"]));
+  const workspacePropCandidates = Array.from(
+    new Set(
+      [
+        workspaceProp,
+        workspaceProp.endsWith("__c") ? workspaceProp.slice(0, -3) : `${workspaceProp}__c`,
+        "workspace_id",
+        "workspace_id__c",
+      ]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
   const workspaceIds = new Set<string>();
 
   for (const stageId of matchingStageIds) {
     let deals: HubspotDeal[] = [];
-    try {
-      deals = await fetchDealsInStage(workspacePropCandidates, stageId);
-    } catch (error) {
-      if (workspacePropCandidates.length <= 1 || workspacePropCandidates[0] === "workspace_id") {
+    let fetched = false;
+    for (const workspaceField of workspacePropCandidates) {
+      try {
+        deals = await fetchDealsInStage([workspaceField], stageId);
+        fetched = true;
+        break;
+      } catch (error) {
+        if (isUnknownPropertyError(error)) continue;
         throw error;
       }
-      deals = await fetchDealsInStage(["workspace_id"], stageId);
+    }
+    if (!fetched) {
+      // No compatible workspace field exists in this HubSpot portal.
+      continue;
     }
 
     for (const deal of deals || []) {
