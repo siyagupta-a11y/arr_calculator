@@ -74,6 +74,7 @@ type QuickBooksSalesMarketingCostPoint = {
   totalCost: number;
   matchedAccounts: string[];
   accountCostsByAccountId?: Record<string, number>;
+  costByCurrency?: Record<string, number>;
 };
 
 type QuickBooksSalesMarketingCostResponse = {
@@ -87,6 +88,9 @@ type QuickBooksSalesMarketingCostResponse = {
   keywords: string[];
   accountingMethod: string;
   currency: string;
+  currencies?: string[];
+  realmCurrencyByRealmId?: Record<string, string>;
+  accountCurrencyByAccountId?: Record<string, string>;
   points: QuickBooksSalesMarketingCostPoint[];
   matchedAccounts: string[];
 };
@@ -448,46 +452,113 @@ function pickTargetCurrency() {
 async function convertQuickBooksSalesMarketingCostsWithFx(
   payload: QuickBooksSalesMarketingCostResponse,
   fxProvider: CacFxProvider,
+  explicitTargetCurrency?: string,
 ) {
-  const sourceCurrency = String(payload.currency || "").trim().toUpperCase();
-  const targetCurrency = String(FX_TARGET_CURRENCY || "USD").trim().toUpperCase();
+  const defaultSourceCurrency = String(payload.currency || "USD").trim().toUpperCase() || "USD";
+  const targetCurrency = String(explicitTargetCurrency || FX_TARGET_CURRENCY || "USD").trim().toUpperCase() || "USD";
   const monthlyRateForMonth =
     fxProvider === "currencylayer"
       ? getMonthlyAverageCurrencyLayerFxRateForCloseMonth
       : getMonthlyAverageFxRateForCloseMonth;
 
-  if (sourceCurrency && targetCurrency && sourceCurrency !== targetCurrency && payload.points?.length) {
-    const monthKeys = [
-      ...new Set(
-        payload.points
-          .map((point) => String(point.key || point.periodStart || "").slice(0, 7))
-          .filter(Boolean),
-      ),
-    ];
+  const points = Array.isArray(payload.points) ? payload.points : [];
+  if (!targetCurrency || !points.length) return payload;
 
-    const fxMap = new Map<string, number>();
-    await Promise.all(
-      monthKeys.map(async (monthKey) => {
-        const date = new Date(`${monthKey}-01T00:00:00Z`);
-        const fx = await monthlyRateForMonth(sourceCurrency, targetCurrency, date);
-        fxMap.set(monthKey, fx.rate);
-      }),
-    );
+  const accountCurrencyByAccountId = payload.accountCurrencyByAccountId || {};
+  const realmCurrencyByRealmId = payload.realmCurrencyByRealmId || {};
+  const conversionPairs = new Set<string>();
+  const sourceCurrencies = new Set<string>();
 
-    return {
-      ...payload,
-      currency: targetCurrency,
-      points: payload.points.map((point) => {
-        const monthKey = String(point.key || point.periodStart || "").slice(0, 7);
-        const rate = fxMap.get(monthKey) ?? 0;
-        const originalCost = Number(point.totalCost || 0);
-        const convertedCost = rate > 0 ? Math.round(originalCost * rate * 100) / 100 : originalCost;
-        return { ...point, totalCost: convertedCost };
-      }),
-    };
+  const monthKeyFromPoint = (point: { key?: string; periodStart?: string }) =>
+    String(point.key || point.periodStart || "").slice(0, 7);
+  const realmIdFromScopedAccountId = (value: string) => {
+    const text = String(value || "").trim();
+    const idx = text.indexOf(":");
+    if (idx <= 0) return "";
+    return text.slice(0, idx).trim();
+  };
+
+  for (const point of points) {
+    const monthKey = monthKeyFromPoint(point);
+    if (!monthKey) continue;
+    const pointCostByCurrency =
+      point.costByCurrency && Object.keys(point.costByCurrency).length > 0
+        ? point.costByCurrency
+        : { [defaultSourceCurrency]: Number(point.totalCost || 0) };
+    for (const sourceCurrencyRaw of Object.keys(pointCostByCurrency)) {
+      const sourceCurrency = String(sourceCurrencyRaw || "").trim().toUpperCase() || defaultSourceCurrency;
+      if (!sourceCurrency) continue;
+      sourceCurrencies.add(sourceCurrency);
+      if (sourceCurrency !== targetCurrency) {
+        conversionPairs.add(`${sourceCurrency}|${targetCurrency}|${monthKey}`);
+      }
+    }
+    for (const accountId of Object.keys(point.accountCostsByAccountId || {})) {
+      const sourceCurrency = (
+        String(accountCurrencyByAccountId[accountId] || "").trim().toUpperCase() ||
+        String(realmCurrencyByRealmId[realmIdFromScopedAccountId(accountId)] || "").trim().toUpperCase() ||
+        defaultSourceCurrency
+      );
+      sourceCurrencies.add(sourceCurrency);
+      if (sourceCurrency !== targetCurrency) {
+        conversionPairs.add(`${sourceCurrency}|${targetCurrency}|${monthKey}`);
+      }
+    }
   }
 
-  return payload;
+  const fxMap = new Map<string, number>();
+  await Promise.all(
+    Array.from(conversionPairs).map(async (pairKey) => {
+      const [sourceCurrency, targetCurrencyForPair, monthKey] = pairKey.split("|");
+      const date = new Date(`${monthKey}-01T00:00:00Z`);
+      const fx = await monthlyRateForMonth(sourceCurrency, targetCurrencyForPair, date);
+      fxMap.set(pairKey, fx.rate);
+    }),
+  );
+
+  const convertAmount = (amount: number, sourceCurrencyRaw: string, monthKey: string) => {
+    const sourceCurrency = String(sourceCurrencyRaw || "").trim().toUpperCase() || defaultSourceCurrency;
+    const rawAmount = Number(amount || 0);
+    if (!sourceCurrency || sourceCurrency === targetCurrency) return round2(rawAmount);
+    const rate = fxMap.get(`${sourceCurrency}|${targetCurrency}|${monthKey}`) || 0;
+    if (rate <= 0) return round2(rawAmount);
+    return round2(rawAmount * rate);
+  };
+
+  const convertedPoints = points.map((point) => {
+    const monthKey = monthKeyFromPoint(point);
+    const pointCostByCurrency =
+      point.costByCurrency && Object.keys(point.costByCurrency).length > 0
+        ? point.costByCurrency
+        : { [defaultSourceCurrency]: Number(point.totalCost || 0) };
+    let convertedTotalCost = 0;
+    for (const [sourceCurrency, amount] of Object.entries(pointCostByCurrency)) {
+      convertedTotalCost = round2(convertedTotalCost + convertAmount(Number(amount || 0), sourceCurrency, monthKey));
+    }
+
+    const convertedAccountCostsByAccountId: Record<string, number> = {};
+    for (const [accountId, amountRaw] of Object.entries(point.accountCostsByAccountId || {})) {
+      const sourceCurrency = (
+        String(accountCurrencyByAccountId[accountId] || "").trim().toUpperCase() ||
+        String(realmCurrencyByRealmId[realmIdFromScopedAccountId(accountId)] || "").trim().toUpperCase() ||
+        defaultSourceCurrency
+      );
+      convertedAccountCostsByAccountId[accountId] = convertAmount(Number(amountRaw || 0), sourceCurrency, monthKey);
+    }
+
+    return {
+      ...point,
+      totalCost: round2(convertedTotalCost),
+      accountCostsByAccountId: convertedAccountCostsByAccountId,
+    };
+  });
+
+  return {
+    ...payload,
+    currency: targetCurrency,
+    currencies: Array.from(sourceCurrencies).sort(),
+    points: convertedPoints,
+  };
 }
 
 function conciseErrorMessage(error: unknown, fallback: string) {
@@ -825,7 +896,7 @@ async function buildCombinedBillingOverview(
     cacCurrencyLayerNotice =
       "Currencylayer CAC currently supports monthly grain. Switch Time grain to Monthly to load CAC over time.";
     cacCadNotice =
-      "CAC (CAD, no FX) currently supports monthly grain. Switch Time grain to Monthly to load CAC over time.";
+      "CAC (CAD) currently supports monthly grain. Switch Time grain to Monthly to load CAC over time.";
     cacPoints = emptyCacSeries;
     cacCurrencyLayerPoints = emptyCacSeries;
     cacCadPoints = emptyCacSeries;
@@ -859,6 +930,9 @@ async function buildCombinedBillingOverview(
         convertQuickBooksSalesMarketingCostsWithFx(cadRawCosts, "frankfurter"),
         convertQuickBooksSalesMarketingCostsWithFx(cadRawCosts, "currencylayer"),
       ]);
+      const cadFxResult = await Promise.allSettled([
+        convertQuickBooksSalesMarketingCostsWithFx(cadRawCosts, "frankfurter", "CAD"),
+      ]);
 
       if (frankfurterResult.status === "fulfilled") {
         const frankfurterCosts = frankfurterResult.value as QuickBooksSalesMarketingCostResponse;
@@ -867,6 +941,7 @@ async function buildCombinedBillingOverview(
           grain,
           buildCostByMonth(frankfurterCosts.points || []),
           combinedNewCustomerCountByPeriod,
+          buildCostByMonthByAccount(frankfurterCosts.points || []),
         );
         cacNotice = buildCacAccountMatchNotice(frankfurterCosts, accountIds);
       } else {
@@ -884,6 +959,7 @@ async function buildCombinedBillingOverview(
           grain,
           buildCostByMonth(currencyLayerCosts.points || []),
           combinedNewCustomerCountByPeriod,
+          buildCostByMonthByAccount(currencyLayerCosts.points || []),
         );
         const accountMatchNotice = buildCacAccountMatchNotice(currencyLayerCosts, accountIds);
         cacCurrencyLayerNotice = accountMatchNotice ? `Currencylayer CAC: ${accountMatchNotice}` : null;
@@ -895,16 +971,25 @@ async function buildCombinedBillingOverview(
         cacCurrencyLayerPoints = emptyCacSeries;
       }
 
-      cacCadCurrency = String(cadRawCosts.currency || "CAD").trim().toUpperCase() || "CAD";
-      cacCadPoints = buildCacSeries(
-        periodOrder,
-        grain,
-        buildCostByMonth(cadRawCosts.points || []),
-        combinedNewCustomerCountByPeriod,
-        buildCostByMonthByAccount(cadRawCosts.points || []),
-      );
-      const accountMatchNotice = buildCacAccountMatchNotice(cadRawCosts, accountIds);
-      cacCadNotice = accountMatchNotice ? `CAD CAC: ${accountMatchNotice}` : null;
+      if (cadFxResult[0]?.status === "fulfilled") {
+        const cadCosts = cadFxResult[0].value as QuickBooksSalesMarketingCostResponse;
+        cacCadCurrency = "CAD";
+        cacCadPoints = buildCacSeries(
+          periodOrder,
+          grain,
+          buildCostByMonth(cadCosts.points || []),
+          combinedNewCustomerCountByPeriod,
+          buildCostByMonthByAccount(cadCosts.points || []),
+        );
+        const accountMatchNotice = buildCacAccountMatchNotice(cadCosts, accountIds);
+        cacCadNotice = accountMatchNotice ? `CAD CAC: ${accountMatchNotice}` : null;
+      } else {
+        cacCadNotice = `CAD CAC unavailable: ${conciseErrorMessage(
+          cadFxResult[0]?.reason,
+          "FX conversion failed.",
+        )}`;
+        cacCadPoints = emptyCacSeries;
+      }
     }
   }
 

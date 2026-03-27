@@ -2292,12 +2292,12 @@ export default function CombinedBillingOverviewPage() {
             <CacChartCard
               points={cacCadPoints}
               currency={data.cacCadCurrency}
-              title="CAC Over Time (CAD Raw, No FX)"
-              subtitle="CAC = Sales & Marketing Cost / Total Users. Uses raw QuickBooks S&M costs in CAD with no currency conversion."
+              title="CAC Over Time (CAD FX)"
+              subtitle="CAC = Sales & Marketing Cost / Total Users. Uses monthly average FX conversion to CAD."
               accentColor="#22c55e"
-              downloadFilename="combined-billing-overview-cac-over-time-cad-no-fx"
-              tableTitle="CAC Table (CAD Raw, No FX)"
-              tableAriaLabel="CAC table using CAD raw costs with no FX conversion"
+              downloadFilename="combined-billing-overview-cac-over-time-cad-fx"
+              tableTitle="CAC Table (CAD FX)"
+              tableAriaLabel="CAC table using monthly FX conversion to CAD"
               includeAccountBreakdownInCsv={true}
               showAccountSelector={false}
               expenseAccounts={cacExpenseAccounts}
