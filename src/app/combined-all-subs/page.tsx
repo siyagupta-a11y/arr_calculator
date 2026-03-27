@@ -618,19 +618,6 @@ export default function CombinedAllSubsPage() {
                     <th>Source</th>
                     <th>Sales assist</th>
                     <th>Matched Stripe Emails</th>
-                    {effectiveDisplayMode === "arr" ? (
-                      <>
-                        <th className="stripe-ui__num">HubSpot ({lastKey || "latest"})</th>
-                        <th className="stripe-ui__num">Stripe ({lastKey || "latest"})</th>
-                        <th className="stripe-ui__num">Combined ({lastKey || "latest"})</th>
-                      </>
-                    ) : (
-                      <>
-                        <th>HubSpot ({lastKey || "latest"})</th>
-                        <th>Stripe ({lastKey || "latest"})</th>
-                        <th>Combined ({lastKey || "latest"})</th>
-                      </>
-                    )}
                     {data?.periods.map((period) => (
                       <th key={period.key} className={effectiveDisplayMode === "arr" ? "stripe-ui__num" : ""}>
                         {period.label}
@@ -640,10 +627,6 @@ export default function CombinedAllSubsPage() {
                 </thead>
                 <tbody>
                   {data?.rows.map((row) => {
-                    const latestHubspot = Number(row.hubspotValuesByPeriod[lastKey] || 0);
-                    const latestStripe = Number(row.stripeValuesByPeriod[lastKey] || 0);
-                    const latestCombined = Number(row.valuesByPeriod[lastKey] || 0);
-
                     return (
                       <tr key={row.id}>
                         <td>{row.customerLabel}</td>
@@ -658,9 +641,6 @@ export default function CombinedAllSubsPage() {
                         </td>
                         {effectiveDisplayMode === "arr" ? (
                           <>
-                            <td className="stripe-ui__num">{formatMoney(latestHubspot, currency)}</td>
-                            <td className="stripe-ui__num">{formatMoney(latestStripe, currency)}</td>
-                            <td className="stripe-ui__num">{formatMoney(latestCombined, currency)}</td>
                             {data?.periods.map((period) => (
                               <td key={`${row.id}:${period.key}`} className="stripe-ui__num">
                                 {formatMoney(Number(row.valuesByPeriod[period.key] || 0), currency)}
@@ -684,7 +664,7 @@ export default function CombinedAllSubsPage() {
                     {effectiveDisplayMode === "arr" ? (
                       <>
                         <td style={{ fontWeight: 700 }}>Totals</td>
-                        <td colSpan={6} />
+                        <td colSpan={3} />
                         {data?.periods.map((period) => (
                           <td key={`totals:${period.key}`} className="stripe-ui__num" style={{ fontWeight: 700 }}>
                             {formatMoney(
@@ -697,7 +677,7 @@ export default function CombinedAllSubsPage() {
                     ) : (
                       <>
                         <td style={{ fontWeight: 700 }}>Paid customer count</td>
-                        <td colSpan={6} />
+                        <td colSpan={3} />
                         {data?.periods.map((period) => (
                           <td key={`totals:${period.key}`} style={{ fontWeight: 700 }}>
                             {Number(data?.totalsByPeriod.find((total) => total.key === period.key)?.total || 0)}

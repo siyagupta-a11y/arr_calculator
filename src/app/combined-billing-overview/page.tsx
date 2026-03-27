@@ -74,6 +74,7 @@ type QuickBooksSalesMarketingCostPoint = {
   periodEnd: string;
   totalCost: number;
   matchedAccounts: string[];
+  accountCostsByAccountId?: Record<string, number>;
 };
 
 type QuickBooksSalesMarketingCostResponse = {
@@ -119,6 +120,7 @@ type CacPoint = {
   salesMarketingCost: number;
   newCustomerCount: number;
   cac: number;
+  accountCostsByAccountId?: Record<string, number>;
 };
 
 type CombinedLiveArrResponse = {
@@ -463,11 +465,30 @@ function buildCostByMonth(points: QuickBooksSalesMarketingCostPoint[]) {
   return byMonth;
 }
 
+function buildCostByMonthByAccount(points: QuickBooksSalesMarketingCostPoint[]) {
+  const byMonthByAccount = new Map<string, Map<string, number>>();
+  for (const point of points || []) {
+    const monthKey = String(point.key || point.periodStart || "").trim().slice(0, 7);
+    if (!monthKey) continue;
+    if (!byMonthByAccount.has(monthKey)) byMonthByAccount.set(monthKey, new Map<string, number>());
+    const monthMap = byMonthByAccount.get(monthKey)!;
+    for (const [accountIdRaw, costRaw] of Object.entries(point.accountCostsByAccountId || {})) {
+      const accountId = normalizeEntityId(String(accountIdRaw || ""));
+      if (!accountId) continue;
+      const cost = Number(costRaw || 0);
+      if (!Number.isFinite(cost)) continue;
+      monthMap.set(accountId, round2((monthMap.get(accountId) || 0) + cost));
+    }
+  }
+  return byMonthByAccount;
+}
+
 function buildCacSeries(
   periodOrder: PeriodRef[],
   grain: CombinedGrain,
   costByMonth: Map<string, number>,
   newCustomerCountByPeriod: Map<string, number>,
+  costByMonthByAccount?: Map<string, Map<string, number>>,
 ): CacPoint[] {
   return periodOrder.map((period) => {
     const key = canonicalHubPeriodKey(period.key, grain) || period.key;
@@ -483,6 +504,10 @@ function buildCacSeries(
       salesMarketingCost,
       newCustomerCount,
       cac,
+      accountCostsByAccountId:
+        costByMonthByAccount && costByMonthByAccount.has(key)
+          ? Object.fromEntries(costByMonthByAccount.get(key)!.entries())
+          : {},
     };
   });
 }
@@ -866,13 +891,32 @@ function CacChartCard({
 
   const exportTableCsv = () => {
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    const selectedAccountsForCsv = selectedAccountIds
+      .map((id) => normalizeEntityId(String(id || "")))
+      .filter(Boolean)
+      .map((id) => {
+        const match = expenseAccounts.find((account) => normalizeEntityId(String(account.id || "")) === id);
+        return {
+          id,
+          label: String(match?.fullyQualifiedName || match?.name || id).trim() || id,
+        };
+      });
     const rows: Array<Array<string | number>> = [
-      ["Period", "CAC", "Sales & Marketing Cost", "Total Users"],
+      [
+        "Period",
+        "CAC",
+        "Sales & Marketing Cost",
+        "Total Users",
+        ...selectedAccountsForCsv.map((account) => `Expense: ${account.label}`),
+      ],
       ...points.map((point) => [
         point.label,
         round2(point.cac),
         round2(point.salesMarketingCost),
         Math.max(0, Math.round(point.newCustomerCount || 0)),
+        ...selectedAccountsForCsv.map((account) =>
+          round2(Number(point.accountCostsByAccountId?.[account.id] || 0)),
+        ),
       ]),
     ];
     downloadCsv(`combined-cac-over-time-${stamp}.csv`, rows);
@@ -2464,6 +2508,7 @@ export default function CombinedBillingOverviewPage() {
             grain,
             buildCostByMonth(frankfurterCosts.points || []),
             combinedNewCustomerCountByPeriod,
+            buildCostByMonthByAccount(frankfurterCosts.points || []),
           );
           nextCacNotice = buildCacAccountMatchNotice(frankfurterCosts, normalizedSelectedCacAccountIds);
         } else {
@@ -2481,6 +2526,7 @@ export default function CombinedBillingOverviewPage() {
             grain,
             buildCostByMonth(currencyLayerCosts.points || []),
             combinedNewCustomerCountByPeriod,
+            buildCostByMonthByAccount(currencyLayerCosts.points || []),
           );
           const accountMatchNotice = buildCacAccountMatchNotice(currencyLayerCosts, normalizedSelectedCacAccountIds);
           nextCacCurrencyLayerNotice = accountMatchNotice ? `Currencylayer CAC: ${accountMatchNotice}` : null;
