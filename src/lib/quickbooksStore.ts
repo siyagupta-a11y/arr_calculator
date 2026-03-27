@@ -18,6 +18,11 @@ export type QuickBooksConnection = {
   updatedAt: number;
 };
 
+type QuickBooksConnectionStoreV2 = {
+  version: 2;
+  connections: QuickBooksConnection[];
+};
+
 const STORE_BLOB_PATH = process.env.QUICKBOOKS_TOKEN_BLOB_PATH || "arr/quickbooks/tokens-v1.json";
 const STORE_PATH = process.env.QUICKBOOKS_TOKEN_STORE_PATH || "/tmp/arr-quickbooks-tokens-v1.json";
 const ENCRYPTION_ALGO = "aes-256-gcm";
@@ -85,6 +90,36 @@ function decodeConnection(value: unknown): QuickBooksConnection | null {
   return parsed as QuickBooksConnection;
 }
 
+function normalizeConnections(connections: QuickBooksConnection[]) {
+  const byRealm = new Map<string, QuickBooksConnection>();
+  for (const connection of connections) {
+    const normalized = decodeConnection(connection);
+    if (!normalized) continue;
+    const realmId = String(normalized.realmId || "").trim();
+    if (!realmId) continue;
+    const existing = byRealm.get(realmId);
+    if (!existing || Number(normalized.updatedAt || 0) >= Number(existing.updatedAt || 0)) {
+      byRealm.set(realmId, { ...normalized, realmId });
+    }
+  }
+  return Array.from(byRealm.values()).sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+}
+
+function decodeConnections(value: unknown): QuickBooksConnection[] {
+  if (value == null) return [];
+  if (Array.isArray(value)) {
+    return normalizeConnections(value as QuickBooksConnection[]);
+  }
+  if (typeof value === "object") {
+    const candidate = value as Partial<QuickBooksConnectionStoreV2> & Partial<QuickBooksConnection>;
+    if (candidate.version === 2 && Array.isArray(candidate.connections)) {
+      return normalizeConnections(candidate.connections as QuickBooksConnection[]);
+    }
+  }
+  const single = decodeConnection(value);
+  return single ? [single] : [];
+}
+
 function decryptEnvelope(envelope: EncryptedConnectionEnvelope) {
   const key = deriveEncryptionKey();
   if (!key) return null;
@@ -105,8 +140,12 @@ function decryptEnvelope(envelope: EncryptedConnectionEnvelope) {
   }
 }
 
-function encodeConnection(connection: QuickBooksConnection | null, requireEncryption: boolean) {
-  const plaintext = JSON.stringify(connection);
+function encodeConnections(connections: QuickBooksConnection[], requireEncryption: boolean) {
+  const payload: QuickBooksConnectionStoreV2 = {
+    version: 2,
+    connections: normalizeConnections(connections),
+  };
+  const plaintext = JSON.stringify(payload);
   const key = deriveEncryptionKey();
   if (!key) {
     if (requireEncryption) {
@@ -131,48 +170,48 @@ function encodeConnection(connection: QuickBooksConnection | null, requireEncryp
   return JSON.stringify(envelope);
 }
 
-function parseConnection(raw: string): QuickBooksConnection | null {
+function parseConnections(raw: string): QuickBooksConnection[] {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (parsed === null) return null;
+    if (parsed === null) return [];
     if (isEncryptedEnvelope(parsed)) {
       const decrypted = decryptEnvelope(parsed);
-      return decodeConnection(decrypted);
+      return decodeConnections(decrypted);
     }
-    return decodeConnection(parsed);
+    return decodeConnections(parsed);
   } catch {
-    return null;
+    return [];
   }
 }
 
 async function loadConnectionFromBlob() {
   try {
     const token = blobReadWriteToken();
-    if (!token) return null;
+    if (!token) return [];
     const meta = await head(STORE_BLOB_PATH, { token });
-    if (!meta?.url) return null;
+    if (!meta?.url) return [];
 
     const res = await fetch(meta.url, {
       cache: "no-store",
       headers: blobFetchHeaders(),
     });
-    if (!res.ok) return null;
+    if (!res.ok) return [];
     const text = await res.text();
-    return parseConnection(text);
+    return parseConnections(text);
   } catch (error: unknown) {
-    if (error instanceof BlobNotFoundError) return null;
+    if (error instanceof BlobNotFoundError) return [];
     const message = error instanceof Error ? error.message.toLowerCase() : "";
     if (message.includes("not found") || message.includes("404")) {
-      return null;
+      return [];
     }
     throw error;
   }
 }
 
-async function saveConnectionToBlob(connection: QuickBooksConnection | null) {
+async function saveConnectionToBlob(connections: QuickBooksConnection[]) {
   const token = blobReadWriteToken();
   if (!token) throw new Error("Missing blob read/write token");
-  await put(STORE_BLOB_PATH, encodeConnection(connection, true), {
+  await put(STORE_BLOB_PATH, encodeConnections(connections, true), {
     token,
     access: blobAccessMode(),
     allowOverwrite: true,
@@ -184,16 +223,16 @@ async function saveConnectionToBlob(connection: QuickBooksConnection | null) {
 async function loadConnectionFromLocalFile() {
   try {
     const raw = await fs.readFile(STORE_PATH, "utf8");
-    return parseConnection(raw);
+    return parseConnections(raw);
   } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
     throw error;
   }
 }
 
-async function saveConnectionToLocalFile(connection: QuickBooksConnection | null) {
+async function saveConnectionToLocalFile(connections: QuickBooksConnection[]) {
   await fs.mkdir(path.dirname(STORE_PATH), { recursive: true });
-  await fs.writeFile(STORE_PATH, encodeConnection(connection, false), "utf8");
+  await fs.writeFile(STORE_PATH, encodeConnections(connections, false), "utf8");
 }
 
 export function quickBooksStorageKind(): QuickBooksStorageKind {
@@ -204,25 +243,38 @@ export async function loadQuickBooksConnection(): Promise<{
   connection: QuickBooksConnection | null;
   storage: QuickBooksStorageKind;
 }> {
+  const loaded = await loadQuickBooksConnections();
+  return {
+    connection: loaded.connections[0] || null,
+    storage: loaded.storage,
+  };
+}
+
+export async function loadQuickBooksConnections(): Promise<{
+  connections: QuickBooksConnection[];
+  storage: QuickBooksStorageKind;
+}> {
   if (canUseBlobStorage()) {
-    const connection = await loadConnectionFromBlob();
-    return { connection, storage: "vercel_blob" };
+    const connections = await loadConnectionFromBlob();
+    return { connections, storage: "vercel_blob" };
   }
-  const connection = await loadConnectionFromLocalFile();
-  return { connection, storage: "local_tmp" };
+  const connections = await loadConnectionFromLocalFile();
+  return { connections, storage: "local_tmp" };
 }
 
 export async function saveQuickBooksConnection(connection: QuickBooksConnection) {
+  const loaded = await loadQuickBooksConnections();
+  const nextConnections = normalizeConnections([connection, ...(loaded.connections || [])]);
   if (canUseBlobStorage()) {
-    await saveConnectionToBlob(connection);
+    await saveConnectionToBlob(nextConnections);
     return;
   }
-  await saveConnectionToLocalFile(connection);
+  await saveConnectionToLocalFile(nextConnections);
 }
 
 export async function clearQuickBooksConnection() {
   if (canUseBlobStorage()) {
-    await saveConnectionToBlob(null);
+    await saveConnectionToBlob([]);
     return;
   }
   try {
