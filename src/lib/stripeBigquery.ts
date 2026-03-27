@@ -188,6 +188,34 @@ export type StripeThroughMrrCustomerArrResult = {
   rows: StripeThroughMrrCustomerArrRow[];
 };
 
+export type StripeThroughMrrCustomerPlan = "enterprise" | "managed" | "team" | "plus" | "pay_as_you_go" | "free";
+
+export type StripeThroughMrrCustomerPlanRow = {
+  customerKey: string;
+  customerIds: string[];
+  workspaceIds: string[];
+  periodKey: string;
+  periodLabel: string;
+  periodStart: string;
+  periodEnd: string;
+  plan: StripeThroughMrrCustomerPlan;
+};
+
+export type StripeThroughMrrCustomerPlanRequest = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+  grain?: "daily" | "monthly";
+};
+
+export type StripeThroughMrrCustomerPlanResult = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+  grain: "daily" | "monthly";
+  rows: StripeThroughMrrCustomerPlanRow[];
+};
+
 export type StripeBillingOverviewGrain = "daily" | "weekly" | "monthly" | "quarterly";
 export type StripeBillingOverviewGroupBy =
   | "none"
@@ -2035,6 +2063,11 @@ function normalizeStripeThroughMrrGrain(grain: string | undefined): StripeThroug
   return candidate === "daily" ? "daily" : "monthly";
 }
 
+function normalizeStripeThroughMrrCustomerPlanGrain(grain: string | undefined): "daily" | "monthly" {
+  const candidate = String(grain || "").trim().toLowerCase();
+  return candidate === "daily" ? "daily" : "monthly";
+}
+
 function normalizeStripeBillingOverviewGrain(grain: string | undefined): StripeBillingOverviewGrain {
   const candidate = String(grain || "").trim().toLowerCase();
   if (candidate === "daily") return "daily";
@@ -3358,6 +3391,334 @@ ORDER BY sr.customer_key ASC, sr.bucket_start ASC
       periodStart: asString(row.period_start),
       periodEnd: asString(row.period_end),
       arr: asNumber(row.arr),
+    })),
+  };
+}
+
+export async function queryStripeThroughMrrCustomerPlanFromBigQuery(
+  request: StripeThroughMrrCustomerPlanRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeThroughMrrCustomerPlanResult> {
+  const startDate = parseIsoDateUtc(request.startDate);
+  const endDate = parseIsoDateUtc(request.endDate);
+  if (!startDate || !endDate) {
+    throw new Error("Invalid startDate/endDate");
+  }
+  if (endDate.getTime() < startDate.getTime()) {
+    throw new Error("endDate must be >= startDate");
+  }
+
+  const startDateIso = startDate.toISOString().slice(0, 10);
+  const endDateIso = endDate.toISOString().slice(0, 10);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const grain = normalizeStripeThroughMrrCustomerPlanGrain(request.grain);
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const table = getStripeArrCorrectMrrChangeTable();
+  const productsTable = getStripeProductsTable(profile);
+  const customersTable = getStripeCustomersTable();
+  const customersMetadataTable = getStripeCustomersMetadataTable(profile);
+
+  const query = `
+WITH bounds AS (
+  SELECT
+    DATE(@start_date) AS requested_start_date,
+    DATE(@end_date) AS requested_end_date,
+    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS requested_end_exclusive_date
+),
+bucket_candidates AS (
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 DAY) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.requested_start_date, b.requested_end_date, INTERVAL 1 DAY)) AS d
+  WHERE @grain = 'daily'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 MONTH) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.requested_start_date, MONTH),
+      DATE_TRUNC(b.requested_end_date, MONTH),
+      INTERVAL 1 MONTH
+    )
+  ) AS d
+  WHERE @grain = 'monthly'
+),
+buckets AS (
+  SELECT
+    bc.bucket_start,
+    GREATEST(bc.bucket_start, b.requested_start_date) AS effective_start,
+    LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date) AS effective_end_exclusive
+  FROM bucket_candidates bc
+  CROSS JOIN bounds b
+  WHERE GREATEST(bc.bucket_start, b.requested_start_date) < LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date)
+),
+products_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id,
+    COALESCE(NULLIF(TRIM(CAST(name AS STRING)), ''), '') AS product_name,
+    COALESCE(NULLIF(TRIM(CAST(description AS STRING)), ''), '') AS product_description
+  FROM \`${productsTable}\`
+),
+customers_workspace_lookup AS (
+  SELECT
+    customer_id,
+    workspace_id
+  FROM (
+    SELECT
+      COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+      NULLIF(TRIM(CAST(m.value AS STRING)), '') AS workspace_id,
+      COALESCE(NULLIF(TRIM(CAST(m.batch_timestamp AS STRING)), ''), '') AS batch_timestamp_value,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)')
+        ORDER BY
+          COALESCE(NULLIF(TRIM(CAST(m.batch_timestamp AS STRING)), ''), '') DESC,
+          NULLIF(TRIM(CAST(m.value AS STRING)), '') DESC
+      ) AS rn
+    FROM \`${customersMetadataTable}\` m
+    WHERE LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
+  )
+  WHERE rn = 1
+),
+customers_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') AS customer_id,
+    LOWER(COALESCE(NULLIF(TRIM(CAST(c.email AS STRING)), ''), '')) AS customer_email,
+    COALESCE(NULLIF(TRIM(cwl.workspace_id), ''), '') AS customer_workspace_id
+  FROM \`${customersTable}\` c
+  LEFT JOIN customers_workspace_lookup cwl
+    ON cwl.customer_id = COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)')
+),
+events_source AS (
+  SELECT
+    t.event_timestamp,
+    TO_JSON_STRING(t) AS raw_json,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+    AND t.event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+),
+events_base AS (
+  SELECT
+    es.event_timestamp,
+    es.customer_id,
+    LOWER(COALESCE(NULLIF(TRIM(cl.customer_email), ''), NULLIF(TRIM(es.customer_id), ''), '(blank)')) AS customer_key,
+    COALESCE(
+      NULLIF(TRIM(cl.customer_workspace_id), ''),
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.workspace.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.metadata.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.metadata.workspaceId')), ''),
+      ''
+    ) AS workspace_id,
+    es.mrr_change_major,
+    CASE
+      WHEN REGEXP_CONTAINS(plan_hints, r'enterprise') THEN 5
+      WHEN REGEXP_CONTAINS(plan_hints, r'managed') THEN 4
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])team([^a-z]|$)') THEN 3
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])plus([^a-z]|$)') THEN 2
+      WHEN REGEXP_CONTAINS(plan_hints, r'pay\\s*as\\s*you\\s*go|payg|metered|usage|token') THEN 1
+      ELSE 0
+    END AS plan_rank
+  FROM (
+    SELECT
+      es.*,
+      COALESCE(
+        NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product_id')), ''),
+        NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product.id')), ''),
+        NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product')), ''),
+        '(blank)'
+      ) AS product_id_norm,
+      LOWER(
+        CONCAT(
+          ' ',
+          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.plan_id')), ''), ''),
+          ' ',
+          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.plan.id')), ''), ''),
+          ' ',
+          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.plan')), ''), ''),
+          ' ',
+          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price_id')), ''), ''),
+          ' ',
+          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price.id')), ''), ''),
+          ' ',
+          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price')), ''), ''),
+          ' ',
+          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product_id')), ''), ''),
+          ' ',
+          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product.id')), ''), ''),
+          ' ',
+          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product')), ''), ''),
+          ' '
+        )
+      ) AS raw_plan_hints
+    FROM events_source es
+  ) es
+  LEFT JOIN customers_lookup cl
+    ON cl.customer_id = es.customer_id
+  LEFT JOIN products_lookup pl
+    ON pl.product_id = es.product_id_norm
+  CROSS JOIN (
+    SELECT 1
+  ) _
+  CROSS JOIN UNNEST([
+    LOWER(
+      CONCAT(
+        es.raw_plan_hints,
+        COALESCE(CONCAT(' ', NULLIF(TRIM(pl.product_name), '')), ''),
+        COALESCE(CONCAT(' ', NULLIF(TRIM(pl.product_description), '')), ''),
+        ' '
+      )
+    )
+  ]) AS plan_hints
+),
+customer_ids_by_key AS (
+  SELECT
+    customer_key,
+    ARRAY_AGG(DISTINCT customer_id IGNORE NULLS ORDER BY customer_id ASC) AS customer_ids,
+    ARRAY_AGG(
+      DISTINCT IF(workspace_id = '', NULL, workspace_id)
+      IGNORE NULLS
+      ORDER BY IF(workspace_id = '', NULL, workspace_id) ASC
+    ) AS workspace_ids
+  FROM events_base
+  WHERE customer_id <> '(blank)'
+  GROUP BY customer_key
+),
+start_mrr_by_customer_plan AS (
+  SELECT
+    e.customer_key,
+    e.plan_rank,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS start_mrr
+  FROM events_base e
+  CROSS JOIN bounds b
+  WHERE e.event_timestamp < TIMESTAMP(b.requested_start_date)
+  GROUP BY e.customer_key, e.plan_rank
+),
+bucket_deltas_by_customer_plan AS (
+  SELECT
+    bu.bucket_start,
+    e.customer_key,
+    e.plan_rank,
+    COALESCE(SUM(e.mrr_change_major), 0.0) AS delta_mrr
+  FROM buckets bu
+  JOIN events_base e
+    ON e.event_timestamp >= TIMESTAMP(bu.effective_start)
+    AND e.event_timestamp < TIMESTAMP(bu.effective_end_exclusive)
+  GROUP BY bu.bucket_start, e.customer_key, e.plan_rank
+),
+customer_plan_in_scope AS (
+  SELECT customer_key, plan_rank
+  FROM start_mrr_by_customer_plan
+  WHERE ABS(start_mrr) > 1e-9
+
+  UNION DISTINCT
+
+  SELECT customer_key, plan_rank
+  FROM bucket_deltas_by_customer_plan
+),
+customer_plan_buckets AS (
+  SELECT
+    cpis.customer_key,
+    cpis.plan_rank,
+    b.bucket_start
+  FROM customer_plan_in_scope cpis
+  CROSS JOIN buckets b
+),
+customer_plan_snapshots AS (
+  SELECT
+    cpb.customer_key,
+    cpb.plan_rank,
+    cpb.bucket_start,
+    COALESCE(s.start_mrr, 0.0)
+      + SUM(COALESCE(bd.delta_mrr, 0.0)) OVER (
+        PARTITION BY cpb.customer_key, cpb.plan_rank
+        ORDER BY cpb.bucket_start
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      ) AS mrr_end
+  FROM customer_plan_buckets cpb
+  LEFT JOIN start_mrr_by_customer_plan s
+    ON s.customer_key = cpb.customer_key
+    AND s.plan_rank = cpb.plan_rank
+  LEFT JOIN bucket_deltas_by_customer_plan bd
+    ON bd.customer_key = cpb.customer_key
+    AND bd.plan_rank = cpb.plan_rank
+    AND bd.bucket_start = cpb.bucket_start
+),
+customer_bucket_plan_rank AS (
+  SELECT
+    cps.customer_key,
+    cps.bucket_start,
+    COALESCE(MAX(IF(cps.mrr_end > 1e-9, cps.plan_rank, 0)), 0) AS plan_rank
+  FROM customer_plan_snapshots cps
+  GROUP BY cps.customer_key, cps.bucket_start
+)
+SELECT
+  cbpr.customer_key,
+  COALESCE(cik.customer_ids, ARRAY<STRING>[]) AS customer_ids,
+  COALESCE(cik.workspace_ids, ARRAY<STRING>[]) AS workspace_ids,
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', b.effective_start)
+    ELSE FORMAT_DATE('%Y-%m', b.bucket_start)
+  END AS period_key,
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', b.effective_start)
+    ELSE FORMAT_DATE('%b %Y', b.bucket_start)
+  END AS period_label,
+  FORMAT_DATE('%Y-%m-%d', b.effective_start) AS period_start,
+  FORMAT_DATE('%Y-%m-%d', DATE_SUB(b.effective_end_exclusive, INTERVAL 1 DAY)) AS period_end,
+  CASE cbpr.plan_rank
+    WHEN 5 THEN 'enterprise'
+    WHEN 4 THEN 'managed'
+    WHEN 3 THEN 'team'
+    WHEN 2 THEN 'plus'
+    WHEN 1 THEN 'pay_as_you_go'
+    ELSE 'free'
+  END AS plan
+FROM customer_bucket_plan_rank cbpr
+JOIN buckets b
+  ON b.bucket_start = cbpr.bucket_start
+LEFT JOIN customer_ids_by_key cik
+  ON cik.customer_key = cbpr.customer_key
+ORDER BY cbpr.customer_key ASC, b.bucket_start ASC
+`;
+
+  const params: BigQueryNamedParameter[] = [
+    { name: "start_date", type: "STRING", value: startDateIso },
+    { name: "end_date", type: "STRING", value: endDateIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+    { name: "grain", type: "STRING", value: grain },
+  ];
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+
+  return {
+    startDate: startDateIso,
+    endDate: endDateIso,
+    targetCurrency: targetCurrency.toUpperCase(),
+    grain,
+    rows: rows.map((row) => ({
+      customerKey: asString(row.customer_key),
+      customerIds: asStringArray(row.customer_ids),
+      workspaceIds: asStringArray(row.workspace_ids),
+      periodKey: asString(row.period_key),
+      periodLabel: asString(row.period_label),
+      periodStart: asString(row.period_start),
+      periodEnd: asString(row.period_end),
+      plan: (asString(row.plan) || "free") as StripeThroughMrrCustomerPlan,
     })),
   };
 }
