@@ -165,7 +165,6 @@ function previousPeriodKeyFor(
 
 async function loadExpandedTofuSource(request: TofuRequest): Promise<{
   expanded: CombinedAllSubsResponse;
-  planExpanded: CombinedAllSubsResponse | null;
   periods: Array<{ key: string; label: string }>;
   allPeriodKeys: string[];
 }> {
@@ -175,19 +174,9 @@ async function loadExpandedTofuSource(request: TofuRequest): Promise<{
     endDate: request.endDate,
     combineMode: request.combineMode,
     displayMode: "arr",
+    includePlanData: normalizeTofuGroupBy(request.groupBy) === "plan",
+    planGrain: "monthly",
   });
-
-  const groupBy = normalizeTofuGroupBy(request.groupBy);
-  const planExpanded =
-    groupBy === "plan"
-      ? await generateCombinedAllSubsReport({
-          startDate: prev?.startDate || request.startDate,
-          endDate: request.endDate,
-          combineMode: expanded.combineMode,
-          displayMode: "plan",
-          planGrain: "monthly",
-        })
-      : null;
 
   const allPeriods = (expanded.periods || []).map((period) => ({
     key: String(period.key || ""),
@@ -197,7 +186,7 @@ async function loadExpandedTofuSource(request: TofuRequest): Promise<{
   const periods = allPeriods.filter((period) => period.key >= selectedStartMonthKey);
   const allPeriodKeys = allPeriods.map((period) => period.key);
 
-  return { expanded, planExpanded, periods, allPeriodKeys };
+  return { expanded, periods, allPeriodKeys };
 }
 
 function arrAtPeriod(row: CombinedAllSubsRow, periodKey: string) {
@@ -207,11 +196,7 @@ function arrAtPeriod(row: CombinedAllSubsRow, periodKey: string) {
 function planAtPeriod(
   row: CombinedAllSubsRow,
   periodKey: string,
-  planRowsById: Map<string, CombinedAllSubsRow>,
 ): CombinedAllSubsPlan {
-  const mapped = planRowsById.get(row.id);
-  const mappedPlan = (mapped?.plansByPeriod?.[periodKey] || "").trim();
-  if (mappedPlan) return mappedPlan as CombinedAllSubsPlan;
   const fallback = (row.plansByPeriod?.[periodKey] || "").trim();
   return (fallback || "free") as CombinedAllSubsPlan;
 }
@@ -240,15 +225,10 @@ export async function generateTofuReport(request: TofuRequest): Promise<TofuResp
     throw new Error("endDate must be >= startDate");
   }
 
-  const { expanded, planExpanded, periods, allPeriodKeys } = await loadExpandedTofuSource(request);
+  const { expanded, periods, allPeriodKeys } = await loadExpandedTofuSource(request);
   const groupBy = normalizeTofuGroupBy(request.groupBy);
 
   if (groupBy === "plan") {
-    const planRowsById = new Map<string, CombinedAllSubsRow>();
-    for (const row of planExpanded?.rows || []) {
-      planRowsById.set(row.id, row);
-    }
-
     const planRows: TofuPlanRow[] = [];
 
     for (const [idx, period] of periods.entries()) {
@@ -289,8 +269,8 @@ export async function generateTofuReport(request: TofuRequest): Promise<TofuResp
         const prevHas = Math.abs(prev) > 1e-9;
         const currHas = Math.abs(curr) > 1e-9;
 
-        const prevPlan = prevHas ? planAtPeriod(row, prevKey, planRowsById) : "free";
-        const currPlan = currHas ? planAtPeriod(row, period.key, planRowsById) : "free";
+        const prevPlan = prevHas ? planAtPeriod(row, prevKey) : "free";
+        const currPlan = currHas ? planAtPeriod(row, period.key) : "free";
 
         if (prevHas) {
           const bucket = ensureBucket(prevPlan);

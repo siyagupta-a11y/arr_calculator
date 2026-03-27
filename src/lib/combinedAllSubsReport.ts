@@ -15,6 +15,7 @@ export type CombinedAllSubsRequest = {
   combineMode?: CombinedAllSubsCombineMode;
   displayMode?: CombinedAllSubsDisplayMode;
   planGrain?: CombinedAllSubsPlanGrain;
+  includePlanData?: boolean;
 };
 
 export type CombinedAllSubsCombineMode = "grouped" | "simple";
@@ -457,6 +458,7 @@ export async function generateCombinedAllSubsReport(
   const combineMode = normalizeCombineMode(request.combineMode);
   const displayMode = normalizeDisplayMode(request.displayMode);
   const planGrain = normalizePlanGrain(request.planGrain);
+  const includePlanData = Boolean(request.includePlanData);
   const target = targetCurrency();
 
   const [hubspotReport, stripeCustomerArr, stripeCustomerPlan] = await Promise.all([
@@ -486,7 +488,17 @@ export async function generateCombinedAllSubsReport(
           },
           STRIPE_QUERY_OPTIONS,
         )
-      : Promise.resolve(null),
+      : includePlanData
+        ? queryStripeThroughMrrCustomerPlanFromBigQuery(
+            {
+              startDate,
+              endDate,
+              targetCurrency: target,
+              grain: planGrain,
+            },
+            STRIPE_QUERY_OPTIONS,
+          )
+        : Promise.resolve(null),
   ]);
 
   const { periods, accounts, companyIdToAccountKey } = buildHubspotAccountMap(hubspotReport);
