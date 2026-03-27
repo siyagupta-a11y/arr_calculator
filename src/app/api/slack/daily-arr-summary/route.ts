@@ -58,18 +58,25 @@ async function slackFetchJson(path: string, token: string, payload: Record<strin
   return { status: res.status, json };
 }
 
-async function resolveSlackChannelId(token: string) {
-  const explicitChannel = String(process.env.SLACK_ARR_DAILY_CHANNEL_ID || "").trim();
-  if (explicitChannel) return explicitChannel;
+type SlackTarget =
+  | { kind: "channel"; channelId: string }
+  | { kind: "dm"; userId: string; channelId: string };
 
-  const hanyUserId = String(process.env.SLACK_HANY_USER_ID || "").trim();
-  if (!hanyUserId) {
-    throw new Error("Missing SLACK_HANY_USER_ID (or set SLACK_ARR_DAILY_CHANNEL_ID)");
-  }
+function parseCsvList(value: string) {
+  return Array.from(
+    new Set(
+      String(value || "")
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean),
+    ),
+  );
+}
 
-  const opened = await slackFetchJson("conversations.open", token, { users: hanyUserId });
+async function openSlackDmChannel(token: string, userId: string) {
+  const opened = await slackFetchJson("conversations.open", token, { users: userId });
   if (!opened.status || opened.status < 200 || opened.status >= 300 || opened.json.ok !== true) {
-    throw new Error(`Slack conversations.open failed: ${String(opened.json.error || opened.status)}`);
+    throw new Error(`Slack conversations.open failed for ${userId}: ${String(opened.json.error || opened.status)}`);
   }
 
   const channelId = String(
@@ -78,9 +85,29 @@ async function resolveSlackChannelId(token: string) {
       "",
   ).trim();
   if (!channelId) {
-    throw new Error("Slack conversations.open returned no channel id");
+    throw new Error(`Slack conversations.open returned no channel id for ${userId}`);
   }
   return channelId;
+}
+
+async function resolveSlackTargets(token: string): Promise<SlackTarget[]> {
+  const explicitChannel = String(process.env.SLACK_ARR_DAILY_CHANNEL_ID || "").trim();
+  if (explicitChannel) return [{ kind: "channel", channelId: explicitChannel }];
+
+  const userIds = parseCsvList(
+    String(process.env.SLACK_DAILY_USER_IDS || "").trim() ||
+      String(process.env.SLACK_HANY_USER_ID || "").trim(),
+  );
+  if (userIds.length === 0) {
+    throw new Error("Missing SLACK_DAILY_USER_IDS (or set SLACK_HANY_USER_ID / SLACK_ARR_DAILY_CHANNEL_ID)");
+  }
+
+  const targets: SlackTarget[] = [];
+  for (const userId of userIds) {
+    const channelId = await openSlackDmChannel(token, userId);
+    targets.push({ kind: "dm", userId, channelId });
+  }
+  return targets;
 }
 
 function buildSlackText(payload: Awaited<ReturnType<typeof buildCombinedLiveArrPayload>>) {
@@ -111,9 +138,19 @@ async function handle(req: Request) {
   const text = buildSlackText(payload);
 
   if (dryRun) {
+    const previewTargets = (() => {
+      const explicitChannel = String(process.env.SLACK_ARR_DAILY_CHANNEL_ID || "").trim();
+      if (explicitChannel) return [{ kind: "channel" as const, channelId: explicitChannel }];
+      const userIds = parseCsvList(
+        String(process.env.SLACK_DAILY_USER_IDS || "").trim() ||
+          String(process.env.SLACK_HANY_USER_ID || "").trim(),
+      );
+      return userIds.map((userId) => ({ kind: "dm" as const, userId }));
+    })();
     return NextResponse.json({
       ok: true,
       dryRun: true,
+      targets: previewTargets,
       text,
       payload,
     });
@@ -124,23 +161,38 @@ async function handle(req: Request) {
     throw new Error("Missing SLACK_BOT_TOKEN");
   }
 
-  const channel = await resolveSlackChannelId(botToken);
-  const posted = await slackFetchJson("chat.postMessage", botToken, {
-    channel,
-    text,
-    mrkdwn: true,
-    unfurl_links: false,
-    unfurl_media: false,
-  });
-  if (!posted.status || posted.status < 200 || posted.status >= 300 || posted.json.ok !== true) {
-    throw new Error(`Slack chat.postMessage failed: ${String(posted.json.error || posted.status)}`);
+  const targets = await resolveSlackTargets(botToken);
+  const deliveries: Array<{
+    kind: "channel" | "dm";
+    channelId: string;
+    userId?: string;
+    messageTs?: string;
+  }> = [];
+
+  for (const target of targets) {
+    const posted = await slackFetchJson("chat.postMessage", botToken, {
+      channel: target.channelId,
+      text,
+      mrkdwn: true,
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+    if (!posted.status || posted.status < 200 || posted.status >= 300 || posted.json.ok !== true) {
+      const label = target.kind === "dm" ? `user ${target.userId}` : `channel ${target.channelId}`;
+      throw new Error(`Slack chat.postMessage failed for ${label}: ${String(posted.json.error || posted.status)}`);
+    }
+    deliveries.push({
+      kind: target.kind,
+      channelId: target.channelId,
+      userId: target.kind === "dm" ? target.userId : undefined,
+      messageTs: String(posted.json.ts || ""),
+    });
   }
 
   return NextResponse.json({
     ok: true,
     dryRun: false,
-    channel,
-    messageTs: posted.json.ts || null,
+    targets: deliveries,
     text,
     payload,
   });

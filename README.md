@@ -138,11 +138,12 @@ Notes:
 Required env vars for Slack:
 
 - `SLACK_BOT_TOKEN`
-- `SLACK_HANY_USER_ID` (DM target; ignored if `SLACK_ARR_DAILY_CHANNEL_ID` is set)
+- `SLACK_DAILY_USER_IDS` (comma-separated DM targets; ignored if `SLACK_ARR_DAILY_CHANNEL_ID` is set)
 
 Optional:
 
 - `SLACK_ARR_DAILY_CHANNEL_ID` (post to a channel instead of DM)
+- `SLACK_HANY_USER_ID` (legacy single DM fallback if `SLACK_DAILY_USER_IDS` is not set)
 
 ## Persistence Across Redeployments
 
