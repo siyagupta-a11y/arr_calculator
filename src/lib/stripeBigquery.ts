@@ -3208,7 +3208,11 @@ customer_ids_by_key AS (
   SELECT
     customer_key,
     ARRAY_AGG(DISTINCT customer_id IGNORE NULLS ORDER BY customer_id ASC) AS customer_ids,
-    ARRAY_AGG(DISTINCT IF(workspace_id = '', NULL, workspace_id) IGNORE NULLS ORDER BY workspace_id ASC) AS workspace_ids
+    ARRAY_AGG(
+      DISTINCT IF(workspace_id = '', NULL, workspace_id)
+      IGNORE NULLS
+      ORDER BY IF(workspace_id = '', NULL, workspace_id) ASC
+    ) AS workspace_ids
   FROM events_base
   WHERE customer_id <> '(blank)'
   GROUP BY customer_key
