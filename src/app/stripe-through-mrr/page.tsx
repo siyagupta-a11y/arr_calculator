@@ -56,6 +56,8 @@ type GroupedDetailRow = {
   monthEndMrr: number;
   monthEndArr: number;
   associatedCustomerIds?: string[];
+  associatedWorkspaceIds?: string[];
+  salesAssist?: "yes" | "no";
 };
 
 type ApiResponse = {
@@ -325,7 +327,15 @@ export default function StripeThroughMrrPage() {
     const groupedRows = detailRows.filter(isGroupedRow);
     const byGroup = new Map<
       string,
-      { groupKey: string; groupLabel: string; associatedCustomerIds: string[]; totalNet: number; byMonth: Map<string, GroupedDetailRow> }
+      {
+        groupKey: string;
+        groupLabel: string;
+        associatedCustomerIds: string[];
+        associatedWorkspaceIds: string[];
+        salesAssist: "yes" | "no";
+        totalNet: number;
+        byMonth: Map<string, GroupedDetailRow>;
+      }
     >();
     for (const row of groupedRows) {
       const mapKey = `${row.groupKey}|${row.groupLabel}`;
@@ -334,12 +344,16 @@ export default function StripeThroughMrrPage() {
           groupKey: row.groupKey,
           groupLabel: row.groupLabel || row.groupKey || "(blank)",
           associatedCustomerIds: row.associatedCustomerIds || [],
+          associatedWorkspaceIds: row.associatedWorkspaceIds || [],
+          salesAssist: row.salesAssist === "yes" ? "yes" : "no",
           totalNet: 0,
           byMonth: new Map(),
         });
       }
       const entry = byGroup.get(mapKey)!;
       entry.associatedCustomerIds = mergeStringLists(entry.associatedCustomerIds, row.associatedCustomerIds);
+      entry.associatedWorkspaceIds = mergeStringLists(entry.associatedWorkspaceIds, row.associatedWorkspaceIds);
+      if (row.salesAssist === "yes") entry.salesAssist = "yes";
       entry.byMonth.set(row.monthKey, row);
       entry.totalNet += row.netMrrChange;
     }
@@ -399,7 +413,14 @@ export default function StripeThroughMrrPage() {
   function buildGroupMatrix(rows: GroupedDetailRow[]) {
     const byGroup = new Map<
       string,
-      { groupKey: string; groupLabel: string; associatedCustomerIds: string[]; byMonth: Map<string, GroupedDetailRow> }
+      {
+        groupKey: string;
+        groupLabel: string;
+        associatedCustomerIds: string[];
+        associatedWorkspaceIds: string[];
+        salesAssist: "yes" | "no";
+        byMonth: Map<string, GroupedDetailRow>;
+      }
     >();
     for (const row of rows) {
       const mapKey = `${row.groupKey}|${row.groupLabel}`;
@@ -408,11 +429,15 @@ export default function StripeThroughMrrPage() {
           groupKey: row.groupKey,
           groupLabel: row.groupLabel || row.groupKey || "(blank)",
           associatedCustomerIds: row.associatedCustomerIds || [],
+          associatedWorkspaceIds: row.associatedWorkspaceIds || [],
+          salesAssist: row.salesAssist === "yes" ? "yes" : "no",
           byMonth: new Map(),
         });
       }
       const entry = byGroup.get(mapKey)!;
       entry.associatedCustomerIds = mergeStringLists(entry.associatedCustomerIds, row.associatedCustomerIds);
+      entry.associatedWorkspaceIds = mergeStringLists(entry.associatedWorkspaceIds, row.associatedWorkspaceIds);
+      if (row.salesAssist === "yes") entry.salesAssist = "yes";
       entry.byMonth.set(row.monthKey, row);
     }
     return Array.from(byGroup.values());
@@ -526,13 +551,15 @@ export default function StripeThroughMrrPage() {
       const metricHeaders = detailMonthsInRange.flatMap((month) =>
         selectedMetrics.map((metric) => `${month.monthLabel} - ${DETAIL_METRIC_OPTIONS.find((o) => o.key === metric)?.label || metric}`),
       );
-      const baseHeaders = groupBy === "email" ? ["Group", "Customer IDs", ...metricHeaders] : ["Group", ...metricHeaders];
+      const baseHeaders = groupBy === "email"
+        ? ["Group", "Customer IDs", "Sales assist", ...metricHeaders]
+        : ["Group", ...metricHeaders];
       const csvRows = filtered.map((group) => {
         const values = detailMonthsInRange.flatMap((month) =>
           selectedMetrics.map((metric) => String(metricValue(group.byMonth.get(month.monthKey), metric))),
         );
         return groupBy === "email"
-          ? [group.groupLabel || group.groupKey || "(blank)", group.associatedCustomerIds.join(" | "), ...values]
+          ? [group.groupLabel || group.groupKey || "(blank)", group.associatedCustomerIds.join(" | "), group.salesAssist, ...values]
           : [group.groupLabel || group.groupKey || "(blank)", ...values];
       });
       downloadCsv("stripe-through-mrr-detail-grouped.csv", baseHeaders, csvRows);
@@ -1002,6 +1029,7 @@ export default function StripeThroughMrrPage() {
                       <tr>
                         <th rowSpan={2}>Group</th>
                         {groupBy === "email" && <th rowSpan={2}>Customer IDs</th>}
+                        {groupBy === "email" && <th rowSpan={2}>Sales assist</th>}
                         {detailMonthsInRange.map((month) => (
                           <th key={month.monthKey} className="stripe-ui__num" colSpan={selectedMetrics.length}>
                             {month.monthLabel}
@@ -1038,10 +1066,11 @@ export default function StripeThroughMrrPage() {
                         <td>{row.subscriptionId || "(blank)"}</td>
                       </tr>
                     )
-                    : filteredGroupedMatrixRows.map((group) => (
+                      : filteredGroupedMatrixRows.map((group) => (
                         <tr key={`${group.groupKey}|${group.groupLabel}`}>
                           <td>{group.groupLabel || group.groupKey || "(blank)"}</td>
                           {groupBy === "email" && <td>{group.associatedCustomerIds.join(", ")}</td>}
+                          {groupBy === "email" && <td>{group.salesAssist}</td>}
                           {detailMonthsInRange.flatMap((month) =>
                             selectedMetrics.map((metric) => {
                               const value = metricValue(group.byMonth.get(month.monthKey), metric);

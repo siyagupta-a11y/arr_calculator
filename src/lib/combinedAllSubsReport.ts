@@ -1,9 +1,11 @@
-import { fetchCompanyIdsForContactEmails } from "@/lib/hubspot";
+import { fetchCompanyIdsForContactEmails, fetchWorkspaceIdsForDealStageLabel } from "@/lib/hubspot";
 import { generateReport } from "@/lib/report";
 import {
   queryStripeThroughMrrCustomerArrFromBigQuery,
+  queryStripeThroughMrrCustomerPlanFromBigQuery,
   type StripeBigQueryProfile,
   type StripeThroughMrrCustomerArrRow,
+  type StripeThroughMrrCustomerPlanRow,
 } from "@/lib/stripeBigquery";
 import type { ReportResponse, ReportRow } from "@/lib/types";
 
@@ -11,9 +13,14 @@ export type CombinedAllSubsRequest = {
   startDate: string;
   endDate: string;
   combineMode?: CombinedAllSubsCombineMode;
+  displayMode?: CombinedAllSubsDisplayMode;
+  planGrain?: CombinedAllSubsPlanGrain;
 };
 
 export type CombinedAllSubsCombineMode = "grouped" | "simple";
+export type CombinedAllSubsDisplayMode = "arr" | "plan";
+export type CombinedAllSubsPlanGrain = "daily" | "monthly";
+export type CombinedAllSubsPlan = "enterprise" | "managed" | "team" | "plus" | "pay_as_you_go" | "free";
 
 export type CombinedAllSubsRow = {
   id: string;
@@ -21,17 +28,23 @@ export type CombinedAllSubsRow = {
   customerLabel: string;
   accountId: string;
   accountName: string;
+  salesAssist: "yes" | "no";
   stripeKeys: string[];
   matchedStripeKeys: string[];
   hubspotValuesByPeriod: Record<string, number>;
   stripeValuesByPeriod: Record<string, number>;
   valuesByPeriod: Record<string, number>;
+  hubspotPlansByPeriod?: Record<string, CombinedAllSubsPlan>;
+  stripePlansByPeriod?: Record<string, CombinedAllSubsPlan>;
+  plansByPeriod?: Record<string, CombinedAllSubsPlan>;
 };
 
 export type CombinedAllSubsResponse = {
   startDate: string;
   endDate: string;
   combineMode: CombinedAllSubsCombineMode;
+  displayMode: CombinedAllSubsDisplayMode;
+  planGrain: CombinedAllSubsPlanGrain;
   targetCurrency: string;
   warnings?: string[];
   periods: Array<{ key: string; label: string }>;
@@ -53,15 +66,21 @@ type HubspotAccountAggregate = {
   companyIds: Set<string>;
   stripeKeys: Set<string>;
   matchedStripeKeys: Set<string>;
+  matchedStripeWorkspaceIds: Set<string>;
   hubspotValuesByPeriod: Record<string, number>;
   stripeValuesByPeriod: Record<string, number>;
   valuesByPeriod: Record<string, number>;
+  hubspotPlansByPeriod: Record<string, CombinedAllSubsPlan>;
+  stripePlansByPeriod: Record<string, CombinedAllSubsPlan>;
+  plansByPeriod: Record<string, CombinedAllSubsPlan>;
 };
 
 type StripeCustomerAggregate = {
   customerKey: string;
   matchingKeys: Set<string>;
+  workspaceIds: Set<string>;
   valuesByPeriod: Record<string, number>;
+  plansByPeriod: Record<string, CombinedAllSubsPlan>;
 };
 
 const STRIPE_QUERY_OPTIONS: { profile: StripeBigQueryProfile } = {
@@ -72,8 +91,49 @@ function normalizeCombineMode(mode: string | undefined): CombinedAllSubsCombineM
   return String(mode || "").trim().toLowerCase() === "simple" ? "simple" : "grouped";
 }
 
+function normalizeDisplayMode(mode: string | undefined): CombinedAllSubsDisplayMode {
+  return String(mode || "").trim().toLowerCase() === "plan" ? "plan" : "arr";
+}
+
+function normalizePlanGrain(grain: string | undefined): CombinedAllSubsPlanGrain {
+  return String(grain || "").trim().toLowerCase() === "daily" ? "daily" : "monthly";
+}
+
 function round2(value: number) {
   return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+const PLAN_RANK: Record<CombinedAllSubsPlan, number> = {
+  enterprise: 6,
+  managed: 5,
+  team: 4,
+  plus: 3,
+  pay_as_you_go: 2,
+  free: 1,
+};
+
+function betterPlan(current: CombinedAllSubsPlan | undefined, incoming: CombinedAllSubsPlan | undefined): CombinedAllSubsPlan {
+  const a = current || "free";
+  const b = incoming || "free";
+  return PLAN_RANK[b] > PLAN_RANK[a] ? b : a;
+}
+
+function normalizeHubspotPlan(plan: string | undefined): CombinedAllSubsPlan {
+  const value = String(plan || "").trim().toLowerCase();
+  if (value === "enterprise") return "enterprise";
+  if (value === "managed") return "managed";
+  if (value === "team") return "team";
+  return "free";
+}
+
+function normalizeCombinedPlan(plan: string | undefined): CombinedAllSubsPlan {
+  const value = String(plan || "").trim().toLowerCase();
+  if (value === "enterprise") return "enterprise";
+  if (value === "managed") return "managed";
+  if (value === "team") return "team";
+  if (value === "plus") return "plus";
+  if (value === "pay_as_you_go" || value === "pay as you go") return "pay_as_you_go";
+  return "free";
 }
 
 function parseIsoDateOnly(value: string) {
@@ -126,6 +186,10 @@ function normalizeStripeKey(value: string) {
   return String(value || "").trim().toLowerCase();
 }
 
+function normalizeWorkspaceId(value: string) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function isCloudDeploymentType(value: string) {
   return String(value || "").trim().toLowerCase() === "cloud";
 }
@@ -163,9 +227,13 @@ function buildHubspotAccountMap(report: ReportResponse) {
         companyIds: new Set<string>(),
         stripeKeys: new Set<string>(),
         matchedStripeKeys: new Set<string>(),
+        matchedStripeWorkspaceIds: new Set<string>(),
         hubspotValuesByPeriod: {},
         stripeValuesByPeriod: {},
         valuesByPeriod: {},
+        hubspotPlansByPeriod: {},
+        stripePlansByPeriod: {},
+        plansByPeriod: {},
       });
     }
 
@@ -177,6 +245,14 @@ function buildHubspotAccountMap(report: ReportResponse) {
       const value = round2(Number(row.valuesByPeriod?.[period.key] || 0));
       entry.hubspotValuesByPeriod[period.key] = round2((entry.hubspotValuesByPeriod[period.key] || 0) + value);
       entry.valuesByPeriod[period.key] = round2((entry.valuesByPeriod[period.key] || 0) + value);
+      if (value > 0) {
+        const plan = normalizeHubspotPlan(row.plan);
+        entry.hubspotPlansByPeriod[period.key] = betterPlan(entry.hubspotPlansByPeriod[period.key], plan);
+        entry.plansByPeriod[period.key] = betterPlan(entry.plansByPeriod[period.key], plan);
+      } else {
+        entry.hubspotPlansByPeriod[period.key] = entry.hubspotPlansByPeriod[period.key] || "free";
+        entry.plansByPeriod[period.key] = entry.plansByPeriod[period.key] || "free";
+      }
     }
 
     for (const companyId of accountCompanyIds(rawAccountId)) {
@@ -214,11 +290,14 @@ async function attachStripeKeysFromHubspotContacts(
   }
 }
 
-function buildStripeCustomerMap(rows: StripeThroughMrrCustomerArrRow[]) {
+function buildStripeCustomerMap(
+  arrRows: StripeThroughMrrCustomerArrRow[],
+  planRows: StripeThroughMrrCustomerPlanRow[] = [],
+) {
   const customers = new Map<string, StripeCustomerAggregate>();
   const aliasesToCustomerKey = new Map<string, string>();
 
-  for (const row of rows || []) {
+  for (const row of arrRows || []) {
     const key = normalizeStripeKey(row.customerKey);
     if (!key) continue;
 
@@ -226,16 +305,47 @@ function buildStripeCustomerMap(rows: StripeThroughMrrCustomerArrRow[]) {
       customers.set(key, {
         customerKey: key,
         matchingKeys: new Set<string>([key]),
+        workspaceIds: new Set<string>(),
         valuesByPeriod: {},
+        plansByPeriod: {},
       });
     }
 
     const bucket = customers.get(key)!;
     aliasesToCustomerKey.set(key, key);
+    for (const workspaceId of row.workspaceIds || []) {
+      const normalizedWorkspaceId = normalizeWorkspaceId(workspaceId);
+      if (normalizedWorkspaceId) bucket.workspaceIds.add(normalizedWorkspaceId);
+    }
     const periodKey = String(row.periodKey || "").trim();
     if (!periodKey) continue;
     const arr = round2(Number(row.arr || 0));
     bucket.valuesByPeriod[periodKey] = round2((bucket.valuesByPeriod[periodKey] || 0) + arr);
+  }
+
+  for (const row of planRows || []) {
+    const key = normalizeStripeKey(row.customerKey);
+    if (!key) continue;
+    if (!customers.has(key)) {
+      customers.set(key, {
+        customerKey: key,
+        matchingKeys: new Set<string>([key]),
+        workspaceIds: new Set<string>(),
+        valuesByPeriod: {},
+        plansByPeriod: {},
+      });
+    }
+
+    const bucket = customers.get(key)!;
+    aliasesToCustomerKey.set(key, key);
+    for (const workspaceId of row.workspaceIds || []) {
+      const normalizedWorkspaceId = normalizeWorkspaceId(workspaceId);
+      if (normalizedWorkspaceId) bucket.workspaceIds.add(normalizedWorkspaceId);
+    }
+    const periodKey = String(row.periodKey || "").trim();
+    if (!periodKey) continue;
+    const plan = normalizeCombinedPlan(String(row.plan || "free"));
+    bucket.plansByPeriod[periodKey] = betterPlan(bucket.plansByPeriod[periodKey], plan);
   }
 
   return { customers, aliasesToCustomerKey };
@@ -263,11 +373,20 @@ function mergeStripeIntoHubspotAccounts(
       for (const matchingKey of stripeCustomer.matchingKeys) {
         account.matchedStripeKeys.add(matchingKey);
       }
+      for (const workspaceId of stripeCustomer.workspaceIds) {
+        account.matchedStripeWorkspaceIds.add(workspaceId);
+      }
 
       for (const period of periods) {
         const value = round2(Number(stripeCustomer.valuesByPeriod[period.key] || 0));
         account.stripeValuesByPeriod[period.key] = round2((account.stripeValuesByPeriod[period.key] || 0) + value);
         account.valuesByPeriod[period.key] = round2((account.valuesByPeriod[period.key] || 0) + value);
+        const stripePlan = stripeCustomer.plansByPeriod[period.key] || "free";
+        account.stripePlansByPeriod[period.key] = betterPlan(account.stripePlansByPeriod[period.key], stripePlan);
+        account.plansByPeriod[period.key] = betterPlan(
+          account.hubspotPlansByPeriod[period.key],
+          account.stripePlansByPeriod[period.key],
+        );
       }
     }
   }
@@ -290,15 +409,35 @@ function latestPeriodValue(periods: Array<{ key: string }>, valuesByPeriod: Reco
   return round2(Number(valuesByPeriod[key] || 0));
 }
 
-function sortRowsByLatestPeriod(
+function sortRowsForDisplay(
   periods: Array<{ key: string }>,
   rows: CombinedAllSubsRow[],
+  displayMode: CombinedAllSubsDisplayMode,
 ) {
+  if (displayMode === "plan") {
+    const latestKey = periods.length ? periods[periods.length - 1].key : "";
+    return [...rows].sort((a, b) => {
+      const aPlan = normalizeCombinedPlan(a.plansByPeriod?.[latestKey] || "free");
+      const bPlan = normalizeCombinedPlan(b.plansByPeriod?.[latestKey] || "free");
+      const rankDiff = PLAN_RANK[bPlan] - PLAN_RANK[aPlan];
+      if (rankDiff !== 0) return rankDiff;
+      return a.customerLabel.localeCompare(b.customerLabel);
+    });
+  }
   return [...rows].sort((a, b) => {
     const diff = latestPeriodValue(periods, b.valuesByPeriod) - latestPeriodValue(periods, a.valuesByPeriod);
     if (Math.abs(diff) > 1e-9) return diff;
     return a.customerLabel.localeCompare(b.customerLabel);
   });
+}
+
+function ensurePlanDefaults(
+  periods: Array<{ key: string; label: string }>,
+  plansByPeriod: Record<string, CombinedAllSubsPlan>,
+) {
+  for (const period of periods) {
+    plansByPeriod[period.key] = plansByPeriod[period.key] || "free";
+  }
 }
 
 export async function generateCombinedAllSubsReport(
@@ -316,28 +455,58 @@ export async function generateCombinedAllSubsReport(
   const startDate = toIsoDateOnly(start);
   const endDate = toIsoDateOnly(end);
   const combineMode = normalizeCombineMode(request.combineMode);
+  const displayMode = normalizeDisplayMode(request.displayMode);
+  const planGrain = normalizePlanGrain(request.planGrain);
   const target = targetCurrency();
 
-  const [hubspotReport, stripeCustomerArr] = await Promise.all([
+  const [hubspotReport, stripeCustomerArr, stripeCustomerPlan] = await Promise.all([
     generateReport({
       startDate,
       endDate,
       mode: "contracted",
-      grain: "monthly",
+      grain: displayMode === "plan" ? planGrain : "monthly",
     }),
-    queryStripeThroughMrrCustomerArrFromBigQuery(
-      {
-        startDate,
-        endDate,
-        targetCurrency: target,
-      },
-      STRIPE_QUERY_OPTIONS,
-    ),
+    displayMode === "arr"
+      ? queryStripeThroughMrrCustomerArrFromBigQuery(
+          {
+            startDate,
+            endDate,
+            targetCurrency: target,
+          },
+          STRIPE_QUERY_OPTIONS,
+        )
+      : Promise.resolve(null),
+    displayMode === "plan"
+      ? queryStripeThroughMrrCustomerPlanFromBigQuery(
+          {
+            startDate,
+            endDate,
+            targetCurrency: target,
+            grain: planGrain,
+          },
+          STRIPE_QUERY_OPTIONS,
+        )
+      : Promise.resolve(null),
   ]);
 
   const { periods, accounts, companyIdToAccountKey } = buildHubspotAccountMap(hubspotReport);
-  const { customers: stripeCustomers, aliasesToCustomerKey } = buildStripeCustomerMap(stripeCustomerArr.rows || []);
+  const { customers: stripeCustomers, aliasesToCustomerKey } = buildStripeCustomerMap(
+    stripeCustomerArr?.rows || [],
+    stripeCustomerPlan?.rows || [],
+  );
   const warnings: string[] = [];
+  let transactionalWorkspaceIds = new Set<string>();
+  try {
+    transactionalWorkspaceIds = new Set(
+      Array.from(await fetchWorkspaceIdsForDealStageLabel())
+        .map((workspaceId) => normalizeWorkspaceId(workspaceId))
+        .filter(Boolean),
+    );
+  } catch (error: unknown) {
+    warnings.push(
+      `Sales-assist flag is temporarily unavailable. Cause: ${summarizeErrorMessage(error)}`,
+    );
+  }
   let effectiveCombineMode: CombinedAllSubsCombineMode = combineMode;
   let matchedStripeCustomerKeys = new Set<string>();
 
@@ -366,11 +535,20 @@ export async function generateCombinedAllSubsReport(
       customerLabel: customerLabel(account.accountName, account.accountId),
       accountId: account.accountId,
       accountName: account.accountName,
+      salesAssist:
+        Array.from(account.matchedStripeWorkspaceIds).some((workspaceId) =>
+          transactionalWorkspaceIds.has(normalizeWorkspaceId(workspaceId)),
+        )
+          ? "yes"
+          : "no",
       stripeKeys: Array.from(account.stripeKeys).sort(),
       matchedStripeKeys: Array.from(account.matchedStripeKeys).sort(),
       hubspotValuesByPeriod: account.hubspotValuesByPeriod,
       stripeValuesByPeriod: account.stripeValuesByPeriod,
       valuesByPeriod: account.valuesByPeriod,
+      hubspotPlansByPeriod: account.hubspotPlansByPeriod,
+      stripePlansByPeriod: account.stripePlansByPeriod,
+      plansByPeriod: account.plansByPeriod,
     });
   }
 
@@ -378,9 +556,12 @@ export async function generateCombinedAllSubsReport(
     if (effectiveCombineMode === "grouped" && matchedStripeCustomerKeys.has(customerKey)) continue;
 
     const valuesByPeriod: Record<string, number> = {};
+    const plansByPeriod: Record<string, CombinedAllSubsPlan> = {};
     for (const period of periods) {
       valuesByPeriod[period.key] = round2(Number(stripeCustomer.valuesByPeriod[period.key] || 0));
+      plansByPeriod[period.key] = stripeCustomer.plansByPeriod[period.key] || "free";
     }
+    ensurePlanDefaults(periods, plansByPeriod);
 
     rows.push({
       id: `stripe:${customerKey}`,
@@ -388,28 +569,54 @@ export async function generateCombinedAllSubsReport(
       customerLabel: customerKey,
       accountId: "",
       accountName: "",
+      salesAssist:
+        Array.from(stripeCustomer.workspaceIds).some((workspaceId) =>
+          transactionalWorkspaceIds.has(normalizeWorkspaceId(workspaceId)),
+        )
+          ? "yes"
+          : "no",
       stripeKeys: Array.from(stripeCustomer.matchingKeys).sort(),
       matchedStripeKeys: [],
       hubspotValuesByPeriod: {},
       stripeValuesByPeriod: valuesByPeriod,
       valuesByPeriod,
+      hubspotPlansByPeriod: Object.fromEntries(periods.map((period) => [period.key, "free"])) as Record<string, CombinedAllSubsPlan>,
+      stripePlansByPeriod: plansByPeriod,
+      plansByPeriod,
     });
   }
 
-  const sortedRows = sortRowsByLatestPeriod(periods, rows);
+  for (const row of rows) {
+    row.hubspotPlansByPeriod = row.hubspotPlansByPeriod || {};
+    row.stripePlansByPeriod = row.stripePlansByPeriod || {};
+    row.plansByPeriod = row.plansByPeriod || {};
+    ensurePlanDefaults(periods, row.hubspotPlansByPeriod);
+    ensurePlanDefaults(periods, row.stripePlansByPeriod);
+    ensurePlanDefaults(periods, row.plansByPeriod);
+  }
+
+  const sortedRows = sortRowsForDisplay(periods, rows, displayMode);
 
   const totalsByPeriod = periods.map((period) => ({
     key: period.key,
     label: period.label,
-    total: round2(
-      sortedRows.reduce((sum, row) => sum + Number(row.valuesByPeriod[period.key] || 0), 0),
-    ),
+    total:
+      displayMode === "arr"
+        ? round2(
+            sortedRows.reduce((sum, row) => sum + Number(row.valuesByPeriod[period.key] || 0), 0),
+          )
+        : sortedRows.reduce(
+            (sum, row) => sum + ((row.plansByPeriod?.[period.key] || "free") === "free" ? 0 : 1),
+            0,
+          ),
   }));
 
   return {
     startDate,
     endDate,
     combineMode: effectiveCombineMode,
+    displayMode,
+    planGrain,
     targetCurrency: String(target || "USD").toUpperCase(),
     warnings,
     periods,

@@ -54,6 +54,7 @@ type CacPoint = {
   salesMarketingCost: number;
   newCustomerCount: number;
   cac: number;
+  accountCostsByAccountId?: Record<string, number>;
 };
 
 type CombinedLiveArrResponse = {
@@ -425,6 +426,7 @@ type CacChartCardProps = {
   downloadFilename?: string;
   tableTitle?: string;
   tableAriaLabel?: string;
+  includeAccountBreakdownInCsv?: boolean;
   showAccountSelector?: boolean;
   expenseAccounts: QuickBooksExpenseAccount[];
   selectedAccountIds: string[];
@@ -452,6 +454,7 @@ function CacChartCard({
   downloadFilename = "combined-billing-overview-cac-over-time",
   tableTitle = "CAC Table",
   tableAriaLabel = "CAC table",
+  includeAccountBreakdownInCsv = false,
   showAccountSelector = true,
   expenseAccounts,
   selectedAccountIds,
@@ -533,13 +536,34 @@ function CacChartCard({
 
   const exportTableCsv = () => {
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    const selectedAccountsForCsv = includeAccountBreakdownInCsv
+      ? selectedAccountIds
+          .map((id) => normalizeEntityId(String(id || "")))
+          .filter(Boolean)
+          .map((id) => {
+            const match = expenseAccounts.find((account) => normalizeEntityId(String(account.id || "")) === id);
+            return {
+              id,
+              label: String(match?.fullyQualifiedName || match?.name || id).trim() || id,
+            };
+          })
+      : [];
     const rows: Array<Array<string | number>> = [
-      ["Period", "CAC", "Sales & Marketing Cost", "Total Users"],
+      [
+        "Period",
+        "CAC",
+        "Sales & Marketing Cost",
+        "Total Users",
+        ...selectedAccountsForCsv.map((account) => `Expense: ${account.label}`),
+      ],
       ...points.map((point) => [
         point.label,
         round2(point.cac),
         round2(point.salesMarketingCost),
         Math.max(0, Math.round(point.newCustomerCount || 0)),
+        ...selectedAccountsForCsv.map((account) =>
+          round2(Number(point.accountCostsByAccountId?.[account.id] || 0)),
+        ),
       ]),
     ];
     downloadCsv(`combined-cac-over-time-${stamp}.csv`, rows);
@@ -2274,6 +2298,7 @@ export default function CombinedBillingOverviewPage() {
               downloadFilename="combined-billing-overview-cac-over-time-cad-no-fx"
               tableTitle="CAC Table (CAD Raw, No FX)"
               tableAriaLabel="CAC table using CAD raw costs with no FX conversion"
+              includeAccountBreakdownInCsv={true}
               showAccountSelector={false}
               expenseAccounts={cacExpenseAccounts}
               selectedAccountIds={selectedCacAccountIds}

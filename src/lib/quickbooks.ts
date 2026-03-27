@@ -42,6 +42,7 @@ type QuickBooksSalesMarketingCostPoint = {
   periodEnd: string;
   totalCost: number;
   matchedAccounts: string[];
+  accountCostsByAccountId?: Record<string, number>;
 };
 
 type QuickBooksDepartment = {
@@ -223,6 +224,7 @@ function collectSalesMarketingCostsFromRows(params: {
   exactAccountNames: string[];
   keywordMatchers: string[];
   matchedAccounts: Set<string>;
+  accountCostsByAccountId: Map<string, number>;
 }): number {
   const {
     rows,
@@ -232,6 +234,7 @@ function collectSalesMarketingCostsFromRows(params: {
     exactAccountNames,
     keywordMatchers,
     matchedAccounts,
+    accountCostsByAccountId,
   } = params;
   let total = 0;
 
@@ -267,6 +270,12 @@ function collectSalesMarketingCostsFromRows(params: {
         if (amount != null) {
           total += amount;
           matchedAccounts.add(accountName);
+          if (accountId) {
+            accountCostsByAccountId.set(
+              accountId,
+              Math.round(((accountCostsByAccountId.get(accountId) || 0) + amount) * 100) / 100,
+            );
+          }
         }
       }
     }
@@ -281,6 +290,7 @@ function collectSalesMarketingCostsFromRows(params: {
         exactAccountNames,
         keywordMatchers,
         matchedAccounts,
+        accountCostsByAccountId,
       });
     }
   }
@@ -299,6 +309,7 @@ function parseSalesMarketingCostsFromProfitAndLoss(
     .filter(Boolean);
   const matchedAccounts = new Set<string>();
   const selectedAccountIdSet = new Set(normalizeIdList(selectedAccountIds));
+  const accountCostsByAccountId = new Map<string, number>();
   const total = collectSalesMarketingCostsFromRows({
     rows,
     inExpensesSection: false,
@@ -307,8 +318,13 @@ function parseSalesMarketingCostsFromProfitAndLoss(
     exactAccountNames,
     keywordMatchers,
     matchedAccounts,
+    accountCostsByAccountId,
   });
-  return { total, matchedAccounts: Array.from(matchedAccounts).sort() };
+  return {
+    total,
+    matchedAccounts: Array.from(matchedAccounts).sort(),
+    accountCostsByAccountId: Object.fromEntries(accountCostsByAccountId.entries()),
+  };
 }
 
 async function listQuickBooksDepartments(): Promise<QuickBooksDepartment[]> {
@@ -813,6 +829,7 @@ export async function fetchQuickBooksSalesMarketingCostsByMonth(
       periodEnd: isoDateOnly(boundedEnd),
       totalCost: Math.round(parsed.total * 100) / 100,
       matchedAccounts: parsed.matchedAccounts,
+      accountCostsByAccountId: parsed.accountCostsByAccountId,
     });
 
     cursor = startOfNextUtcMonth(cursor);

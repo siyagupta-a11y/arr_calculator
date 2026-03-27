@@ -63,6 +63,7 @@ type CacPoint = {
   salesMarketingCost: number;
   newCustomerCount: number;
   cac: number;
+  accountCostsByAccountId?: Record<string, number>;
 };
 
 type QuickBooksSalesMarketingCostPoint = {
@@ -72,6 +73,7 @@ type QuickBooksSalesMarketingCostPoint = {
   periodEnd: string;
   totalCost: number;
   matchedAccounts: string[];
+  accountCostsByAccountId?: Record<string, number>;
 };
 
 type QuickBooksSalesMarketingCostResponse = {
@@ -364,11 +366,29 @@ function buildCostByMonth(points: QuickBooksSalesMarketingCostPoint[]) {
   return byMonth;
 }
 
+function buildCostByMonthByAccount(points: QuickBooksSalesMarketingCostPoint[]) {
+  const byMonthByAccount = new Map<string, Map<string, number>>();
+  for (const point of points || []) {
+    const monthKey = String(point.key || point.periodStart || "").trim().slice(0, 7);
+    if (!monthKey) continue;
+    const accountCosts = point.accountCostsByAccountId || {};
+    if (!byMonthByAccount.has(monthKey)) byMonthByAccount.set(monthKey, new Map<string, number>());
+    const monthBucket = byMonthByAccount.get(monthKey)!;
+    for (const [rawAccountId, rawAmount] of Object.entries(accountCosts)) {
+      const accountId = normalizeEntityId(String(rawAccountId || ""));
+      if (!accountId) continue;
+      monthBucket.set(accountId, round2((monthBucket.get(accountId) || 0) + Number(rawAmount || 0)));
+    }
+  }
+  return byMonthByAccount;
+}
+
 function buildCacSeries(
   periodOrder: PeriodRef[],
   grain: CombinedGrain,
   costByMonth: Map<string, number>,
   newCustomerCountByPeriod: Map<string, number>,
+  costByMonthByAccount?: Map<string, Map<string, number>>,
 ): CacPoint[] {
   return periodOrder.map((period) => {
     const key = canonicalHubPeriodKey(period.key, grain) || period.key;
@@ -376,6 +396,12 @@ function buildCacSeries(
     const newCustomerCount = newCustomerCountByPeriod.get(key) || 0;
     const cac = newCustomerCount > 0 ? round2(salesMarketingCost / newCustomerCount) : 0;
     const periodStart = grain === "monthly" ? `${key}-01` : key;
+    const accountCostsByAccountId =
+      costByMonthByAccount && costByMonthByAccount.has(key)
+        ? Object.fromEntries(
+            Array.from(costByMonthByAccount.get(key)!.entries()).map(([accountId, amount]) => [accountId, round2(amount)]),
+          )
+        : undefined;
     return {
       key,
       label: period.label,
@@ -384,6 +410,7 @@ function buildCacSeries(
       salesMarketingCost,
       newCustomerCount,
       cac,
+      ...(accountCostsByAccountId ? { accountCostsByAccountId } : {}),
     };
   });
 }
@@ -874,6 +901,7 @@ async function buildCombinedBillingOverview(
         grain,
         buildCostByMonth(cadRawCosts.points || []),
         combinedNewCustomerCountByPeriod,
+        buildCostByMonthByAccount(cadRawCosts.points || []),
       );
       const accountMatchNotice = buildCacAccountMatchNotice(cadRawCosts, accountIds);
       cacCadNotice = accountMatchNotice ? `CAD CAC: ${accountMatchNotice}` : null;

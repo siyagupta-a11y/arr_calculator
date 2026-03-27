@@ -15,6 +15,8 @@ function validateAndRun(body: Partial<CombinedAllSubsRequest>) {
     startDate: String(body.startDate || ""),
     endDate: String(body.endDate || ""),
     combineMode: String(body.combineMode || "grouped") as CombinedAllSubsCombineMode,
+    displayMode: String(body.displayMode || "arr") as CombinedAllSubsRequest["displayMode"],
+    planGrain: String(body.planGrain || "monthly") as CombinedAllSubsRequest["planGrain"],
   };
   const key = `api:combined-all-subs:${stableStringify(payload)}`;
   return getOrSetCache(key, CACHE_TTL_MS, () => generateCombinedAllSubsReport(payload));
@@ -44,6 +46,8 @@ export async function GET(req: Request) {
       startDate: searchParams.get("startDate") || "",
       endDate: searchParams.get("endDate") || "",
       combineMode: String(searchParams.get("combineMode") || "grouped") as CombinedAllSubsCombineMode,
+      displayMode: String(searchParams.get("displayMode") || "arr") as CombinedAllSubsRequest["displayMode"],
+      planGrain: String(searchParams.get("planGrain") || "monthly") as CombinedAllSubsRequest["planGrain"],
     });
     return NextResponse.json(report);
   } catch (error: unknown) {
