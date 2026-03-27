@@ -23,6 +23,7 @@ function validateAndRun(body: TofuApiRequest) {
     startDate: String(body.startDate || ""),
     endDate: String(body.endDate || ""),
     combineMode: String(body.combineMode || "grouped") as CombinedAllSubsCombineMode,
+    groupBy: String(body.groupBy || "month") as TofuRequest["groupBy"],
   };
 
   const detailPeriodKey = String(body.detailPeriodKey || "").trim();
@@ -67,6 +68,7 @@ export async function GET(req: Request) {
         startDate: searchParams.get("startDate") || "",
         endDate: searchParams.get("endDate") || "",
         combineMode: String(searchParams.get("combineMode") || "grouped") as CombinedAllSubsCombineMode,
+        groupBy: String(searchParams.get("groupBy") || "month") as TofuRequest["groupBy"],
         detailPeriodKey: searchParams.get("detailPeriodKey") || "",
         detailMetric: searchParams.get("detailMetric") || "",
       }),

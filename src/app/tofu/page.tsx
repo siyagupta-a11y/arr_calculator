@@ -4,7 +4,9 @@ import Link from "next/link";
 import React, { useMemo, useState } from "react";
 
 type CombineMode = "grouped" | "simple";
+type TofuGroupBy = "month" | "plan";
 type TofuDetailMetric = "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "endingArr";
+type CombinedPlan = "enterprise" | "managed" | "team" | "plus" | "pay_as_you_go" | "free";
 
 type TofuMonthRow = {
   periodKey: string;
@@ -17,12 +19,27 @@ type TofuMonthRow = {
   endingArr: number;
 };
 
+type TofuPlanRow = {
+  periodKey: string;
+  periodLabel: string;
+  plan: CombinedPlan;
+  beginningArr: number;
+  newArr: number;
+  expansionArr: number;
+  contractionArr: number;
+  churnArr: number;
+  netPlanChangeArr: number;
+  endingArr: number;
+};
+
 type TofuResponse = {
   startDate: string;
   endDate: string;
   combineMode: CombineMode;
+  groupBy: TofuGroupBy;
   targetCurrency: string;
   rows: TofuMonthRow[];
+  planRows?: TofuPlanRow[];
 };
 
 type TofuDetailRow = {
@@ -66,6 +83,15 @@ const METRIC_LABELS: Record<TofuDetailMetric, string> = {
   endingArr: "Ending ARR",
 };
 
+const PLAN_LABELS: Record<CombinedPlan, string> = {
+  enterprise: "Enterprise",
+  managed: "Managed",
+  team: "Team",
+  plus: "Plus",
+  pay_as_you_go: "Pay as you go",
+  free: "Free",
+};
+
 function defaultDateRange() {
   const end = new Date();
   const start = new Date(end.getFullYear() - 1, end.getMonth(), 1);
@@ -94,6 +120,14 @@ function formatMoney(value: number, currency: string) {
 
 function sumField(rows: TofuMonthRow[], key: keyof TofuMonthRow) {
   return rows.reduce((sum, row) => sum + Number(row[key] || 0), 0);
+}
+
+function sumPlanField(rows: TofuPlanRow[], key: keyof TofuPlanRow) {
+  return rows.reduce((sum, row) => sum + Number(row[key] || 0), 0);
+}
+
+function round2(value: number) {
+  return Math.round((Number(value) || 0) * 100) / 100;
 }
 
 function csvCell(value: unknown) {
@@ -143,6 +177,7 @@ export default function TofuPage() {
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
   const [combineMode, setCombineMode] = useState<CombineMode>("grouped");
+  const [groupBy, setGroupBy] = useState<TofuGroupBy>("month");
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<TofuResponse | null>(null);
@@ -161,7 +196,7 @@ export default function TofuPage() {
       const res = await fetch("/api/tofu-report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startDate, endDate, combineMode }),
+        body: JSON.stringify({ startDate, endDate, combineMode, groupBy }),
       });
       const json = await parseApiResponse(res);
       setData(json as TofuResponse);
@@ -201,7 +236,23 @@ export default function TofuPage() {
 
   const currency = data?.targetCurrency || "USD";
   const effectiveCombineMode = data?.combineMode || combineMode;
+  const effectiveGroupBy = data?.groupBy || groupBy;
   const rows = data?.rows || [];
+  const planRows = data?.planRows || [];
+  const latestEndingArr =
+    effectiveGroupBy === "plan"
+      ? (() => {
+          if (!planRows.length) return 0;
+          const latestKey = planRows[planRows.length - 1].periodKey;
+          return round2(
+            planRows
+              .filter((row) => row.periodKey === latestKey)
+              .reduce((sum, row) => sum + Number(row.endingArr || 0), 0),
+          );
+        })()
+      : rows.length
+        ? rows[rows.length - 1].endingArr
+        : 0;
 
   function exportDetailCsv(payload: TofuDetailResponse) {
     const filename = `tofu-detail-${payload.detailMetric}-${payload.detailPeriodKey}-${payload.combineMode}.csv`;
@@ -268,7 +319,7 @@ export default function TofuPage() {
             <h1 className="stripe-ui__title">TOFU</h1>
             <p className="stripe-ui__subtitle">
               Monthly ARR bridge based on Combined All Subs. Choose Grouped mode to use contact-based matching, or
-              Simple mode to use the non-grouped HubSpot+Stripe table.
+              Simple mode to use the non-grouped HubSpot+Stripe table. Group by Plan adds plan-level bridge lines.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -287,8 +338,8 @@ export default function TofuPage() {
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Report controls</h2>
-        <p className="stripe-ui__panel-subtitle">Select date range and mode, then run monthly TOFU ARR breakdown.</p>
-        <div className="stripe-ui__control-grid" style={{ gridTemplateColumns: "repeat(4, minmax(180px, 1fr))" }}>
+        <p className="stripe-ui__panel-subtitle">Select date range and mode, then run TOFU ARR breakdown.</p>
+        <div className="stripe-ui__control-grid" style={{ gridTemplateColumns: "repeat(5, minmax(180px, 1fr))" }}>
           <div className="stripe-ui__field">
             <label className="stripe-ui__field-label" htmlFor="tofu-start-date">
               Start date
@@ -343,13 +394,30 @@ export default function TofuPage() {
               {loading ? "Running..." : "Run"}
             </button>
           </div>
+
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="tofu-group-by">
+              Group by
+            </label>
+            <select
+              id="tofu-group-by"
+              className="stripe-ui__control"
+              value={groupBy}
+              onChange={(e) => setGroupBy(e.target.value as TofuGroupBy)}
+            >
+              <option value="month">Month</option>
+              <option value="plan">Plan</option>
+            </select>
+          </div>
         </div>
       </section>
 
       {loading && (
         <section className="stripe-ui__panel stripe-ui__loading-panel ui-reveal ui-reveal-2" aria-live="polite" aria-busy="true">
           <h2 className="stripe-ui__panel-title">Loading report...</h2>
-          <p className="stripe-ui__panel-subtitle">Computing monthly TOFU bridge from Combined All Subs.</p>
+          <p className="stripe-ui__panel-subtitle">
+            Computing {groupBy === "plan" ? "plan-level" : "monthly"} TOFU bridge from Combined All Subs.
+          </p>
           <div className="stripe-ui__skeleton-grid">
             <div className="stripe-ui__skeleton-row" />
             <div className="stripe-ui__skeleton-row" />
@@ -374,88 +442,148 @@ export default function TofuPage() {
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
             <div className="stripe-ui__stats">
               <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Months</p>
-                <p className="stripe-ui__stat-value">{rows.length}</p>
+                <p className="stripe-ui__stat-label">{effectiveGroupBy === "plan" ? "Plan rows" : "Months"}</p>
+                <p className="stripe-ui__stat-value">{effectiveGroupBy === "plan" ? planRows.length : rows.length}</p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Mode</p>
                 <p className="stripe-ui__stat-value">
-                  {effectiveCombineMode === "grouped" ? "Grouped" : "Simple"}
+                  {effectiveCombineMode === "grouped" ? "Grouped" : "Simple"} / {effectiveGroupBy === "plan" ? "Plan" : "Month"}
                 </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Total New ARR</p>
-                <p className="stripe-ui__stat-value">{formatMoney(sumField(rows, "newArr"), currency)}</p>
+                <p className="stripe-ui__stat-value">
+                  {formatMoney(
+                    effectiveGroupBy === "plan" ? sumPlanField(planRows, "newArr") : sumField(rows, "newArr"),
+                    currency,
+                  )}
+                </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Total Churn ARR</p>
-                <p className="stripe-ui__stat-value">{formatMoney(sumField(rows, "churnArr"), currency)}</p>
+                <p className="stripe-ui__stat-value">
+                  {formatMoney(
+                    effectiveGroupBy === "plan" ? sumPlanField(planRows, "churnArr") : sumField(rows, "churnArr"),
+                    currency,
+                  )}
+                </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Latest Ending ARR</p>
-                <p className="stripe-ui__stat-value">
-                  {formatMoney(rows.length ? rows[rows.length - 1].endingArr : 0, currency)}
-                </p>
+                <p className="stripe-ui__stat-value">{formatMoney(latestEndingArr, currency)}</p>
               </div>
             </div>
           </section>
 
           <section className="stripe-ui__panel ui-reveal ui-reveal-3">
-            <h2 className="stripe-ui__panel-title">Monthly TOFU ARR bridge</h2>
-            <p className="stripe-ui__panel-subtitle">
-              Contraction and Churn are shown as negative ARR movement so each month follows:
-              Ending = Beginning + New + Expansion + Contraction + Churn.
-            </p>
-            <p className="stripe-ui__panel-subtitle" style={{ marginTop: "-0.2rem" }}>
-              Click any ARR value to see the customer rows used for that month/metric, including previous and current MRR.
-            </p>
+            <h2 className="stripe-ui__panel-title">
+              {effectiveGroupBy === "plan" ? "TOFU ARR bridge by plan" : "Monthly TOFU ARR bridge"}
+            </h2>
+            {effectiveGroupBy === "plan" ? (
+              <p className="stripe-ui__panel-subtitle">
+                For plan switches, ARR is removed from the previous plan as Net upgrade/downgrade and added to the
+                new plan as Expansion ARR.
+              </p>
+            ) : (
+              <>
+                <p className="stripe-ui__panel-subtitle">
+                  Contraction and Churn are shown as negative ARR movement so each month follows:
+                  Ending = Beginning + New + Expansion + Contraction + Churn.
+                </p>
+                <p className="stripe-ui__panel-subtitle" style={{ marginTop: "-0.2rem" }}>
+                  Click any ARR value to see the customer rows used for that month/metric, including previous and current MRR.
+                </p>
+              </>
+            )}
 
-            <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
-              <table className="stripe-ui__table" aria-label="TOFU monthly ARR bridge table">
-                <thead>
-                  <tr>
-                    <th>Month</th>
-                    <th className="stripe-ui__num">Beginning ARR</th>
-                    <th className="stripe-ui__num">New ARR</th>
-                    <th className="stripe-ui__num">Expansion ARR</th>
-                    <th className="stripe-ui__num">Contraction ARR</th>
-                    <th className="stripe-ui__num">Churn ARR</th>
-                    <th className="stripe-ui__num">Ending ARR</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((row) => (
-                    <tr key={row.periodKey}>
-                      <td>{row.periodLabel}</td>
-                      <td className="stripe-ui__num">{renderDrillCell(row, "beginningArr", row.beginningArr)}</td>
-                      <td className="stripe-ui__num">{renderDrillCell(row, "newArr", row.newArr)}</td>
-                      <td className="stripe-ui__num">{renderDrillCell(row, "expansionArr", row.expansionArr)}</td>
-                      <td className={`stripe-ui__num ${row.contractionArr < 0 ? "stripe-ui__money--negative" : ""}`}>
-                        {renderDrillCell(row, "contractionArr", row.contractionArr)}
-                      </td>
-                      <td className={`stripe-ui__num ${row.churnArr < 0 ? "stripe-ui__money--negative" : ""}`}>
-                        {renderDrillCell(row, "churnArr", row.churnArr)}
-                      </td>
-                      <td className="stripe-ui__num">{renderDrillCell(row, "endingArr", row.endingArr)}</td>
+            {effectiveGroupBy === "plan" ? (
+              <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
+                <table className="stripe-ui__table" aria-label="TOFU ARR bridge grouped by plan table">
+                  <thead>
+                    <tr>
+                      <th>Month</th>
+                      <th>Plan</th>
+                      <th className="stripe-ui__num">Beginning ARR</th>
+                      <th className="stripe-ui__num">New ARR</th>
+                      <th className="stripe-ui__num">Expansion ARR</th>
+                      <th className="stripe-ui__num">Contraction ARR</th>
+                      <th className="stripe-ui__num">Churn ARR</th>
+                      <th className="stripe-ui__num">Net Upgrade/Downgrade to Different Plan</th>
+                      <th className="stripe-ui__num">Ending ARR</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {planRows.map((row) => (
+                      <tr key={`${row.periodKey}:${row.plan}`}>
+                        <td>{row.periodLabel}</td>
+                        <td>{PLAN_LABELS[row.plan] || row.plan}</td>
+                        <td className="stripe-ui__num">{formatMoney(row.beginningArr, currency)}</td>
+                        <td className="stripe-ui__num">{formatMoney(row.newArr, currency)}</td>
+                        <td className="stripe-ui__num">{formatMoney(row.expansionArr, currency)}</td>
+                        <td className={`stripe-ui__num ${row.contractionArr < 0 ? "stripe-ui__money--negative" : ""}`}>
+                          {formatMoney(row.contractionArr, currency)}
+                        </td>
+                        <td className={`stripe-ui__num ${row.churnArr < 0 ? "stripe-ui__money--negative" : ""}`}>
+                          {formatMoney(row.churnArr, currency)}
+                        </td>
+                        <td className={`stripe-ui__num ${row.netPlanChangeArr < 0 ? "stripe-ui__money--negative" : ""}`}>
+                          {formatMoney(row.netPlanChangeArr, currency)}
+                        </td>
+                        <td className="stripe-ui__num">{formatMoney(row.endingArr, currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
+                <table className="stripe-ui__table" aria-label="TOFU monthly ARR bridge table">
+                  <thead>
+                    <tr>
+                      <th>Month</th>
+                      <th className="stripe-ui__num">Beginning ARR</th>
+                      <th className="stripe-ui__num">New ARR</th>
+                      <th className="stripe-ui__num">Expansion ARR</th>
+                      <th className="stripe-ui__num">Contraction ARR</th>
+                      <th className="stripe-ui__num">Churn ARR</th>
+                      <th className="stripe-ui__num">Ending ARR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row) => (
+                      <tr key={row.periodKey}>
+                        <td>{row.periodLabel}</td>
+                        <td className="stripe-ui__num">{renderDrillCell(row, "beginningArr", row.beginningArr)}</td>
+                        <td className="stripe-ui__num">{renderDrillCell(row, "newArr", row.newArr)}</td>
+                        <td className="stripe-ui__num">{renderDrillCell(row, "expansionArr", row.expansionArr)}</td>
+                        <td className={`stripe-ui__num ${row.contractionArr < 0 ? "stripe-ui__money--negative" : ""}`}>
+                          {renderDrillCell(row, "contractionArr", row.contractionArr)}
+                        </td>
+                        <td className={`stripe-ui__num ${row.churnArr < 0 ? "stripe-ui__money--negative" : ""}`}>
+                          {renderDrillCell(row, "churnArr", row.churnArr)}
+                        </td>
+                        <td className="stripe-ui__num">{renderDrillCell(row, "endingArr", row.endingArr)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
-            {detailLoading && (
+            {effectiveGroupBy === "month" && detailLoading && (
               <div style={{ marginTop: "0.8rem" }} className="stripe-ui__panel-subtitle">
                 Loading detail rows...
               </div>
             )}
 
-            {detailError && (
+            {effectiveGroupBy === "month" && detailError && (
               <div className="stripe-ui__error" style={{ marginTop: "0.8rem" }} role="alert" aria-live="assertive">
                 {detailError}
               </div>
             )}
 
-            {detailData && !detailLoading && !detailError && (
+            {effectiveGroupBy === "month" && detailData && !detailLoading && !detailError && (
               <div style={{ marginTop: "1rem" }}>
                 <h3 className="stripe-ui__panel-title" style={{ fontSize: "1rem" }}>
                   {METRIC_LABELS[detailData.detailMetric]} detail - {detailData.detailPeriodLabel}
