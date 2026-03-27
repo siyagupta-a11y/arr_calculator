@@ -275,19 +275,33 @@ export async function fetchDealStageIdToLabelMap() {
 export async function fetchWorkspaceIdsForDealStageLabel(
   stageLabel = String(process.env.HUBSPOT_TRANSACTIONAL_STAGE_LABEL || "Closed Won (Transactional Pipeline)"),
 ) {
+  const configuredStageIds = Array.from(
+    new Set(
+      String(process.env.HUBSPOT_TRANSACTIONAL_STAGE_ID || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  );
   const normalizedLabel = normalizeStageLabelKey(stageLabel);
-  if (!normalizedLabel) return new Set<string>();
+  if (!configuredStageIds.length && !normalizedLabel) return new Set<string>();
 
-  const cached = readCache(DEAL_STAGE_WORKSPACE_IDS_CACHE, normalizedLabel);
+  const cacheKey = configuredStageIds.length
+    ? `stage_ids:${configuredStageIds.slice().sort((a, b) => a.localeCompare(b)).join(",")}`
+    : `stage_label:${normalizedLabel}`;
+  const cached = readCache(DEAL_STAGE_WORKSPACE_IDS_CACHE, cacheKey);
   if (cached) return new Set<string>(cached);
 
-  const stageIdToLabel = await fetchDealStageIdToLabelMap();
-  const matchingStageIds = Array.from(stageIdToLabel.entries())
-    .filter(([, label]) => normalizeStageLabelKey(label || "") === normalizedLabel)
-    .map(([stageId]) => stageId);
+  let matchingStageIds = configuredStageIds;
+  if (!matchingStageIds.length) {
+    const stageIdToLabel = await fetchDealStageIdToLabelMap();
+    matchingStageIds = Array.from(stageIdToLabel.entries())
+      .filter(([, label]) => normalizeStageLabelKey(label || "") === normalizedLabel)
+      .map(([stageId]) => stageId);
+  }
 
   if (!matchingStageIds.length) {
-    writeCache(DEAL_STAGE_WORKSPACE_IDS_CACHE, normalizedLabel, []);
+    writeCache(DEAL_STAGE_WORKSPACE_IDS_CACHE, cacheKey, []);
     return new Set<string>();
   }
 
@@ -331,7 +345,7 @@ export async function fetchWorkspaceIdsForDealStageLabel(
     }
   }
 
-  writeCache(DEAL_STAGE_WORKSPACE_IDS_CACHE, normalizedLabel, Array.from(workspaceIds));
+  writeCache(DEAL_STAGE_WORKSPACE_IDS_CACHE, cacheKey, Array.from(workspaceIds));
   return workspaceIds;
 }
 

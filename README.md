@@ -261,6 +261,8 @@ HubSpot:
 
 - `HUBSPOT_PRIVATE_APP_TOKEN`
 - `INCLUDED_DEALSTAGE`
+- `HUBSPOT_TRANSACTIONAL_STAGE_ID` (optional, used by sales-assist matching on Stripe Through MRR; overrides label lookup)
+- `HUBSPOT_TRANSACTIONAL_STAGE_LABEL` (optional fallback label, default `Closed Won (Transactional Pipeline)`)
 - `FX_TARGET_CURRENCY`
 - `HUBSPOT_CONTRACTED_ARR_FIELD` (optional, default `contracted_arr`)
 - `HUBSPOT_CURRENT_ARR_FIELD` (optional)
