@@ -554,7 +554,7 @@ function CacChartCard({
         "CAC",
         "Sales & Marketing Cost",
         "Total Users",
-        ...selectedAccountsForCsv.map((account) => `Expense: ${account.label}`),
+        ...selectedAccountsForCsv.map((account) => account.label),
       ],
       ...points.map((point) => [
         point.label,
