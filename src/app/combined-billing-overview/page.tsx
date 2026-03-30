@@ -57,6 +57,18 @@ type CacPoint = {
   accountCostsByAccountId?: Record<string, number>;
 };
 
+type LtvPoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  totalArr: number;
+  activeCustomers: number;
+  arpuMonthly: number;
+  churnRatePct: number;
+  ltv: number;
+};
+
 type CombinedLiveArrResponse = {
   generatedAtUtc: string;
   liveArr: number;
@@ -82,6 +94,8 @@ type CombinedBillingOverviewReportResponse = {
   currentArr: number;
   points: CombinedPoint[];
   retentionPoints: RetentionSeriesPoint[];
+  ltvPoints: LtvPoint[];
+  ltvNotice: string | null;
   cacPoints: CacPoint[];
   cacCurrencyLayerPoints: CacPoint[];
   cacCadPoints: CacPoint[];
@@ -126,6 +140,7 @@ type CombinedOverviewData = {
   projectedArrEomFlatFlat: number;
   points: CombinedPoint[];
   retentionPoints: RetentionSeriesPoint[];
+  ltvPoints: LtvPoint[];
   cacPoints: CacPoint[];
   cacCurrencyLayerPoints: CacPoint[];
   cacCadPoints: CacPoint[];
@@ -1651,6 +1666,7 @@ export default function CombinedBillingOverviewPage() {
   const [hasRunOnce, setHasRunOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<CombinedOverviewData | null>(null);
+  const [ltvNotice, setLtvNotice] = useState<string | null>(null);
   const [cacNotice, setCacNotice] = useState<string | null>(null);
   const [selectedCacAccountIds, setSelectedCacAccountIds] = useState<string[]>([]);
   const [cacAccountMenuTarget, setCacAccountMenuTarget] = useState<CacMenuTarget>(null);
@@ -1809,6 +1825,7 @@ export default function CombinedBillingOverviewPage() {
     setLoading(true);
     setCacLoading(false);
     setError(null);
+    setLtvNotice(null);
     setCacNotice(null);
     setShowProjectedArrBreakdown(false);
 
@@ -1863,6 +1880,7 @@ export default function CombinedBillingOverviewPage() {
       const overview = await overviewPromise;
       if (isStale()) return;
 
+      setLtvNotice(overview.ltvNotice);
       setCacNotice(overview.cacNotice);
 
       setData((prev) => ({
@@ -1891,6 +1909,7 @@ export default function CombinedBillingOverviewPage() {
         projectedArrEomFlatFlat: round2(prev?.projectedArrEomFlatFlat || 0),
         points: overview.points || [],
         retentionPoints: overview.retentionPoints || [],
+        ltvPoints: overview.ltvPoints || [],
         cacPoints: overview.cacPoints || [],
         cacCurrencyLayerPoints: overview.cacCurrencyLayerPoints || [],
         cacCadPoints: overview.cacCadPoints || [],
@@ -1952,11 +1971,13 @@ export default function CombinedBillingOverviewPage() {
             },
           );
           if (isStale()) return;
+          setLtvNotice(overviewWithCac.ltvNotice);
           setCacNotice(overviewWithCac.cacNotice);
           setData((prev) => {
             if (!prev) return prev;
             return {
               ...prev,
+              ltvPoints: overviewWithCac.ltvPoints || [],
               cacPoints: overviewWithCac.cacPoints || [],
               cacCurrencyLayerPoints: overviewWithCac.cacCurrencyLayerPoints || [],
               cacCadPoints: overviewWithCac.cacCadPoints || [],
@@ -1966,6 +1987,7 @@ export default function CombinedBillingOverviewPage() {
         } catch (e: unknown) {
           if (isStale()) return;
           const message = conciseErrorMessage(e, "Failed to load CAC details.");
+          setLtvNotice(`LTV unavailable: ${message}`);
           setCacNotice(`CAC unavailable: ${message}`);
         } finally {
           if (!isStale()) setCacLoading(false);
@@ -1983,6 +2005,7 @@ export default function CombinedBillingOverviewPage() {
 
   const points = useMemo(() => data?.points ?? [], [data]);
   const retentionPoints = useMemo(() => data?.retentionPoints ?? [], [data]);
+  const ltvPoints = useMemo(() => data?.ltvPoints ?? [], [data]);
   const cacPoints = useMemo(() => data?.cacPoints ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
 
@@ -2113,6 +2136,14 @@ export default function CombinedBillingOverviewPage() {
         </section>
       )}
 
+      {!loading && !error && ltvNotice && (
+        <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+          <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+            {ltvNotice}
+          </p>
+        </section>
+      )}
+
       {!loading && !error && data && (
         <>
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
@@ -2225,6 +2256,16 @@ export default function CombinedBillingOverviewPage() {
               points={points}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => formatMoney(v, currency)}
+            />
+
+            <LineChartCard
+              title="LTV Over Time"
+              subtitle="LTV = ARPU / churn rate, where ARPU uses (Stripe ARR + HubSpot ARR + AI spend ARR)."
+              points={ltvPoints}
+              valueAccessor={(p) => p.ltv}
+              valueFormatter={(v) => formatMoney(v, currency)}
+              stroke="#a855f7"
+              includeZero
             />
 
             <CacChartCard

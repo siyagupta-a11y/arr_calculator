@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { generateReport } from "@/lib/report";
 import type { ReportResponse, ReportRow } from "@/lib/types";
 import {
+  queryStripeAiSpendFromBigQuery,
   queryStripeBillingOverviewFromBigQuery,
   type StripeBillingOverviewPoint,
   type StripeBillingOverviewCustomerArrRow,
 } from "@/lib/stripeBigquery";
+import { resolveEnterprisePrepaidAiSpendExclusions } from "@/lib/aiSpendEnterprisePrepaidExclusions";
 import { fetchQuickBooksSalesMarketingCostsByMonth } from "@/lib/quickbooks";
 import {
   getMonthlyAverageCurrencyLayerFxRateForCloseMonth,
@@ -64,6 +66,23 @@ type CacPoint = {
   newCustomerCount: number;
   cac: number;
   accountCostsByAccountId?: Record<string, number>;
+};
+
+type LtvPoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  totalArr: number;
+  activeCustomers: number;
+  arpuMonthly: number;
+  churnRatePct: number;
+  ltv: number;
+};
+
+type LogoChurnCounts = {
+  prevActive: number;
+  churned: number;
 };
 
 type QuickBooksSalesMarketingCostPoint = {
@@ -429,6 +448,139 @@ function buildCacSeries(
       newCustomerCount,
       cac,
       ...(accountCostsByAccountId ? { accountCostsByAccountId } : {}),
+    };
+  });
+}
+
+function buildActiveAccountCountByPeriod(
+  periodOrder: PeriodRef[],
+  accountArrByPeriod: Map<string, Record<string, number>>,
+) {
+  const out = new Map<string, number>();
+  for (const period of periodOrder) {
+    const key = canonicalHubPeriodKey(period.key, "monthly") || period.key;
+    let count = 0;
+    for (const accountTotals of accountArrByPeriod.values()) {
+      if (Math.abs(Number(accountTotals[period.key] || 0)) > 1e-9) count += 1;
+    }
+    out.set(key, count);
+  }
+  return out;
+}
+
+function buildActiveStripeCustomerCountByPeriod(
+  stripeArrByCustomer: Map<string, Map<string, number>>,
+) {
+  const out = new Map<string, number>();
+  for (const valuesByPeriod of stripeArrByCustomer.values()) {
+    for (const [periodKey, arr] of valuesByPeriod.entries()) {
+      if (Math.abs(Number(arr || 0)) <= 1e-9) continue;
+      out.set(periodKey, (out.get(periodKey) || 0) + 1);
+    }
+  }
+  return out;
+}
+
+function buildHubLogoChurnCountsByPeriod(
+  periodOrder: PeriodRef[],
+  grain: CombinedGrain,
+  accountArrByPeriod: Map<string, Record<string, number>>,
+  baselineAccountArrByAccount: Map<string, number>,
+) {
+  const out = new Map<string, LogoChurnCounts>();
+  for (let idx = 0; idx < periodOrder.length; idx += 1) {
+    const period = periodOrder[idx];
+    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+    const prevPeriodKey = idx > 0 ? periodOrder[idx - 1].key : "";
+    let prevActive = 0;
+    let churned = 0;
+    for (const [accountKey, accountTotals] of accountArrByPeriod.entries()) {
+      const currArr = round2(accountTotals[period.key] || 0);
+      const prevArr = round2(
+        idx === 0
+          ? baselineAccountArrByAccount.get(accountKey) || 0
+          : prevPeriodKey
+            ? accountTotals[prevPeriodKey] || 0
+            : 0,
+      );
+      const currHas = Math.abs(currArr) > 1e-9;
+      const prevHas = Math.abs(prevArr) > 1e-9;
+      if (prevHas) prevActive += 1;
+      if (prevHas && !currHas) churned += 1;
+    }
+    out.set(key, { prevActive, churned });
+  }
+  return out;
+}
+
+function buildStripeLogoChurnCountsByPeriod(
+  periodOrder: PeriodRef[],
+  grain: CombinedGrain,
+  stripeArrByCustomer: Map<string, Map<string, number>>,
+  stripeBaselineArrByCustomer: Map<string, number>,
+) {
+  const out = new Map<string, LogoChurnCounts>();
+  for (let idx = 0; idx < periodOrder.length; idx += 1) {
+    const period = periodOrder[idx];
+    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+    const prevKey =
+      idx > 0 ? canonicalHubPeriodKey(periodOrder[idx - 1].key, grain) || periodOrder[idx - 1].key : "";
+    let prevActive = 0;
+    let churned = 0;
+    for (const [customerId, valuesByPeriod] of stripeArrByCustomer.entries()) {
+      const currArr = round2(valuesByPeriod.get(key) || 0);
+      const prevArr = round2(
+        idx === 0
+          ? stripeBaselineArrByCustomer.get(customerId) || 0
+          : prevKey
+            ? valuesByPeriod.get(prevKey) || 0
+            : 0,
+      );
+      const currHas = Math.abs(currArr) > 1e-9;
+      const prevHas = Math.abs(prevArr) > 1e-9;
+      if (prevHas) prevActive += 1;
+      if (prevHas && !currHas) churned += 1;
+    }
+    out.set(key, { prevActive, churned });
+  }
+  return out;
+}
+
+function buildLtvSeries(
+  periodOrder: PeriodRef[],
+  grain: CombinedGrain,
+  combinedPoints: CombinedPoint[],
+  activeHubByPeriod: Map<string, number>,
+  activeStripeByPeriod: Map<string, number>,
+  aiSpendArrByMonth: Map<string, number>,
+  logoChurnRateByPeriod: Map<string, number>,
+): LtvPoint[] {
+  return periodOrder.map((period, idx) => {
+    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+    const periodStart = grain === "monthly" ? `${key}-01` : key;
+    const point = combinedPoints[idx];
+    const aiSpendArr = round2(aiSpendArrByMonth.get(key) || 0);
+    const totalArr = round2((point?.arr || 0) + aiSpendArr);
+    const activeCustomers = Math.max(
+      0,
+      (activeHubByPeriod.get(key) || 0) + (activeStripeByPeriod.get(key) || 0),
+    );
+    const arpuMonthly = activeCustomers > 0 ? round2(totalArr / 12 / activeCustomers) : 0;
+
+    const churnRate = Math.min(1, Math.max(0, Number(logoChurnRateByPeriod.get(key) || 0)));
+    const churnRatePct = round2(churnRate * 100);
+    const ltv = churnRate > 1e-9 ? round2(arpuMonthly / churnRate) : 0;
+
+    return {
+      key,
+      label: period.label,
+      periodStart,
+      periodEnd: periodStart,
+      totalArr,
+      activeCustomers,
+      arpuMonthly,
+      churnRatePct,
+      ltv,
     };
   });
 }
@@ -883,6 +1035,113 @@ async function buildCombinedBillingOverview(
     };
   });
 
+  const stripeArrByCustomer = new Map<string, Map<string, number>>();
+  for (const row of stripeMain.customerArrRows || []) {
+    const customerId = String(row.customerId || "").trim();
+    const key = canonicalStripeCustomerPeriodKey(row, grain);
+    if (!customerId || !key) continue;
+    if (!stripeArrByCustomer.has(customerId)) stripeArrByCustomer.set(customerId, new Map<string, number>());
+    const valuesByPeriod = stripeArrByCustomer.get(customerId)!;
+    valuesByPeriod.set(key, round2((valuesByPeriod.get(key) || 0) + Number(row.arr || 0)));
+  }
+  const stripeBaselineArrByCustomer = new Map<string, number>();
+  for (const row of stripeBaseline?.customerArrRows || []) {
+    const customerId = String(row.customerId || "").trim();
+    if (!customerId) continue;
+    stripeBaselineArrByCustomer.set(
+      customerId,
+      round2((stripeBaselineArrByCustomer.get(customerId) || 0) + Number(row.arr || 0)),
+    );
+  }
+  const activeHubByPeriod = buildActiveAccountCountByPeriod(periodOrder, accountArrByPeriod);
+  const activeStripeByPeriod = buildActiveStripeCustomerCountByPeriod(stripeArrByCustomer);
+  const hubLogoChurnCountsByPeriod = buildHubLogoChurnCountsByPeriod(
+    periodOrder,
+    grain,
+    accountArrByPeriod,
+    baselineAccountArrByAccount,
+  );
+  const stripeLogoChurnCountsByPeriod = buildStripeLogoChurnCountsByPeriod(
+    periodOrder,
+    grain,
+    stripeArrByCustomer,
+    stripeBaselineArrByCustomer,
+  );
+  const logoChurnRateByPeriod = new Map<string, number>();
+  for (const period of periodOrder) {
+    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+    const hubCounts = hubLogoChurnCountsByPeriod.get(key) || { prevActive: 0, churned: 0 };
+    const stripeCounts = stripeLogoChurnCountsByPeriod.get(key) || { prevActive: 0, churned: 0 };
+    const prevActive = Math.max(0, hubCounts.prevActive + stripeCounts.prevActive);
+    const churned = Math.max(0, hubCounts.churned + stripeCounts.churned);
+    const rate = prevActive > 0 ? churned / prevActive : 0;
+    logoChurnRateByPeriod.set(key, Math.min(1, Math.max(0, rate)));
+  }
+
+  let ltvPoints: LtvPoint[] = [];
+  let ltvNotice: string | null = null;
+  if (grain !== "monthly") {
+    ltvNotice = "LTV currently supports monthly grain. Switch Time grain to Monthly to load LTV over time.";
+  } else if (!includeCac) {
+    ltvNotice = "Loading LTV data...";
+  } else {
+    const buildFallbackLtv = () =>
+      buildLtvSeries(
+        periodOrder,
+        grain,
+        points,
+        activeHubByPeriod,
+        activeStripeByPeriod,
+        new Map<string, number>(),
+        logoChurnRateByPeriod,
+      );
+    try {
+      const exclusions = await resolveEnterprisePrepaidAiSpendExclusions({
+        startDate,
+        endDate,
+        targetCurrency,
+      }).catch(() => ({ customerMonthPrepaidOffsets: [] }));
+      const aiSpend = await queryStripeAiSpendFromBigQuery(
+        {
+          startDate,
+          endDate,
+          grain: "monthly",
+          targetCurrency,
+          topLimit: 1,
+          detailLimit: 1,
+          excludeCustomerIds: [],
+          excludeCustomerMonthPairs: [],
+          prepaidOffsetByCustomerMonthPairs: (exclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
+            pairKey: entry.pairKey,
+            prepaidAppliedMajor: entry.prepaidAppliedMajor,
+          })),
+        },
+        { profile: "stripe_arr_correct" },
+      );
+      const aiSpendArrByMonth = new Map<string, number>();
+      for (const point of aiSpend.points || []) {
+        const monthKey = String(point.key || "").slice(0, 7);
+        if (!monthKey) continue;
+        aiSpendArrByMonth.set(monthKey, round2((aiSpendArrByMonth.get(monthKey) || 0) + Number(point.revenue || 0) * 12));
+      }
+      ltvPoints = buildLtvSeries(
+        periodOrder,
+        grain,
+        points,
+        activeHubByPeriod,
+        activeStripeByPeriod,
+        aiSpendArrByMonth,
+        logoChurnRateByPeriod,
+      );
+    } catch (error: unknown) {
+      ltvNotice = `LTV warning: AI spend component unavailable (${conciseErrorMessage(
+        error,
+        "AI spend query failed.",
+      )}). Using Stripe + HubSpot ARR only.`;
+      ltvPoints = buildFallbackLtv();
+    }
+  }
+
   const combinedNewCustomerCountByPeriod = new Map<string, number>();
   if (includeCac) {
     const hubNewCustomerCountByPeriod = new Map<string, number>();
@@ -905,26 +1164,6 @@ async function buildCombinedBillingOverview(
       }
       hubNewCustomerCountByPeriod.set(key, count);
     });
-
-    const stripeArrByCustomer = new Map<string, Map<string, number>>();
-    for (const row of stripeMain.customerArrRows || []) {
-      const customerId = String(row.customerId || "").trim();
-      const key = canonicalStripeCustomerPeriodKey(row, grain);
-      if (!customerId || !key) continue;
-      if (!stripeArrByCustomer.has(customerId)) stripeArrByCustomer.set(customerId, new Map<string, number>());
-      const valuesByPeriod = stripeArrByCustomer.get(customerId)!;
-      valuesByPeriod.set(key, round2((valuesByPeriod.get(key) || 0) + Number(row.arr || 0)));
-    }
-
-    const stripeBaselineArrByCustomer = new Map<string, number>();
-    for (const row of stripeBaseline?.customerArrRows || []) {
-      const customerId = String(row.customerId || "").trim();
-      if (!customerId) continue;
-      stripeBaselineArrByCustomer.set(
-        customerId,
-        round2((stripeBaselineArrByCustomer.get(customerId) || 0) + Number(row.arr || 0)),
-      );
-    }
 
     const stripeNewCustomerCountByPeriod = new Map<string, number>();
     periodOrder.forEach((period, idx) => {
@@ -1079,9 +1318,11 @@ async function buildCombinedBillingOverview(
     currentArr: round2(currentMrr * 12),
     points,
     retentionPoints,
+    ltvPoints,
     cacPoints,
     cacCurrencyLayerPoints,
     cacCadPoints,
+    ltvNotice,
     cacNotice,
     cacCurrencyLayerNotice,
     cacCadNotice,
