@@ -1,4 +1,5 @@
 import {
+  queryStripeSalesLedCustomerCurrentBalanceFromBigQuery,
   queryStripeSalesLedCustomerLatestInvoiceCreditFromBigQuery,
   queryStripeMeteredUsageByCustomerFromBigQuery,
   queryStripeSalesLedCustomerInvoicePrepaidUsageFromBigQuery,
@@ -343,26 +344,16 @@ export async function resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOff
   const lastMonthEndDate = toIsoDateOnlyUtc(lastMonthEnd);
   const asOfDate = String(request?.asOfDate || toIsoDateOnlyUtc(now)).trim();
   const targetCurrency = String(request?.targetCurrency || "USD").trim().toLowerCase() || "usd";
+  const monthKey = monthKeyFromDate(currentMonthStart);
 
-  const [lastMonthExclusions, lastMonthCreditRows] = await Promise.all([
-    resolveEnterprisePrepaidAiSpendExclusions({
-      startDate: lastMonthStartDate,
-      endDate: lastMonthEndDate,
+  const salesLedBalances = await queryStripeSalesLedCustomerCurrentBalanceFromBigQuery(
+    {
       asOfDate,
-      targetCurrency,
-    }),
-    queryStripeSalesLedCustomerLatestInvoiceCreditFromBigQuery(
-      {
-        asOfDate: lastMonthEndDate,
-      },
-      { profile: "stripe_arr_correct" },
-    ),
-  ]);
-
-  const lastMonthExcludedCustomerIds = new Set(
-    (lastMonthExclusions.customerIds || []).map((customerId) => String(customerId || "").trim()).filter(Boolean),
+    },
+    { profile: "stripe_arr_correct" },
   );
-  if (!lastMonthExcludedCustomerIds.size) {
+
+  if (!salesLedBalances.length) {
     return {
       currentMonthStartDate,
       currentMonthEndDate,
@@ -376,10 +367,10 @@ export async function resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOff
 
   const prepaidOffsetByCustomerIds = Array.from(
     new Map(
-      (lastMonthCreditRows || [])
+      (salesLedBalances || [])
         .map((row) => {
           const customerId = String(row.customerId || "").trim();
-          if (!customerId || !lastMonthExcludedCustomerIds.has(customerId)) return null;
+          if (!customerId) return null;
           const prepaidAppliedMajor = round2(Math.max(0, Number(row.availableCreditMinor || 0)) / 100);
           if (prepaidAppliedMajor <= 0) return null;
           return [customerId, prepaidAppliedMajor] as const;
@@ -395,10 +386,43 @@ export async function resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOff
     });
 
   const carriedCustomerIds = prepaidOffsetByCustomerIds.map((row) => row.customerId);
-  const carriedCustomerSet = new Set(carriedCustomerIds);
-  const excludedCustomers = (lastMonthExclusions.rows || []).filter((row) =>
-    carriedCustomerSet.has(String(row.customerId || "").trim()),
+  const offsetsByCustomer = new Map(
+    prepaidOffsetByCustomerIds.map((row) => [String(row.customerId || "").trim(), Number(row.prepaidAppliedMajor || 0)]),
   );
+  const excludedCustomers: EnterprisePrepaidAiSpendExclusionRow[] = (salesLedBalances || [])
+    .map((row) => {
+      const customerId = String(row.customerId || "").trim();
+      if (!customerId) return null;
+      const prepaidAppliedMajor = Number(offsetsByCustomer.get(customerId) || 0);
+      if (prepaidAppliedMajor <= 0) return null;
+      const prepaidAppliedMinor = Math.max(0, Math.round(prepaidAppliedMajor * 100));
+      const availableCreditMinor = Math.max(0, Number(row.availableCreditMinor || 0));
+      return {
+        monthKey,
+        monthLabel: monthKey,
+        asOfDate,
+        customerId,
+        customerEmail: normalizeEmail(row.email) || "",
+        customerName: String(row.name || "").trim() || "(blank)",
+        currency: String(row.currency || "").trim().toUpperCase() || String(targetCurrency || "usd").toUpperCase(),
+        prepaidAppliedMinor,
+        prepaidAppliedMajor,
+        availableCreditMinor,
+        availableCreditMajor: round2(availableCreditMinor / 100),
+        accountIds: Array.from(
+          new Set((row.accountIds || []).map((value) => String(value || "").trim()).filter(Boolean)),
+        ).sort(),
+        accountNames: Array.from(
+          new Set((row.accountNames || []).map((value) => String(value || "").trim()).filter(Boolean)),
+        ).sort(),
+      } satisfies EnterprisePrepaidAiSpendExclusionRow;
+    })
+    .filter((row): row is EnterprisePrepaidAiSpendExclusionRow => !!row)
+    .sort((a, b) => {
+      const diff = b.prepaidAppliedMinor - a.prepaidAppliedMinor;
+      if (Math.abs(diff) > 1e-9) return diff;
+      return a.customerId.localeCompare(b.customerId);
+    });
 
   return {
     currentMonthStartDate,
