@@ -2240,6 +2240,7 @@ export default function CombinedBillingOverviewPage() {
             <CacChartCard
               points={cacPoints}
               currency={currency}
+              includeAccountBreakdownInCsv={true}
               expenseAccounts={cacExpenseAccounts}
               selectedAccountIds={selectedCacAccountIds}
               runLoading={loading || cacLoading}
