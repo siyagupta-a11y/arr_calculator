@@ -87,6 +87,11 @@ type LogoChurnCounts = {
   churned: number;
 };
 
+type CombinedLtvUserCounts = {
+  activeByPeriod: Map<string, number>;
+  logoChurnByPeriod: Map<string, LogoChurnCounts>;
+};
+
 type QuickBooksSalesMarketingCostPoint = {
   key: string;
   label: string;
@@ -483,71 +488,6 @@ function buildActiveStripeCustomerCountByPeriod(
   return out;
 }
 
-function buildHubLogoChurnCountsByPeriod(
-  periodOrder: PeriodRef[],
-  grain: CombinedGrain,
-  accountArrByPeriod: Map<string, Record<string, number>>,
-  baselineAccountArrByAccount: Map<string, number>,
-) {
-  const out = new Map<string, LogoChurnCounts>();
-  for (let idx = 0; idx < periodOrder.length; idx += 1) {
-    const period = periodOrder[idx];
-    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
-    const prevPeriodKey = idx > 0 ? periodOrder[idx - 1].key : "";
-    let prevActive = 0;
-    let churned = 0;
-    for (const [accountKey, accountTotals] of accountArrByPeriod.entries()) {
-      const currArr = round2(accountTotals[period.key] || 0);
-      const prevArr = round2(
-        idx === 0
-          ? baselineAccountArrByAccount.get(accountKey) || 0
-          : prevPeriodKey
-            ? accountTotals[prevPeriodKey] || 0
-            : 0,
-      );
-      const currHas = Math.abs(currArr) > 1e-9;
-      const prevHas = Math.abs(prevArr) > 1e-9;
-      if (prevHas) prevActive += 1;
-      if (prevHas && !currHas) churned += 1;
-    }
-    out.set(key, { prevActive, churned });
-  }
-  return out;
-}
-
-function buildStripeLogoChurnCountsByPeriod(
-  periodOrder: PeriodRef[],
-  grain: CombinedGrain,
-  stripeArrByCustomer: Map<string, Map<string, number>>,
-  stripeBaselineArrByCustomer: Map<string, number>,
-) {
-  const out = new Map<string, LogoChurnCounts>();
-  for (let idx = 0; idx < periodOrder.length; idx += 1) {
-    const period = periodOrder[idx];
-    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
-    const prevKey =
-      idx > 0 ? canonicalHubPeriodKey(periodOrder[idx - 1].key, grain) || periodOrder[idx - 1].key : "";
-    let prevActive = 0;
-    let churned = 0;
-    for (const [customerId, valuesByPeriod] of stripeArrByCustomer.entries()) {
-      const currArr = round2(valuesByPeriod.get(key) || 0);
-      const prevArr = round2(
-        idx === 0
-          ? stripeBaselineArrByCustomer.get(customerId) || 0
-          : prevKey
-            ? valuesByPeriod.get(prevKey) || 0
-            : 0,
-      );
-      const currHas = Math.abs(currArr) > 1e-9;
-      const prevHas = Math.abs(prevArr) > 1e-9;
-      if (prevHas) prevActive += 1;
-      if (prevHas && !currHas) churned += 1;
-    }
-    out.set(key, { prevActive, churned });
-  }
-  return out;
-}
-
 function buildLtvSeries(
   periodOrder: PeriodRef[],
   grain: CombinedGrain,
@@ -594,23 +534,44 @@ function buildLtvSeries(
   });
 }
 
-function buildActiveCombinedUsersByPeriod(
+function buildCombinedLtvUserCounts(
   periods: Array<{ key: string; label: string }>,
   rows: Array<{ valuesByPeriod?: Record<string, number> }>,
   grain: CombinedGrain,
-) {
-  const out = new Map<string, number>();
-  for (const period of periods || []) {
-    const key = canonicalHubPeriodKey(String(period.key || ""), grain) || String(period.key || "");
-    if (!key) continue;
-    let count = 0;
-    for (const row of rows || []) {
-      const value = Number(row.valuesByPeriod?.[period.key] || 0);
-      if (Math.abs(value) > 1e-9) count += 1;
-    }
-    out.set(key, count);
+) : CombinedLtvUserCounts {
+  const activeByPeriod = new Map<string, number>();
+  const logoChurnByPeriod = new Map<string, LogoChurnCounts>();
+  const normalizedPeriods = (periods || [])
+    .map((period) => {
+      const sourceKey = String(period.key || "");
+      const key = canonicalHubPeriodKey(sourceKey, grain) || sourceKey;
+      return { sourceKey, key };
+    })
+    .filter((period) => Boolean(period.key && period.sourceKey));
+
+  for (const period of normalizedPeriods) {
+    if (!activeByPeriod.has(period.key)) activeByPeriod.set(period.key, 0);
+    if (!logoChurnByPeriod.has(period.key)) logoChurnByPeriod.set(period.key, { prevActive: 0, churned: 0 });
   }
-  return out;
+
+  for (const row of rows || []) {
+    for (let idx = 0; idx < normalizedPeriods.length; idx += 1) {
+      const period = normalizedPeriods[idx];
+      const currHas = Math.abs(Number(row.valuesByPeriod?.[period.sourceKey] || 0)) > 1e-9;
+      if (currHas) {
+        activeByPeriod.set(period.key, (activeByPeriod.get(period.key) || 0) + 1);
+      }
+      if (idx === 0) continue;
+      const prevPeriod = normalizedPeriods[idx - 1];
+      const prevHas = Math.abs(Number(row.valuesByPeriod?.[prevPeriod.sourceKey] || 0)) > 1e-9;
+      const counts = logoChurnByPeriod.get(period.key) || { prevActive: 0, churned: 0 };
+      if (prevHas) counts.prevActive += 1;
+      if (prevHas && !currHas) counts.churned += 1;
+      logoChurnByPeriod.set(period.key, counts);
+    }
+  }
+
+  return { activeByPeriod, logoChurnByPeriod };
 }
 
 function buildCacAccountMatchNotice(
@@ -854,16 +815,16 @@ async function buildCombinedBillingOverview(
   const previousRange = previousPeriodRangeForGrain(startDate, grain);
   const targetCurrency = pickTargetCurrency();
   const shouldComputeLtv = grain === "monthly";
-  const ltvCombinedUsersPromise: Promise<Map<string, number>> = shouldComputeLtv
+  const ltvCombinedUsersPromise: Promise<CombinedLtvUserCounts> = shouldComputeLtv
     ? generateCombinedAllSubsReport({
-        startDate,
+        startDate: previousRange.startDate,
         endDate,
         combineMode: "grouped",
         displayMode: "arr",
         planGrain: "monthly",
         includeSalesAssist: false,
-      }).then((report) => buildActiveCombinedUsersByPeriod(report.periods || [], report.rows || [], "monthly"))
-    : Promise.resolve(new Map<string, number>());
+      }).then((report) => buildCombinedLtvUserCounts(report.periods || [], report.rows || [], "monthly"))
+    : Promise.resolve({ activeByPeriod: new Map<string, number>(), logoChurnByPeriod: new Map<string, LogoChurnCounts>() });
   const ltvAiSpendPromise: Promise<Map<string, number>> = shouldComputeLtv
     ? (async () => {
         const exclusions = await resolveEnterprisePrepaidAiSpendExclusions({
@@ -1128,33 +1089,21 @@ async function buildCombinedBillingOverview(
   const activeHubByPeriod = buildActiveAccountCountByPeriod(periodOrder, accountArrByPeriod);
   const activeStripeByPeriod = buildActiveStripeCustomerCountByPeriod(stripeArrByCustomer);
   let activeCombinedUsersByPeriod = new Map<string, number>();
+  let combinedLogoChurnCountsByPeriod = new Map<string, LogoChurnCounts>();
   if (shouldComputeLtv) {
     try {
-      activeCombinedUsersByPeriod = await ltvCombinedUsersPromise;
+      const combinedCounts = await ltvCombinedUsersPromise;
+      activeCombinedUsersByPeriod = combinedCounts.activeByPeriod;
+      combinedLogoChurnCountsByPeriod = combinedCounts.logoChurnByPeriod;
     } catch {
       activeCombinedUsersByPeriod = new Map<string, number>();
+      combinedLogoChurnCountsByPeriod = new Map<string, LogoChurnCounts>();
     }
   }
-  const hubLogoChurnCountsByPeriod = buildHubLogoChurnCountsByPeriod(
-    periodOrder,
-    grain,
-    accountArrByPeriod,
-    baselineAccountArrByAccount,
-  );
-  const stripeLogoChurnCountsByPeriod = buildStripeLogoChurnCountsByPeriod(
-    periodOrder,
-    grain,
-    stripeArrByCustomer,
-    stripeBaselineArrByCustomer,
-  );
   const logoChurnCountsByPeriod = new Map<string, LogoChurnCounts>();
   for (const period of periodOrder) {
     const key = canonicalHubPeriodKey(period.key, grain) || period.key;
-    const hubCounts = hubLogoChurnCountsByPeriod.get(key) || { prevActive: 0, churned: 0 };
-    const stripeCounts = stripeLogoChurnCountsByPeriod.get(key) || { prevActive: 0, churned: 0 };
-    const prevActive = Math.max(0, hubCounts.prevActive + stripeCounts.prevActive);
-    const churned = Math.max(0, hubCounts.churned + stripeCounts.churned);
-    logoChurnCountsByPeriod.set(key, { prevActive, churned });
+    logoChurnCountsByPeriod.set(key, combinedLogoChurnCountsByPeriod.get(key) || { prevActive: 0, churned: 0 });
   }
 
   let ltvPoints: LtvPoint[] = [];
