@@ -26,7 +26,7 @@
     },
     {
       "path": "/api/slack/daily-arr-summary",
-      "schedule": "0 14 * * *"
+      "schedule": "0 12 * * *"
     }
   ]
 }
