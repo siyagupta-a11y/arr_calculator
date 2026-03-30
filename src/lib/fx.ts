@@ -11,7 +11,11 @@ const CURRENCYLAYER_ACCESS_KEY = String(
   process.env.CURRENCYLAYER_ACCESS_KEY || process.env.CURRENCYLAYER_API_KEY || "",
 ).trim();
 
-type FxOut = { rate: number; dateUsed: string };
+type FxOut = {
+  rate: number;
+  dateUsed: string;
+  status?: "ok" | "rate_limited" | "error";
+};
 
 const FX_MONTHLY_CACHE = new Map<string, FxOut>(); // key: YYYY-MM|FROM|TO
 const CURRENCYLAYER_MONTHLY_CACHE = new Map<string, FxOut>(); // key: YYYY-MM|FROM|TO
@@ -180,8 +184,8 @@ export async function getMonthlyAverageFxRateForCloseMonth(
   const from = String(fromCurrency || "").trim().toUpperCase();
   const to = String(toCurrency || "").trim().toUpperCase();
 
-  if (!from || !to) return { rate: 0, dateUsed: "" };
-  if (from === to) return { rate: 1, dateUsed: "" };
+  if (!from || !to) return { rate: 0, dateUsed: "", status: "error" };
+  if (from === to) return { rate: 1, dateUsed: "", status: "ok" };
 
   const d = closeDate && !isNaN(closeDate.getTime()) ? new Date(closeDate) : new Date();
   const monthStart = new Date(d.getFullYear(), d.getMonth(), 1);
@@ -195,7 +199,7 @@ export async function getMonthlyAverageFxRateForCloseMonth(
   const endStr = fmtYyyyMmDd(monthEnd);
 
   const avg = await fetchFrankfurterMonthlyAverage(startStr, endStr, from, to);
-  const out = { rate: avg, dateUsed: yyyyMm };
+  const out: FxOut = { rate: avg, dateUsed: yyyyMm, status: avg > 0 ? "ok" : "error" };
   FX_MONTHLY_CACHE.set(key, out);
   return out;
 }
@@ -244,13 +248,14 @@ export async function getMonthlyAverageCurrencyLayerFxRateForCloseMonth(
   fromCurrency: string,
   toCurrency: string,
   closeDate: Date | null,
+  options?: { persistedOnly?: boolean },
 ): Promise<FxOut> {
   const from = String(fromCurrency || "").trim().toUpperCase();
   const to = String(toCurrency || "").trim().toUpperCase();
 
-  if (!from || !to) return { rate: 0, dateUsed: "" };
-  if (from === to) return { rate: 1, dateUsed: "" };
-  if (!CURRENCYLAYER_ACCESS_KEY) return { rate: 0, dateUsed: "" };
+  if (!from || !to) return { rate: 0, dateUsed: "", status: "error" };
+  if (from === to) return { rate: 1, dateUsed: "", status: "ok" };
+  if (!CURRENCYLAYER_ACCESS_KEY) return { rate: 0, dateUsed: "", status: "error" };
 
   const d = closeDate && !isNaN(closeDate.getTime()) ? new Date(closeDate) : new Date();
   const monthStart = new Date(d.getFullYear(), d.getMonth(), 1);
@@ -260,13 +265,22 @@ export async function getMonthlyAverageCurrencyLayerFxRateForCloseMonth(
   const cacheKey = `${yyyyMm}|${from}|${to}`;
   if (CURRENCYLAYER_MONTHLY_CACHE.has(cacheKey)) {
     const cached = CURRENCYLAYER_MONTHLY_CACHE.get(cacheKey)!;
-    if (Number(cached.rate || 0) > 0) return cached;
+    if (Number(cached.rate || 0) > 0) {
+      return {
+        ...cached,
+        status: cached.status || "ok",
+      };
+    }
     CURRENCYLAYER_MONTHLY_CACHE.delete(cacheKey);
   }
   await ensureCurrencyLayerPersistentCacheLoaded();
   const persisted = CURRENCYLAYER_PERSISTED_MONTHLY_CACHE.get(normalizeCurrencyLayerCacheKey(cacheKey));
   if (persisted?.status === "ok" && Number(persisted.rate || 0) > 0) {
-    const out = { rate: Number(persisted.rate || 0), dateUsed: String(persisted.dateUsed || yyyyMm) };
+    const out: FxOut = {
+      rate: Number(persisted.rate || 0),
+      dateUsed: String(persisted.dateUsed || yyyyMm),
+      status: "ok",
+    };
     CURRENCYLAYER_MONTHLY_CACHE.set(cacheKey, out);
     return out;
   }
@@ -274,7 +288,10 @@ export async function getMonthlyAverageCurrencyLayerFxRateForCloseMonth(
     persisted?.status === "rate_limited" &&
     Number(persisted.nextRetryAt || 0) > nowMs()
   ) {
-    return { rate: 0, dateUsed: yyyyMm };
+    return { rate: 0, dateUsed: yyyyMm, status: "rate_limited" };
+  }
+  if (options?.persistedOnly) {
+    return { rate: 0, dateUsed: yyyyMm, status: "error" };
   }
 
   const startStr = fmtYyyyMmDd(monthStart);
@@ -313,7 +330,11 @@ export async function getMonthlyAverageCurrencyLayerFxRateForCloseMonth(
     }
   }
 
-  const out = { rate: count > 0 ? sum / count : 0, dateUsed: yyyyMm };
+  const out: FxOut = {
+    rate: count > 0 ? sum / count : 0,
+    dateUsed: yyyyMm,
+    status: count > 0 ? "ok" : isRateLimitedError(latestError) ? "rate_limited" : "error",
+  };
   if (out.rate > 0) {
     CURRENCYLAYER_MONTHLY_CACHE.set(cacheKey, out);
   }

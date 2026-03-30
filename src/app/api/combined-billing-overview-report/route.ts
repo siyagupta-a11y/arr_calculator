@@ -95,6 +95,20 @@ type QuickBooksSalesMarketingCostResponse = {
   matchedAccounts: string[];
 };
 
+type FxConversionDiagnostics = {
+  provider: CacFxProvider;
+  targetCurrency: string;
+  requestedPairCount: number;
+  zeroRatePairCount: number;
+  rateLimitedPairCount: number;
+  rawFallbackPairCount: number;
+};
+
+type ConvertedQuickBooksSalesMarketingCostsWithFx = {
+  payload: QuickBooksSalesMarketingCostResponse;
+  diagnostics: FxConversionDiagnostics;
+};
+
 type RequestBody = {
   startDate?: string;
   endDate?: string;
@@ -453,16 +467,31 @@ async function convertQuickBooksSalesMarketingCostsWithFx(
   payload: QuickBooksSalesMarketingCostResponse,
   fxProvider: CacFxProvider,
   explicitTargetCurrency?: string,
-) {
+): Promise<ConvertedQuickBooksSalesMarketingCostsWithFx> {
   const defaultSourceCurrency = String(payload.currency || "USD").trim().toUpperCase() || "USD";
   const targetCurrency = String(explicitTargetCurrency || FX_TARGET_CURRENCY || "USD").trim().toUpperCase() || "USD";
   const monthlyRateForMonth =
     fxProvider === "currencylayer"
-      ? getMonthlyAverageCurrencyLayerFxRateForCloseMonth
+      ? (fromCurrency: string, toCurrency: string, closeDate: Date | null) =>
+          getMonthlyAverageCurrencyLayerFxRateForCloseMonth(fromCurrency, toCurrency, closeDate, {
+            persistedOnly: true,
+          })
       : getMonthlyAverageFxRateForCloseMonth;
 
   const points = Array.isArray(payload.points) ? payload.points : [];
-  if (!targetCurrency || !points.length) return payload;
+  if (!targetCurrency || !points.length) {
+    return {
+      payload,
+      diagnostics: {
+        provider: fxProvider,
+        targetCurrency,
+        requestedPairCount: 0,
+        zeroRatePairCount: 0,
+        rateLimitedPairCount: 0,
+        rawFallbackPairCount: 0,
+      },
+    };
+  }
 
   const accountCurrencyByAccountId = payload.accountCurrencyByAccountId || {};
   const realmCurrencyByRealmId = payload.realmCurrencyByRealmId || {};
@@ -507,21 +536,32 @@ async function convertQuickBooksSalesMarketingCostsWithFx(
   }
 
   const fxMap = new Map<string, number>();
+  const zeroRatePairs = new Set<string>();
+  const rateLimitedPairs = new Set<string>();
   await Promise.all(
     Array.from(conversionPairs).map(async (pairKey) => {
       const [sourceCurrency, targetCurrencyForPair, monthKey] = pairKey.split("|");
       const date = new Date(`${monthKey}-01T00:00:00Z`);
       const fx = await monthlyRateForMonth(sourceCurrency, targetCurrencyForPair, date);
       fxMap.set(pairKey, fx.rate);
+      if (Number(fx.rate || 0) <= 0) zeroRatePairs.add(pairKey);
+      if (fx.status === "rate_limited") rateLimitedPairs.add(pairKey);
     }),
   );
 
+  const rawFallbackPairs = new Set<string>();
   const convertAmount = (amount: number, sourceCurrencyRaw: string, monthKey: string) => {
     const sourceCurrency = String(sourceCurrencyRaw || "").trim().toUpperCase() || defaultSourceCurrency;
     const rawAmount = Number(amount || 0);
     if (!sourceCurrency || sourceCurrency === targetCurrency) return round2(rawAmount);
-    const rate = fxMap.get(`${sourceCurrency}|${targetCurrency}|${monthKey}`) || 0;
-    if (rate <= 0) return round2(rawAmount);
+    const pairKey = `${sourceCurrency}|${targetCurrency}|${monthKey}`;
+    const rate = fxMap.get(pairKey) || 0;
+    if (rate <= 0) {
+      // For Currencylayer CAC, never silently pass through raw source currency.
+      if (fxProvider === "currencylayer") return 0;
+      rawFallbackPairs.add(pairKey);
+      return round2(rawAmount);
+    }
     return round2(rawAmount * rate);
   };
 
@@ -554,11 +594,43 @@ async function convertQuickBooksSalesMarketingCostsWithFx(
   });
 
   return {
-    ...payload,
-    currency: targetCurrency,
-    currencies: Array.from(sourceCurrencies).sort(),
-    points: convertedPoints,
+    payload: {
+      ...payload,
+      currency: targetCurrency,
+      currencies: Array.from(sourceCurrencies).sort(),
+      points: convertedPoints,
+    },
+    diagnostics: {
+      provider: fxProvider,
+      targetCurrency,
+      requestedPairCount: conversionPairs.size,
+      zeroRatePairCount: zeroRatePairs.size,
+      rateLimitedPairCount: rateLimitedPairs.size,
+      rawFallbackPairCount: rawFallbackPairs.size,
+    },
   };
+}
+
+function buildCurrencyLayerFxNotice(diagnostics: FxConversionDiagnostics) {
+  if (diagnostics.provider !== "currencylayer") return null;
+  const warnings: string[] = [];
+  if (diagnostics.rateLimitedPairCount > 0) {
+    warnings.push(
+      `rate-limited for ${diagnostics.rateLimitedPairCount} monthly FX pair(s)`,
+    );
+  }
+  if (diagnostics.zeroRatePairCount > 0) {
+    warnings.push(
+      `missing/zero rates for ${diagnostics.zeroRatePairCount} monthly FX pair(s)`,
+    );
+  }
+  if (diagnostics.rawFallbackPairCount > 0) {
+    warnings.push(
+      `non-Currencylayer fallback used for ${diagnostics.rawFallbackPairCount} pair(s)`,
+    );
+  }
+  if (!warnings.length) return null;
+  return `Currencylayer FX warning: ${warnings.join("; ")}. Affected conversions are set to 0 (not raw source amounts).`;
 }
 
 function conciseErrorMessage(error: unknown, fallback: string) {
@@ -935,7 +1007,7 @@ async function buildCombinedBillingOverview(
       ]);
 
       if (frankfurterResult.status === "fulfilled") {
-        const frankfurterCosts = frankfurterResult.value as QuickBooksSalesMarketingCostResponse;
+        const frankfurterCosts = frankfurterResult.value.payload as QuickBooksSalesMarketingCostResponse;
         cacPoints = buildCacSeries(
           periodOrder,
           grain,
@@ -953,7 +1025,7 @@ async function buildCombinedBillingOverview(
       }
 
       if (currencyLayerResult.status === "fulfilled") {
-        const currencyLayerCosts = currencyLayerResult.value as QuickBooksSalesMarketingCostResponse;
+        const currencyLayerCosts = currencyLayerResult.value.payload as QuickBooksSalesMarketingCostResponse;
         cacCurrencyLayerPoints = buildCacSeries(
           periodOrder,
           grain,
@@ -962,7 +1034,12 @@ async function buildCombinedBillingOverview(
           buildCostByMonthByAccount(currencyLayerCosts.points || []),
         );
         const accountMatchNotice = buildCacAccountMatchNotice(currencyLayerCosts, accountIds);
-        cacCurrencyLayerNotice = accountMatchNotice ? `Currencylayer CAC: ${accountMatchNotice}` : null;
+        const fxNotice = buildCurrencyLayerFxNotice(currencyLayerResult.value.diagnostics);
+        const notices = [
+          accountMatchNotice ? `Currencylayer CAC: ${accountMatchNotice}` : null,
+          fxNotice,
+        ].filter((value): value is string => !!value);
+        cacCurrencyLayerNotice = notices.length ? notices.join(" ") : null;
       } else {
         cacCurrencyLayerNotice = `Currencylayer CAC unavailable: ${conciseErrorMessage(
           currencyLayerResult.reason,
@@ -972,7 +1049,7 @@ async function buildCombinedBillingOverview(
       }
 
       if (cadFxResult[0]?.status === "fulfilled") {
-        const cadCosts = cadFxResult[0].value as QuickBooksSalesMarketingCostResponse;
+        const cadCosts = cadFxResult[0].value.payload as QuickBooksSalesMarketingCostResponse;
         cacCadCurrency = "CAD";
         cacCadPoints = buildCacSeries(
           periodOrder,
