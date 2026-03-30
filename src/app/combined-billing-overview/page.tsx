@@ -1652,8 +1652,6 @@ export default function CombinedBillingOverviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<CombinedOverviewData | null>(null);
   const [cacNotice, setCacNotice] = useState<string | null>(null);
-  const [cacCurrencyLayerNotice, setCacCurrencyLayerNotice] = useState<string | null>(null);
-  const [cacCadNotice, setCacCadNotice] = useState<string | null>(null);
   const [selectedCacAccountIds, setSelectedCacAccountIds] = useState<string[]>([]);
   const [cacAccountMenuTarget, setCacAccountMenuTarget] = useState<CacMenuTarget>(null);
   const [cacExpenseAccounts, setCacExpenseAccounts] = useState<QuickBooksExpenseAccount[]>([]);
@@ -1812,8 +1810,6 @@ export default function CombinedBillingOverviewPage() {
     setCacLoading(false);
     setError(null);
     setCacNotice(null);
-    setCacCurrencyLayerNotice(null);
-    setCacCadNotice(null);
     setShowProjectedArrBreakdown(false);
 
     try {
@@ -1868,8 +1864,6 @@ export default function CombinedBillingOverviewPage() {
       if (isStale()) return;
 
       setCacNotice(overview.cacNotice);
-      setCacCurrencyLayerNotice(overview.cacCurrencyLayerNotice);
-      setCacCadNotice(overview.cacCadNotice);
 
       setData((prev) => ({
         startDate: overview.startDate,
@@ -1959,8 +1953,6 @@ export default function CombinedBillingOverviewPage() {
           );
           if (isStale()) return;
           setCacNotice(overviewWithCac.cacNotice);
-          setCacCurrencyLayerNotice(overviewWithCac.cacCurrencyLayerNotice);
-          setCacCadNotice(overviewWithCac.cacCadNotice);
           setData((prev) => {
             if (!prev) return prev;
             return {
@@ -1975,8 +1967,6 @@ export default function CombinedBillingOverviewPage() {
           if (isStale()) return;
           const message = conciseErrorMessage(e, "Failed to load CAC details.");
           setCacNotice(`CAC unavailable: ${message}`);
-          setCacCurrencyLayerNotice(`Currencylayer CAC unavailable: ${message}`);
-          setCacCadNotice(`CAD CAC unavailable: ${message}`);
         } finally {
           if (!isStale()) setCacLoading(false);
         }
@@ -1994,8 +1984,6 @@ export default function CombinedBillingOverviewPage() {
   const points = useMemo(() => data?.points ?? [], [data]);
   const retentionPoints = useMemo(() => data?.retentionPoints ?? [], [data]);
   const cacPoints = useMemo(() => data?.cacPoints ?? [], [data]);
-  const cacCurrencyLayerPoints = useMemo(() => data?.cacCurrencyLayerPoints ?? [], [data]);
-  const cacCadPoints = useMemo(() => data?.cacCadPoints ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
 
   return (
@@ -2004,7 +1992,7 @@ export default function CombinedBillingOverviewPage() {
         <div className="stripe-ui__eyebrow">Revenue intelligence</div>
         <div className="stripe-ui__hero-row">
           <div>
-            <h1 className="stripe-ui__title">Combined All Subs</h1>
+            <h1 className="stripe-ui__title">Combined Billing Overview</h1>
             <p className="stripe-ui__subtitle">
               Combined billing trends where each metric is HubSpot (contracted ARR cloud-only method) + Stripe Billing
               Overview (Stripe method) for the same period.
@@ -2124,22 +2112,6 @@ export default function CombinedBillingOverviewPage() {
         <section className="stripe-ui__panel ui-reveal ui-reveal-2">
           <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
             {cacNotice}
-          </p>
-        </section>
-      )}
-
-      {!loading && !error && cacCurrencyLayerNotice && (
-        <section className="stripe-ui__panel ui-reveal ui-reveal-2">
-          <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
-            {cacCurrencyLayerNotice}
-          </p>
-        </section>
-      )}
-
-      {!loading && !error && cacCadNotice && (
-        <section className="stripe-ui__panel ui-reveal ui-reveal-2">
-          <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
-            {cacCadNotice}
           </p>
         </section>
       )}
@@ -2266,66 +2238,6 @@ export default function CombinedBillingOverviewPage() {
               selectedAccountIds={selectedCacAccountIds}
               runLoading={loading || cacLoading}
               accountMenuOpen={cacAccountMenuTarget === "frankfurter"}
-              accountsLoading={cacExpenseAccountsLoading}
-              accountsError={cacExpenseAccountsError}
-              savingDefaultSelection={savingCacDefaultSelection}
-              defaultSaveStatus={cacDefaultSaveStatus}
-              onToggleAccountMenu={() => toggleCacAccountMenu("frankfurter")}
-              onRefreshAccounts={() => void loadCacExpenseAccounts()}
-              onToggleAccountSelection={toggleCacAccountSelection}
-              onSelectAllAccounts={selectAllCacAccounts}
-              onClearAccounts={clearCacAccounts}
-              onSaveDefaultSelection={() => void saveCacDefaultSelection()}
-              onApplySelection={() => {
-                setCacAccountMenuTarget(null);
-                void run();
-              }}
-            />
-
-            <CacChartCard
-              points={cacCurrencyLayerPoints}
-              currency={currency}
-              title="CAC Over Time (Currencylayer FX)"
-              subtitle="CAC = Sales & Marketing Cost / Total Users. Same CAC logic as above, with Currencylayer monthly FX conversion."
-              accentColor="#f97316"
-              downloadFilename="combined-billing-overview-cac-over-time-currencylayer"
-              tableTitle="CAC Table (Currencylayer FX)"
-              tableAriaLabel="CAC table using Currencylayer FX"
-              expenseAccounts={cacExpenseAccounts}
-              selectedAccountIds={selectedCacAccountIds}
-              runLoading={loading || cacLoading}
-              accountMenuOpen={cacAccountMenuTarget === "currencylayer"}
-              accountsLoading={cacExpenseAccountsLoading}
-              accountsError={cacExpenseAccountsError}
-              savingDefaultSelection={savingCacDefaultSelection}
-              defaultSaveStatus={cacDefaultSaveStatus}
-              onToggleAccountMenu={() => toggleCacAccountMenu("currencylayer")}
-              onRefreshAccounts={() => void loadCacExpenseAccounts()}
-              onToggleAccountSelection={toggleCacAccountSelection}
-              onSelectAllAccounts={selectAllCacAccounts}
-              onClearAccounts={clearCacAccounts}
-              onSaveDefaultSelection={() => void saveCacDefaultSelection()}
-              onApplySelection={() => {
-                setCacAccountMenuTarget(null);
-                void run();
-              }}
-            />
-
-            <CacChartCard
-              points={cacCadPoints}
-              currency={data.cacCadCurrency}
-              title="CAC Over Time (CAD FX)"
-              subtitle="CAC = Sales & Marketing Cost / Total Users. Uses monthly average FX conversion to CAD."
-              accentColor="#22c55e"
-              downloadFilename="combined-billing-overview-cac-over-time-cad-fx"
-              tableTitle="CAC Table (CAD FX)"
-              tableAriaLabel="CAC table using monthly FX conversion to CAD"
-              includeAccountBreakdownInCsv={true}
-              showAccountSelector={false}
-              expenseAccounts={cacExpenseAccounts}
-              selectedAccountIds={selectedCacAccountIds}
-              runLoading={loading || cacLoading}
-              accountMenuOpen={false}
               accountsLoading={cacExpenseAccountsLoading}
               accountsError={cacExpenseAccountsError}
               savingDefaultSelection={savingCacDefaultSelection}
