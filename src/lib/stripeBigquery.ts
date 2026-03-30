@@ -464,6 +464,23 @@ export type StripeSalesLedCustomerCurrentBalanceRow = {
   batchTimestamp: string;
 };
 
+export type StripeCustomerCurrentBalanceByCustomerIdsRequest = {
+  customerIds: string[];
+  asOfDate?: string;
+};
+
+export type StripeCustomerCurrentBalanceByCustomerIdsRow = {
+  customerId: string;
+  email: string;
+  name: string;
+  currency: string;
+  currentBalanceMinor: number;
+  accountBalanceMinor: number;
+  invoiceCreditBalance: string;
+  availableCreditMinor: number;
+  batchTimestamp: string;
+};
+
 export type StripeMeteredUsageByCustomerRequest = {
   customerIds: string[];
   startDate: string;
@@ -6699,6 +6716,89 @@ ORDER BY available_credit_minor DESC, customer_id ASC
     currency: asString(row.currency),
     accountIds: asStringArray(row.account_ids),
     accountNames: asStringArray(row.account_names),
+    currentBalanceMinor: asNumber(row.current_balance_minor),
+    accountBalanceMinor: asNumber(row.account_balance_minor),
+    invoiceCreditBalance: asString(row.invoice_credit_balance),
+    availableCreditMinor: asNumber(row.available_credit_minor),
+    batchTimestamp: asString(row.batch_timestamp),
+  }));
+}
+
+export async function queryStripeCustomerCurrentBalanceByCustomerIdsFromBigQuery(
+  request: StripeCustomerCurrentBalanceByCustomerIdsRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeCustomerCurrentBalanceByCustomerIdsRow[]> {
+  const customerIds = Array.from(
+    new Set(
+      (request.customerIds || [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  if (!customerIds.length) return [];
+
+  const asOfDate = String(request.asOfDate || "").trim();
+  if (asOfDate && !parseIsoDateUtc(asOfDate)) {
+    throw new Error("Invalid asOfDate");
+  }
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const customersTable = getStripeCustomersTable();
+
+  const query = `
+WITH input_customers AS (
+  SELECT customer_id
+  FROM UNNEST([${customerIds.map((_, idx) => `@customer_id_${idx}`).join(", ")}]) AS customer_id
+),
+latest_customers AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      c.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY c.id
+        ORDER BY c.batch_timestamp DESC
+      ) AS rn
+    FROM \`${customersTable}\` c
+    WHERE COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') IN (SELECT customer_id FROM input_customers)
+      AND (@as_of_date = '' OR c.batch_timestamp < TIMESTAMP(DATE_ADD(DATE(@as_of_date), INTERVAL 1 DAY)))
+  )
+  WHERE rn = 1
+)
+SELECT
+  COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') AS customer_id,
+  LOWER(TRIM(COALESCE(CAST(c.email AS STRING), ''))) AS email,
+  COALESCE(NULLIF(TRIM(CAST(c.name AS STRING)), ''), '(blank)') AS name,
+  UPPER(TRIM(COALESCE(CAST(c.currency AS STRING), ''))) AS currency,
+  CAST(COALESCE(c.balance, 0) AS FLOAT64) AS current_balance_minor,
+  CAST(COALESCE(c.account_balance, 0) AS FLOAT64) AS account_balance_minor,
+  COALESCE(CAST(c.invoice_credit_balance AS STRING), '') AS invoice_credit_balance,
+  CAST(GREATEST(-COALESCE(c.balance, 0), 0.0) AS FLOAT64) AS available_credit_minor,
+  CAST(c.batch_timestamp AS STRING) AS batch_timestamp
+FROM latest_customers c
+WHERE COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') IN (SELECT customer_id FROM input_customers)
+`;
+
+  const params: BigQueryNamedParameter[] = [
+    ...customerIds.map((customerId, idx) => ({
+      name: `customer_id_${idx}`,
+      type: "STRING" as const,
+      value: customerId,
+    })),
+    { name: "as_of_date", type: "STRING", value: asOfDate },
+  ];
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+
+  return rows.map((row) => ({
+    customerId: asString(row.customer_id),
+    email: asString(row.email),
+    name: asString(row.name),
+    currency: asString(row.currency),
     currentBalanceMinor: asNumber(row.current_balance_minor),
     accountBalanceMinor: asNumber(row.account_balance_minor),
     invoiceCreditBalance: asString(row.invoice_credit_balance),

@@ -1,4 +1,5 @@
 import {
+  queryStripeCustomerCurrentBalanceByCustomerIdsFromBigQuery,
   queryStripeSalesLedCustomerCurrentBalanceFromBigQuery,
   queryStripeSalesLedCustomerLatestInvoiceCreditFromBigQuery,
   queryStripeMeteredUsageByCustomerFromBigQuery,
@@ -70,6 +71,8 @@ type MonthWindow = {
   invoiceMonthEndDate: string;
   asOfDate: string;
 };
+
+const EXTRA_CURRENT_MONTH_EXCLUSION_CUSTOMER_IDS = ["cus_TnCrRUu4w9uYfg"];
 
 function normalizeEmail(value: unknown) {
   const email = String(value || "").trim().toLowerCase();
@@ -346,14 +349,68 @@ export async function resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOff
   const targetCurrency = String(request?.targetCurrency || "USD").trim().toLowerCase() || "usd";
   const monthKey = monthKeyFromDate(currentMonthStart);
 
-  const salesLedBalances = await queryStripeSalesLedCustomerCurrentBalanceFromBigQuery(
-    {
-      asOfDate,
-    },
-    { profile: "stripe_arr_correct" },
-  );
+  const [salesLedBalances, extraBalances] = await Promise.all([
+    queryStripeSalesLedCustomerCurrentBalanceFromBigQuery(
+      {
+        asOfDate,
+      },
+      { profile: "stripe_arr_correct" },
+    ),
+    queryStripeCustomerCurrentBalanceByCustomerIdsFromBigQuery(
+      {
+        customerIds: EXTRA_CURRENT_MONTH_EXCLUSION_CUSTOMER_IDS,
+        asOfDate,
+      },
+      { profile: "stripe_arr_correct" },
+    ),
+  ]);
 
-  if (!salesLedBalances.length) {
+  const balanceByCustomer = new Map<
+    string,
+    {
+      customerId: string;
+      email: string;
+      name: string;
+      currency: string;
+      accountIds: string[];
+      accountNames: string[];
+      availableCreditMinor: number;
+    }
+  >();
+
+  for (const row of salesLedBalances || []) {
+    const customerId = String(row.customerId || "").trim();
+    if (!customerId) continue;
+    balanceByCustomer.set(customerId, {
+      customerId,
+      email: String(row.email || "").trim(),
+      name: String(row.name || "").trim(),
+      currency: String(row.currency || "").trim(),
+      accountIds: Array.from(new Set((row.accountIds || []).map((value) => String(value || "").trim()).filter(Boolean))),
+      accountNames: Array.from(
+        new Set((row.accountNames || []).map((value) => String(value || "").trim()).filter(Boolean)),
+      ),
+      availableCreditMinor: Math.max(0, Number(row.availableCreditMinor || 0)),
+    });
+  }
+
+  for (const row of extraBalances || []) {
+    const customerId = String(row.customerId || "").trim();
+    if (!customerId) continue;
+    const existing = balanceByCustomer.get(customerId);
+    balanceByCustomer.set(customerId, {
+      customerId,
+      email: String(row.email || "").trim() || String(existing?.email || "").trim(),
+      name: String(row.name || "").trim() || String(existing?.name || "").trim(),
+      currency: String(row.currency || "").trim() || String(existing?.currency || "").trim(),
+      accountIds: existing?.accountIds || [],
+      accountNames: existing?.accountNames || [],
+      availableCreditMinor: Math.max(0, Number(row.availableCreditMinor || 0)),
+    });
+  }
+
+  const balances = Array.from(balanceByCustomer.values());
+  if (!balances.length) {
     return {
       currentMonthStartDate,
       currentMonthEndDate,
@@ -367,7 +424,7 @@ export async function resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOff
 
   const prepaidOffsetByCustomerIds = Array.from(
     new Map(
-      (salesLedBalances || [])
+      balances
         .map((row) => {
           const customerId = String(row.customerId || "").trim();
           if (!customerId) return null;
@@ -389,7 +446,7 @@ export async function resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOff
   const offsetsByCustomer = new Map(
     prepaidOffsetByCustomerIds.map((row) => [String(row.customerId || "").trim(), Number(row.prepaidAppliedMajor || 0)]),
   );
-  const excludedCustomers: EnterprisePrepaidAiSpendExclusionRow[] = (salesLedBalances || [])
+  const excludedCustomers: EnterprisePrepaidAiSpendExclusionRow[] = balances
     .map((row) => {
       const customerId = String(row.customerId || "").trim();
       if (!customerId) return null;
