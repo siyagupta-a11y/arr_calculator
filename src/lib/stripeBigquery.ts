@@ -493,6 +493,25 @@ export type StripeUpcomingCurrentMonthDescriptionAmountResult = {
   targetCurrency: string;
 };
 
+export type StripeAiSpendCurrentMonthFromUpcomingRequest = {
+  startDate: string;
+  endDate: string;
+  grain: StripeAiSpendGrain;
+  targetCurrency: string;
+  topLimit?: number;
+  detailLimit?: number;
+  productDescriptionIncludes: string[];
+  excludeCustomerIds?: string[];
+  prepaidOffsetByCustomerIds?: Array<{
+    customerId: string;
+    prepaidAppliedMajor: number;
+  }>;
+};
+
+export type StripeAiSpendCurrentMonthFromUpcomingResult = StripeAiSpendResult & {
+  snapshotDate: string;
+};
+
 export type StripeUpcomingProjectedArrRequest = {
   monthStartDate: string;
   nextMonthStartDate: string;
@@ -6911,6 +6930,507 @@ LEFT JOIN net_customer_totals nct
     amountMinorSum,
     amountMajorSum: round2(amountMinorSum / 100),
     targetCurrency: targetCurrency.toUpperCase(),
+  };
+}
+
+export async function queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery(
+  request: StripeAiSpendCurrentMonthFromUpcomingRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeAiSpendCurrentMonthFromUpcomingResult> {
+  const startDate = parseIsoDateUtc(request.startDate);
+  const endDate = parseIsoDateUtc(request.endDate);
+  if (!startDate || !endDate) {
+    throw new Error("Invalid startDate/endDate");
+  }
+  if (endDate.getTime() < startDate.getTime()) {
+    throw new Error("endDate must be >= startDate");
+  }
+
+  const startDateIso = startDate.toISOString().slice(0, 10);
+  const endDateIso = endDate.toISOString().slice(0, 10);
+  const monthStartUtc = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1, 0, 0, 0, 0));
+  const nextMonthStartUtc = new Date(
+    Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth() + 1, 1, 0, 0, 0, 0),
+  );
+  const monthStartIso = monthStartUtc.toISOString().slice(0, 10);
+  const nextMonthStartIso = nextMonthStartUtc.toISOString().slice(0, 10);
+  const grain = normalizeStripeAiSpendGrain(request.grain);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const topLimit = Math.max(1, Math.min(5000, asInt(request.topLimit || 50)));
+  const detailLimit = Math.max(1, Math.min(1000, asInt(request.detailLimit || 200)));
+  const includes = Array.from(
+    new Set(
+      (request.productDescriptionIncludes || [])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+  const excludedCustomerIds = Array.from(
+    new Set(
+      (request.excludeCustomerIds || [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const prepaidOffsetByCustomerIds = Array.from(
+    (request.prepaidOffsetByCustomerIds || [])
+      .map((entry) => {
+        const customerId = String(entry?.customerId || "").trim();
+        const prepaidAppliedMajor = Number(entry?.prepaidAppliedMajor || 0);
+        if (!customerId) return null;
+        if (!Number.isFinite(prepaidAppliedMajor) || prepaidAppliedMajor <= 0) return null;
+        return { customerId, prepaidAppliedMajor };
+      })
+      .filter((entry): entry is { customerId: string; prepaidAppliedMajor: number } => !!entry)
+      .reduce((acc, entry) => {
+        acc.set(entry.customerId, (acc.get(entry.customerId) || 0) + entry.prepaidAppliedMajor);
+        return acc;
+      }, new Map<string, number>()),
+  ).map(([customerId, prepaidAppliedMajor]) => ({
+    customerId,
+    prepaidAppliedMajor: round2(prepaidAppliedMajor),
+  }));
+
+  const empty: StripeAiSpendCurrentMonthFromUpcomingResult = {
+    snapshotDate: "",
+    startDate: startDateIso,
+    endDate: endDateIso,
+    grain,
+    targetCurrency: targetCurrency.toUpperCase(),
+    totalRevenue: 0,
+    points: [],
+    topCustomers: [],
+    topProducts: [],
+    topPrices: [],
+    detailRows: [],
+  };
+  if (!includes.length) return empty;
+
+  const profile = normalizeProfile(options?.profile);
+  const table = getStripeUpcomingSnapshotsTable(profile);
+  const productsTable = getStripeProductsTable(profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const snapshotKeyExpr = "CAST(t.snapshot_date AS STRING)";
+  const snapshotTsExpr = buildUpcomingSnapshotTimestampSql("t.snapshot_ts", "t.snapshot_date");
+
+  const latestSnapshotRows = await runBigQueryQueryRows(
+    accessToken,
+    projectId,
+    location,
+    `
+WITH table_rows AS (
+  SELECT
+    ${snapshotKeyExpr} AS snapshot_key,
+    ${snapshotTsExpr} AS snapshot_ts
+  FROM \`${table}\` AS t
+),
+latest_snapshot AS (
+  SELECT snapshot_key, snapshot_batch_ts
+  FROM (
+    SELECT DISTINCT
+      snapshot_key,
+      TIMESTAMP_TRUNC(snapshot_ts, MINUTE) AS snapshot_batch_ts
+    FROM table_rows
+  )
+  ORDER BY snapshot_batch_ts DESC, snapshot_key DESC
+  LIMIT 1
+)
+SELECT snapshot_key AS snapshot_date FROM latest_snapshot
+`,
+    [],
+  );
+  const snapshotDate = asString(latestSnapshotRows[0]?.snapshot_date);
+  if (!snapshotDate) return empty;
+
+  const descriptionTermsSql = includes.map(
+    (_, idx) => `STRPOS(LOWER(COALESCE(CAST(pl.product_description AS STRING), '')), @desc_${idx}) > 0`,
+  );
+  const excludedCustomersCteSql = excludedCustomerIds.length
+    ? `excluded_customers AS (
+  SELECT customer_id
+  FROM UNNEST([${excludedCustomerIds.map((_, idx) => `@excluded_customer_${idx}`).join(", ")}]) AS customer_id
+),`
+    : `excluded_customers AS (
+  SELECT customer_id
+  FROM UNNEST(CAST([] AS ARRAY<STRING>)) AS customer_id
+),`;
+  const excludedCustomerWhereSql = excludedCustomerIds.length
+    ? `    AND COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') NOT IN (
+      SELECT customer_id FROM excluded_customers
+    )`
+    : "";
+  const prepaidOffsetsCteSql = prepaidOffsetByCustomerIds.length
+    ? `prepaid_offsets AS (
+  SELECT
+    customer_id,
+    CAST(prepaid_applied_major AS FLOAT64) AS prepaid_applied_major
+  FROM UNNEST([${prepaidOffsetByCustomerIds
+    .map(
+      (_, idx) =>
+        `STRUCT(@prepaid_customer_${idx} AS customer_id, CAST(@prepaid_customer_amount_${idx} AS FLOAT64) AS prepaid_applied_major)`,
+    )
+    .join(", ")}])
+),`
+    : `prepaid_offsets AS (
+  SELECT customer_id, prepaid_applied_major
+  FROM UNNEST(CAST([] AS ARRAY<STRUCT<customer_id STRING, prepaid_applied_major FLOAT64>>))
+),`;
+
+  const baseCte = `
+WITH table_rows AS (
+  SELECT
+    t.*,
+    ${snapshotKeyExpr} AS snapshot_key,
+    ${snapshotTsExpr} AS snapshot_ts_norm
+  FROM \`${table}\` AS t
+),
+latest_snapshot AS (
+  SELECT snapshot_key, snapshot_batch_ts
+  FROM (
+    SELECT DISTINCT
+      snapshot_key,
+      TIMESTAMP_TRUNC(snapshot_ts_norm, MINUTE) AS snapshot_batch_ts
+    FROM table_rows
+  )
+  ORDER BY snapshot_batch_ts DESC, snapshot_key DESC
+  LIMIT 1
+),
+matched_snapshot_rows AS (
+  SELECT t.*
+  FROM latest_snapshot ls
+  JOIN table_rows t
+    ON t.snapshot_key = ls.snapshot_key
+    AND (
+      TIMESTAMP_TRUNC(t.snapshot_ts_norm, MINUTE) = ls.snapshot_batch_ts
+      OR (t.snapshot_ts_norm IS NULL AND ls.snapshot_batch_ts IS NULL)
+    )
+),
+products_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id,
+    COALESCE(
+      NULLIF(TRIM(CAST(description AS STRING)), ''),
+      NULLIF(TRIM(CAST(name AS STRING)), ''),
+      '(blank)'
+    ) AS product_description
+  FROM \`${productsTable}\`
+),
+${excludedCustomersCteSql}
+${prepaidOffsetsCteSql}
+matched_lines_raw AS (
+  SELECT
+    DATE(t.period_start) AS event_date,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_name')), ''),
+      COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)')
+    ) AS customer_name,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.line_item_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.id')), ''),
+      CONCAT('snapshot-line-', CAST(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))) AS STRING))
+    ) AS line_item_id,
+    COALESCE(
+      NULLIF(TRIM(CAST(t.description AS STRING)), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.line_item_description')), ''),
+      '(blank)'
+    ) AS line_item_description,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_id')), ''), '(blank)') AS price_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_label')), ''),
+      COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_id')), ''), '(blank)')
+    ) AS price_label,
+    COALESCE(
+      NULLIF(TRIM(CAST(t.product_id AS STRING)), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_id')), ''),
+      '(blank)'
+    ) AS product_id,
+    COALESCE(NULLIF(TRIM(CAST(pl.product_description AS STRING)), ''), '(blank)') AS product_label,
+    CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) / 100.0 AS revenue_major,
+    CAST(
+      COALESCE(
+        SAFE_CAST(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.quantity')), '') AS FLOAT64),
+        1.0
+      ) AS FLOAT64
+    ) AS quantity
+  FROM latest_snapshot ls
+  JOIN matched_snapshot_rows t
+    ON TRUE
+    AND t.period_start >= TIMESTAMP(@month_start_date)
+    AND t.period_start < TIMESTAMP(@next_month_start_date)
+    AND DATE(t.period_start) BETWEEN DATE(@start_date) AND DATE(@end_date)
+    AND LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+${excludedCustomerWhereSql}
+  JOIN products_lookup pl
+    ON pl.product_id = COALESCE(
+      NULLIF(TRIM(CAST(t.product_id AS STRING)), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_id')), ''),
+      '(blank)'
+    )
+    AND (${descriptionTermsSql.join(" OR ")})
+),
+matched_lines_with_offsets AS (
+  SELECT
+    ml.*,
+    COALESCE(po.prepaid_applied_major, 0.0) AS prepaid_applied_major,
+    SUM(ml.revenue_major) OVER (
+      PARTITION BY ml.customer_id
+      ORDER BY ml.event_date, ml.line_item_id
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_revenue_major,
+    COALESCE(
+      SUM(ml.revenue_major) OVER (
+        PARTITION BY ml.customer_id
+        ORDER BY ml.event_date, ml.line_item_id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+      ),
+      0.0
+    ) AS prev_running_revenue_major
+  FROM matched_lines_raw ml
+  LEFT JOIN prepaid_offsets po
+    ON po.customer_id = ml.customer_id
+),
+matched_lines AS (
+  SELECT
+    event_date,
+    customer_id,
+    customer_name,
+    line_item_id,
+    line_item_description,
+    price_id,
+    price_label,
+    product_id,
+    product_label,
+    GREATEST(
+      revenue_major - GREATEST(LEAST(running_revenue_major, prepaid_applied_major) - prev_running_revenue_major, 0.0),
+      0.0
+    ) AS revenue_major,
+    quantity
+  FROM matched_lines_with_offsets
+  WHERE GREATEST(
+    revenue_major - GREATEST(LEAST(running_revenue_major, prepaid_applied_major) - prev_running_revenue_major, 0.0),
+    0.0
+  ) > 0
+)
+`;
+
+  const summaryQuery = `
+${baseCte}
+SELECT
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', bucket_start)
+    WHEN @grain = 'weekly' THEN FORMAT_DATE('%Y-%m-%d', bucket_start)
+    WHEN @grain = 'monthly' THEN FORMAT_DATE('%Y-%m', bucket_start)
+    ELSE CONCAT(CAST(EXTRACT(YEAR FROM bucket_start) AS STRING), '-Q', CAST(EXTRACT(QUARTER FROM bucket_start) AS STRING))
+  END AS period_key,
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', bucket_start)
+    WHEN @grain = 'weekly' THEN CONCAT('Week of ', FORMAT_DATE('%Y-%m-%d', bucket_start))
+    WHEN @grain = 'monthly' THEN FORMAT_DATE('%b %Y', bucket_start)
+    ELSE CONCAT('Q', CAST(EXTRACT(QUARTER FROM bucket_start) AS STRING), ' ', CAST(EXTRACT(YEAR FROM bucket_start) AS STRING))
+  END AS period_label,
+  FORMAT_DATE('%Y-%m-%d', bucket_start) AS period_start,
+  FORMAT_DATE(
+    '%Y-%m-%d',
+    CASE
+      WHEN @grain = 'daily' THEN bucket_start
+      WHEN @grain = 'weekly' THEN DATE_SUB(DATE_ADD(bucket_start, INTERVAL 1 WEEK), INTERVAL 1 DAY)
+      WHEN @grain = 'monthly' THEN DATE_SUB(DATE_ADD(bucket_start, INTERVAL 1 MONTH), INTERVAL 1 DAY)
+      ELSE DATE_SUB(DATE_ADD(bucket_start, INTERVAL 3 MONTH), INTERVAL 1 DAY)
+    END
+  ) AS period_end,
+  ROUND(SUM(revenue_major), 2) AS revenue,
+  COUNT(*) AS line_count,
+  COUNT(DISTINCT customer_id) AS customer_count
+FROM (
+  SELECT
+    CASE
+      WHEN @grain = 'daily' THEN event_date
+      WHEN @grain = 'weekly' THEN DATE_TRUNC(event_date, WEEK(MONDAY))
+      WHEN @grain = 'monthly' THEN DATE_TRUNC(event_date, MONTH)
+      ELSE DATE_TRUNC(event_date, QUARTER)
+    END AS bucket_start,
+    revenue_major,
+    customer_id
+  FROM matched_lines
+)
+GROUP BY bucket_start
+ORDER BY bucket_start ASC
+`;
+
+  const topCustomersQuery = `
+${baseCte}
+SELECT
+  customer_id AS group_key,
+  customer_name AS group_label,
+  ROUND(SUM(revenue_major), 2) AS revenue,
+  COUNT(*) AS line_count
+FROM matched_lines
+GROUP BY group_key, group_label
+ORDER BY revenue DESC, group_label ASC
+LIMIT @top_limit
+`;
+
+  const topProductsQuery = `
+${baseCte}
+SELECT
+  product_id AS group_key,
+  product_label AS group_label,
+  ROUND(SUM(revenue_major), 2) AS revenue,
+  COUNT(*) AS line_count
+FROM matched_lines
+GROUP BY group_key, group_label
+ORDER BY revenue DESC, group_label ASC
+LIMIT @top_limit
+`;
+
+  const topPricesQuery = `
+${baseCte}
+SELECT
+  price_id,
+  price_label,
+  product_id,
+  product_label,
+  ROUND(SUM(revenue_major), 2) AS revenue,
+  COUNT(*) AS line_count
+FROM matched_lines
+GROUP BY price_id, price_label, product_id, product_label
+ORDER BY revenue DESC, price_label ASC
+LIMIT @top_limit
+`;
+
+  const detailQuery = `
+${baseCte}
+SELECT
+  FORMAT_DATE('%Y-%m-%d', event_date) AS invoice_date,
+  customer_id,
+  customer_name,
+  line_item_id,
+  line_item_description,
+  price_id,
+  price_label,
+  product_id,
+  product_label,
+  ROUND(revenue_major, 2) AS revenue,
+  quantity
+FROM matched_lines
+ORDER BY revenue DESC, invoice_date DESC, line_item_id DESC
+LIMIT @detail_limit
+`;
+
+  const baseParams: BigQueryNamedParameter[] = [
+    { name: "start_date", type: "STRING", value: startDateIso },
+    { name: "end_date", type: "STRING", value: endDateIso },
+    { name: "month_start_date", type: "STRING", value: monthStartIso },
+    { name: "next_month_start_date", type: "STRING", value: nextMonthStartIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+    { name: "grain", type: "STRING", value: grain },
+    ...includes.map((term, idx) => ({ name: `desc_${idx}`, type: "STRING" as const, value: term })),
+    ...excludedCustomerIds.map((customerId, idx) => ({
+      name: `excluded_customer_${idx}`,
+      type: "STRING" as const,
+      value: customerId,
+    })),
+    ...prepaidOffsetByCustomerIds.flatMap((entry, idx) => [
+      {
+        name: `prepaid_customer_${idx}`,
+        type: "STRING" as const,
+        value: entry.customerId,
+      },
+      {
+        name: `prepaid_customer_amount_${idx}`,
+        type: "STRING" as const,
+        value: String(entry.prepaidAppliedMajor),
+      },
+    ]),
+  ];
+
+  const [summaryRows, topCustomersRows, topProductsRows, topPricesRows, detailRowsRaw] = await Promise.all([
+    runBigQueryQueryRows(accessToken, projectId, location, summaryQuery, baseParams),
+    runBigQueryQueryRows(accessToken, projectId, location, topCustomersQuery, [
+      ...baseParams,
+      { name: "top_limit", type: "INT64", value: String(topLimit) },
+    ]),
+    runBigQueryQueryRows(accessToken, projectId, location, topProductsQuery, [
+      ...baseParams,
+      { name: "top_limit", type: "INT64", value: String(topLimit) },
+    ]),
+    runBigQueryQueryRows(accessToken, projectId, location, topPricesQuery, [
+      ...baseParams,
+      { name: "top_limit", type: "INT64", value: String(topLimit) },
+    ]),
+    runBigQueryQueryRows(accessToken, projectId, location, detailQuery, [
+      ...baseParams,
+      { name: "detail_limit", type: "INT64", value: String(detailLimit) },
+    ]),
+  ]);
+
+  const points: StripeAiSpendPoint[] = summaryRows.map((row) => ({
+    key: asString(row.period_key),
+    label: asString(row.period_label),
+    periodStart: asString(row.period_start),
+    periodEnd: asString(row.period_end),
+    revenue: Math.max(0, asNumber(row.revenue)),
+    lineCount: asInt(row.line_count),
+    customerCount: asInt(row.customer_count),
+  }));
+
+  const topCustomers: StripeAiSpendGroupRow[] = topCustomersRows.map((row) => ({
+    key: asString(row.group_key) || "(blank)",
+    label: asString(row.group_label) || "(blank)",
+    revenue: Math.max(0, asNumber(row.revenue)),
+    lineCount: asInt(row.line_count),
+  }));
+
+  const topProducts: StripeAiSpendGroupRow[] = topProductsRows.map((row) => ({
+    key: asString(row.group_key) || "(blank)",
+    label: asString(row.group_label) || "(blank)",
+    revenue: Math.max(0, asNumber(row.revenue)),
+    lineCount: asInt(row.line_count),
+  }));
+
+  const topPrices: StripeAiSpendPriceRow[] = topPricesRows.map((row) => ({
+    priceId: asString(row.price_id) || "(blank)",
+    priceLabel: asString(row.price_label) || "(blank)",
+    productId: asString(row.product_id) || "(blank)",
+    productLabel: asString(row.product_label) || "(blank)",
+    revenue: Math.max(0, asNumber(row.revenue)),
+    lineCount: asInt(row.line_count),
+  }));
+
+  const detailRows: StripeAiSpendDetailRow[] = detailRowsRaw.map((row) => ({
+    invoiceDate: asString(row.invoice_date),
+    customerId: asString(row.customer_id),
+    customerName: asString(row.customer_name),
+    lineItemId: asString(row.line_item_id),
+    lineItemDescription: asString(row.line_item_description),
+    priceId: asString(row.price_id),
+    priceLabel: asString(row.price_label),
+    productId: asString(row.product_id),
+    productLabel: asString(row.product_label),
+    revenue: Math.max(0, asNumber(row.revenue)),
+    quantity: asNumber(row.quantity),
+  }));
+
+  const totalRevenue = Math.max(0, points.reduce((sum, point) => sum + point.revenue, 0));
+
+  return {
+    snapshotDate,
+    startDate: startDateIso,
+    endDate: endDateIso,
+    grain,
+    targetCurrency: targetCurrency.toUpperCase(),
+    totalRevenue,
+    points,
+    topCustomers,
+    topProducts,
+    topPrices,
+    detailRows,
   };
 }
 

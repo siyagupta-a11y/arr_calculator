@@ -1,5 +1,8 @@
 import { generateReport } from "@/lib/report";
-import { resolveEnterprisePrepaidAiSpendExclusions } from "@/lib/aiSpendEnterprisePrepaidExclusions";
+import {
+  resolveEnterprisePrepaidAiSpendExclusions,
+  resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOffsets,
+} from "@/lib/aiSpendEnterprisePrepaidExclusions";
 import {
   queryStripeAiSpendFromBigQuery,
   queryStripeBillingOverviewFromBigQuery,
@@ -132,13 +135,20 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
 
   const todayDate = toIsoDateOnlyUtc(nowUtc);
 
-  const [currentMonthExclusions, lastMonthExclusions] = await Promise.all([
-    resolveEnterprisePrepaidAiSpendExclusions({
-      startDate: monthStartDate,
-      endDate: monthEndDate,
+  const [currentMonthCarryForwardExclusions, lastMonthExclusions] = await Promise.all([
+    resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOffsets({
+      currentMonthStartDate: monthStartDate,
       asOfDate: todayDate,
       targetCurrency,
-    }).catch(() => ({ customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] })),
+    }).catch(() => ({
+      currentMonthStartDate: monthStartDate,
+      currentMonthEndDate: monthEndDate,
+      lastMonthStartDate,
+      lastMonthEndDate,
+      carriedCustomerIds: [],
+      prepaidOffsetByCustomerIds: [],
+      excludedCustomers: [],
+    })),
     resolveEnterprisePrepaidAiSpendExclusions({
       startDate: lastMonthStartDate,
       endDate: lastMonthEndDate,
@@ -147,14 +157,7 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
     }).catch(() => ({ customerIds: [], customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] })),
   ]);
 
-  const currentMonthPrepaidOffsetByCustomer = Array.from(
-    (currentMonthExclusions.customerMonthPrepaidOffsets || []).reduce((acc, row) => {
-      const customerId = String(row.customerId || "").trim();
-      if (!customerId) return acc;
-      acc.set(customerId, (acc.get(customerId) || 0) + Number(row.prepaidAppliedMajor || 0));
-      return acc;
-    }, new Map<string, number>()),
-  ).map(([customerId, prepaidAppliedMajor]) => ({ customerId, prepaidAppliedMajor }));
+  const currentMonthPrepaidOffsetByCustomer = currentMonthCarryForwardExclusions.prepaidOffsetByCustomerIds || [];
 
   const [hubspotTodayReport, stripeReport, aiSpendUpcoming, aiSpendLastMonth] = await Promise.all([
     generateReport({

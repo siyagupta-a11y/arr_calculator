@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
-import { resolveEnterprisePrepaidAiSpendExclusions } from "@/lib/aiSpendEnterprisePrepaidExclusions";
+import {
+  resolveEnterprisePrepaidAiSpendExclusions,
+  resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOffsets,
+} from "@/lib/aiSpendEnterprisePrepaidExclusions";
 import {
   queryStripeAiSpendFromBigQuery,
+  queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery,
   type StripeAiSpendGrain,
   type StripeAiSpendRequest,
 } from "@/lib/stripeBigquery";
@@ -11,6 +15,11 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 const CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_CACHE_TTL_MS", 60_000);
 const EXCLUSIONS_CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_EXCLUSIONS_CACHE_TTL_MS", 300_000);
+const CARRY_FORWARD_CACHE_TTL_MS = readTtlMs(
+  "API_STRIPE_AI_SPEND_CARRY_FORWARD_CACHE_TTL_MS",
+  EXCLUSIONS_CACHE_TTL_MS,
+);
+const AI_SPEND_UPCOMING_PRODUCT_TERMS = ["ai tokens", "web search and crawl"];
 
 const ALLOWED_GRAINS = new Set<StripeAiSpendGrain>([
   "daily",
@@ -23,14 +32,44 @@ function isIsoDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
+function parseIsoDateUtc(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) return null;
+  return date;
+}
+
+function toIsoDateOnlyUtc(value: Date) {
+  return value.toISOString().slice(0, 10);
+}
+
 function getCurrentMonthDateRangeIso() {
   const now = new Date();
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const toIso = (value: Date) => value.toISOString().slice(0, 10);
   return {
-    startDate: toIso(start),
-    endDate: toIso(now),
+    startDate: toIsoDateOnlyUtc(start),
+    endDate: toIsoDateOnlyUtc(now),
   };
+}
+
+function isCurrentMonthRange(startDate: string, endDate: string) {
+  const start = parseIsoDateUtc(startDate);
+  const end = parseIsoDateUtc(endDate);
+  if (!start || !end || end.getTime() < start.getTime()) return false;
+
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+  const nextMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0));
+  return (
+    start.getTime() >= monthStart.getTime() &&
+    start.getTime() < nextMonthStart.getTime() &&
+    end.getTime() >= monthStart.getTime() &&
+    end.getTime() < nextMonthStart.getTime()
+  );
 }
 
 type ApiBody = {
@@ -77,6 +116,54 @@ function parsePayload(raw: Partial<ApiBody>): StripeAiSpendRequest {
 
 async function validateAndRun(body: Partial<ApiBody>) {
   const payload = parsePayload(body);
+  const useUpcomingCurrentMonthSource = isCurrentMonthRange(payload.startDate, payload.endDate);
+
+  if (useUpcomingCurrentMonthSource) {
+    const now = new Date();
+    const monthStartDate = toIsoDateOnlyUtc(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0)));
+    const carryForwardKey = `api:stripe-ai-spend:carry-forward:${stableStringify({
+      monthStartDate,
+      targetCurrency: payload.targetCurrency,
+    })}`;
+    const carryForward = await getOrSetCache(
+      carryForwardKey,
+      CARRY_FORWARD_CACHE_TTL_MS,
+      () =>
+        resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOffsets({
+          currentMonthStartDate: monthStartDate,
+          asOfDate: toIsoDateOnlyUtc(now),
+          targetCurrency: payload.targetCurrency,
+        }),
+    ).catch(() => ({
+      currentMonthStartDate: monthStartDate,
+      currentMonthEndDate: monthStartDate,
+      lastMonthStartDate: "",
+      lastMonthEndDate: "",
+      carriedCustomerIds: [],
+      prepaidOffsetByCustomerIds: [],
+      excludedCustomers: [],
+    }));
+
+    const upcomingRequestPayload = {
+      ...payload,
+      productDescriptionIncludes: AI_SPEND_UPCOMING_PRODUCT_TERMS,
+      excludeCustomerIds: [],
+      prepaidOffsetByCustomerIds: carryForward.prepaidOffsetByCustomerIds || [],
+    };
+    const key = `api:stripe-ai-spend:upcoming-current-month:${stableStringify(upcomingRequestPayload)}`;
+    return getOrSetCache(key, CACHE_TTL_MS, async () => {
+      const report = await queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery(upcomingRequestPayload, {
+        profile: "stripe_arr_correct",
+      });
+      return {
+        ...report,
+        reportSource: "latest_upcoming_invoice_snapshot",
+        excludedEnterprisePrepaidCustomerCount: carryForward.carriedCustomerIds.length,
+        excludedEnterprisePrepaidCustomers: carryForward.excludedCustomers,
+      };
+    });
+  }
+
   const exclusionsKey = `api:stripe-ai-spend:enterprise-prepaid-exclusions:${stableStringify({
     startDate: payload.startDate,
     endDate: payload.endDate,
