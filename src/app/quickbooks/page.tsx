@@ -7,6 +7,7 @@ type QuickBooksStatus = {
   connected: boolean;
   storage: "vercel_blob" | "local_tmp";
   realmId?: string;
+  realmIds?: string[];
   scope?: string;
   accessTokenExpiresAt?: number;
   refreshTokenExpiresAt?: number;
@@ -148,7 +149,7 @@ export default function QuickBooksPage() {
             <Link href="/ai-spend" className="stripe-ui__hero-link">
               Open AI spend
             </Link>
-            <a href="/api/quickbooks/connect" className="stripe-ui__hero-link">
+            <a href="/api/quickbooks/connect?mode=ensure_required" className="stripe-ui__hero-link">
               Connect QuickBooks
             </a>
             <Link href="/eula" className="stripe-ui__hero-link">
@@ -202,6 +203,10 @@ export default function QuickBooksPage() {
             <p className="stripe-ui__stat-value">{status?.realmId || "n/a"}</p>
           </div>
           <div className="stripe-ui__stat">
+            <p className="stripe-ui__stat-label">Connected companies</p>
+            <p className="stripe-ui__stat-value">{status?.realmIds?.length || 0}</p>
+          </div>
+          <div className="stripe-ui__stat">
             <p className="stripe-ui__stat-label">Storage</p>
             <p className="stripe-ui__stat-value">{status?.storage || "n/a"}</p>
           </div>
@@ -214,10 +219,15 @@ export default function QuickBooksPage() {
         <p className="stripe-ui__hint" style={{ marginTop: "0.8rem" }}>
           Refresh token expires: {formatEpoch(status?.refreshTokenExpiresAt)} | Last update: {formatEpoch(status?.updatedAt)}
         </p>
+        {status?.realmIds?.length ? (
+          <p className="stripe-ui__hint" style={{ marginTop: "0.3rem" }}>
+            Realm IDs: {status.realmIds.join(", ")}
+          </p>
+        ) : null}
 
         <div className="stripe-ui__actions">
-          <a href="/api/quickbooks/connect" className="stripe-ui__btn stripe-ui__btn--primary">
-            Connect / Reconnect
+          <a href="/api/quickbooks/connect?mode=ensure_required" className="stripe-ui__btn stripe-ui__btn--primary">
+            Connect / Reconnect (Both)
           </a>
           <button
             className="stripe-ui__btn stripe-ui__btn--secondary"
