@@ -31,7 +31,10 @@ export type CombinedLiveArrPayload = {
   projectedLineCount: number;
   projectedArr: number;
   projectedArrBreakdown: {
+    aiSpendMonthlyWithoutExclusions: number;
+    aiSpendMonthlyWithExclusions: number;
     aiSpendAnnualizedArr: number;
+    selfserveTodayArr: number;
     selfserveProjectedArr: number;
     salesledCurrentArr: number;
   };
@@ -159,53 +162,65 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
 
   const currentMonthPrepaidOffsetByCustomer = currentMonthCarryForwardExclusions.prepaidOffsetByCustomerIds || [];
 
-  const [hubspotTodayReport, stripeReport, aiSpendUpcoming, aiSpendLastMonth] = await Promise.all([
-    generateReport({
-      startDate: todayDate,
-      endDate: todayDate,
-      mode: "contracted",
-      grain: "daily",
-    }),
-    queryStripeBillingOverviewFromBigQuery(
-      {
-        startDate: monthStartDate,
-        endDate: monthEndDate,
-        grain: "monthly",
-        groupBy: "none",
-        targetCurrency,
-        includeCustomerArrRows: false,
-      },
-      { profile: "stripe_arr_correct" },
-    ),
-    queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQuery(
-      {
-        monthStartDate,
-        nextMonthStartDate,
-        targetCurrency,
-        productDescriptionIncludes: ["ai tokens", "web search and crawl"],
-        excludeCustomerIds: [],
-        prepaidOffsetByCustomerIds: currentMonthPrepaidOffsetByCustomer,
-      },
-      { profile: "stripe_arr_correct" },
-    ),
-    queryStripeAiSpendFromBigQuery(
-      {
-        startDate: lastMonthStartDate,
-        endDate: lastMonthEndDate,
-        grain: "monthly",
-        targetCurrency,
-        topLimit: 1,
-        detailLimit: 1,
-        excludeCustomerIds: [],
-        excludeCustomerMonthPairs: [],
-        prepaidOffsetByCustomerMonthPairs: (lastMonthExclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
-          pairKey: entry.pairKey,
-          prepaidAppliedMajor: entry.prepaidAppliedMajor,
-        })),
-      },
-      { profile: "stripe_arr_correct" },
-    ),
-  ]);
+  const [hubspotTodayReport, stripeReport, aiSpendUpcomingWithoutExclusions, aiSpendUpcoming, aiSpendLastMonth] =
+    await Promise.all([
+      generateReport({
+        startDate: todayDate,
+        endDate: todayDate,
+        mode: "contracted",
+        grain: "daily",
+      }),
+      queryStripeBillingOverviewFromBigQuery(
+        {
+          startDate: monthStartDate,
+          endDate: monthEndDate,
+          grain: "monthly",
+          groupBy: "none",
+          targetCurrency,
+          includeCustomerArrRows: false,
+        },
+        { profile: "stripe_arr_correct" },
+      ),
+      queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQuery(
+        {
+          monthStartDate,
+          nextMonthStartDate,
+          targetCurrency,
+          productDescriptionIncludes: ["ai tokens", "web search and crawl"],
+          excludeCustomerIds: [],
+          prepaidOffsetByCustomerIds: [],
+        },
+        { profile: "stripe_arr_correct" },
+      ),
+      queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQuery(
+        {
+          monthStartDate,
+          nextMonthStartDate,
+          targetCurrency,
+          productDescriptionIncludes: ["ai tokens", "web search and crawl"],
+          excludeCustomerIds: [],
+          prepaidOffsetByCustomerIds: currentMonthPrepaidOffsetByCustomer,
+        },
+        { profile: "stripe_arr_correct" },
+      ),
+      queryStripeAiSpendFromBigQuery(
+        {
+          startDate: lastMonthStartDate,
+          endDate: lastMonthEndDate,
+          grain: "monthly",
+          targetCurrency,
+          topLimit: 1,
+          detailLimit: 1,
+          excludeCustomerIds: [],
+          excludeCustomerMonthPairs: [],
+          prepaidOffsetByCustomerMonthPairs: (lastMonthExclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
+            pairKey: entry.pairKey,
+            prepaidAppliedMajor: entry.prepaidAppliedMajor,
+          })),
+        },
+        { profile: "stripe_arr_correct" },
+      ),
+    ]);
 
   const hubspotCurrentArr = computeHubspotCurrentArr(hubspotTodayReport);
   const stripeCurrentArr = computeStripeCurrentArr(stripeReport);
@@ -216,9 +231,12 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
   const elapsedMs = Math.max(1000, Math.min(monthDurationMs, elapsedMsRaw));
   const timeScale = monthDurationMs / elapsedMs;
 
+  const aiSpendMonthlyWithoutExclusions = round2(aiSpendUpcomingWithoutExclusions.amountMajorSum);
   const aiSpendCurrentMonthAmount = round2(aiSpendUpcoming.amountMajorSum);
-  const aiSpendAnnualizedProjection = round2(aiSpendCurrentMonthAmount * 12 * timeScale);
+  const aiSpendMonthlyWithExclusions = aiSpendCurrentMonthAmount;
+  const aiSpendAnnualizedProjection = round2(aiSpendMonthlyWithExclusions * 12 * timeScale);
   const upcomingAnnualizedProjection = aiSpendAnnualizedProjection;
+  const selfserveTodayArr = round2(stripeCurrentArr);
   const selfserveProjectedArr = round2((stripeReport.currentMonthProjection?.projectedEndMrr || 0) * 12);
   const salesledCurrentArr = round2(hubspotCurrentArr);
   const projectedArr = round2(aiSpendAnnualizedProjection + selfserveProjectedArr + salesledCurrentArr);
@@ -263,7 +281,10 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
     projectedLineCount: aiSpendUpcoming.lineCount,
     projectedArr,
     projectedArrBreakdown: {
+      aiSpendMonthlyWithoutExclusions,
+      aiSpendMonthlyWithExclusions,
       aiSpendAnnualizedArr: aiSpendAnnualizedProjection,
+      selfserveTodayArr,
       selfserveProjectedArr,
       salesledCurrentArr,
     },

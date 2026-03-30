@@ -6112,6 +6112,13 @@ latest_deals AS (
     FROM \`botpress-stripe-data-pipeline.hubspot.deals\` d
     WHERE COALESCE(d.archived, FALSE) = FALSE
       AND TRIM(COALESCE(CAST(d.properties_dealstage AS STRING), '')) = @included_dealstage
+      AND LOWER(TRIM(COALESCE(CAST(d.properties_deployment_type__c AS STRING), ''))) = 'cloud'
+      AND COALESCE(
+        SAFE_CAST(
+          REGEXP_REPLACE(TRIM(COALESCE(CAST(d.properties_current_carr AS STRING), '0')), r'[^0-9.-]', '') AS FLOAT64
+        ),
+        0
+      ) > 0
   )
   WHERE rn = 1
 ),
@@ -6378,6 +6385,13 @@ latest_deals AS (
     FROM \`botpress-stripe-data-pipeline.hubspot.deals\` d
     WHERE COALESCE(d.archived, FALSE) = FALSE
       AND TRIM(COALESCE(CAST(d.properties_dealstage AS STRING), '')) = @included_dealstage
+      AND LOWER(TRIM(COALESCE(CAST(d.properties_deployment_type__c AS STRING), ''))) = 'cloud'
+      AND COALESCE(
+        SAFE_CAST(
+          REGEXP_REPLACE(TRIM(COALESCE(CAST(d.properties_current_carr AS STRING), '0')), r'[^0-9.-]', '') AS FLOAT64
+        ),
+        0
+      ) > 0
   )
   WHERE rn = 1
 ),
@@ -6601,6 +6615,13 @@ latest_deals AS (
     FROM \`botpress-stripe-data-pipeline.hubspot.deals\` d
     WHERE COALESCE(d.archived, FALSE) = FALSE
       AND TRIM(COALESCE(CAST(d.properties_dealstage AS STRING), '')) = @included_dealstage
+      AND LOWER(TRIM(COALESCE(CAST(d.properties_deployment_type__c AS STRING), ''))) = 'cloud'
+      AND COALESCE(
+        SAFE_CAST(
+          REGEXP_REPLACE(TRIM(COALESCE(CAST(d.properties_current_carr AS STRING), '0')), r'[^0-9.-]', '') AS FLOAT64
+        ),
+        0
+      ) > 0
   )
   WHERE rn = 1
 ),

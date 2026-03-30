@@ -62,7 +62,10 @@ type CombinedLiveArrResponse = {
   liveArr: number;
   projectedArr: number;
   projectedArrBreakdown?: {
+    aiSpendMonthlyWithoutExclusions: number;
+    aiSpendMonthlyWithExclusions: number;
     aiSpendAnnualizedArr: number;
+    selfserveTodayArr: number;
     selfserveProjectedArr: number;
     salesledCurrentArr: number;
   };
@@ -112,7 +115,10 @@ type CombinedOverviewData = {
   liveArrAsOfUtc: string;
   projectedArr: number;
   projectedArrBreakdown: {
+    aiSpendMonthlyWithoutExclusions: number;
+    aiSpendMonthlyWithExclusions: number;
     aiSpendAnnualizedArr: number;
+    selfserveTodayArr: number;
     selfserveProjectedArr: number;
     salesledCurrentArr: number;
   };
@@ -1876,7 +1882,14 @@ export default function CombinedBillingOverviewPage() {
         liveArrAsOfUtc: String(prev?.liveArrAsOfUtc || ""),
         projectedArr: round2(prev?.projectedArr || 0),
         projectedArrBreakdown: {
+          aiSpendMonthlyWithoutExclusions: round2(
+            prev?.projectedArrBreakdown?.aiSpendMonthlyWithoutExclusions || 0,
+          ),
+          aiSpendMonthlyWithExclusions: round2(
+            prev?.projectedArrBreakdown?.aiSpendMonthlyWithExclusions || 0,
+          ),
           aiSpendAnnualizedArr: round2(prev?.projectedArrBreakdown?.aiSpendAnnualizedArr || 0),
+          selfserveTodayArr: round2(prev?.projectedArrBreakdown?.selfserveTodayArr || 0),
           selfserveProjectedArr: round2(prev?.projectedArrBreakdown?.selfserveProjectedArr || 0),
           salesledCurrentArr: round2(prev?.projectedArrBreakdown?.salesledCurrentArr || 0),
         },
@@ -1904,7 +1917,14 @@ export default function CombinedBillingOverviewPage() {
               liveArrAsOfUtc: String(liveArrData.generatedAtUtc || ""),
               projectedArr: round2(liveArrData.projectedArr || 0),
               projectedArrBreakdown: {
+                aiSpendMonthlyWithoutExclusions: round2(
+                  liveArrData.projectedArrBreakdown?.aiSpendMonthlyWithoutExclusions || 0,
+                ),
+                aiSpendMonthlyWithExclusions: round2(
+                  liveArrData.projectedArrBreakdown?.aiSpendMonthlyWithExclusions || 0,
+                ),
                 aiSpendAnnualizedArr: round2(liveArrData.projectedArrBreakdown?.aiSpendAnnualizedArr || 0),
+                selfserveTodayArr: round2(liveArrData.projectedArrBreakdown?.selfserveTodayArr || 0),
                 selfserveProjectedArr: round2(liveArrData.projectedArrBreakdown?.selfserveProjectedArr || 0),
                 salesledCurrentArr: round2(liveArrData.projectedArrBreakdown?.salesledCurrentArr || 0),
               },
@@ -2165,8 +2185,17 @@ export default function CombinedBillingOverviewPage() {
                 {showProjectedArrBreakdown && (
                   <div className="stripe-ui__hint" style={{ marginTop: "0.35rem", lineHeight: 1.35 }}>
                     <div>
+                      AI Spend (no exclusions):{" "}
+                      {formatMoney(data.projectedArrBreakdown.aiSpendMonthlyWithoutExclusions, currency)}
+                    </div>
+                    <div>
+                      AI Spend (with exclusions):{" "}
+                      {formatMoney(data.projectedArrBreakdown.aiSpendMonthlyWithExclusions, currency)}
+                    </div>
+                    <div>
                       AI Spend annualized: {formatMoney(data.projectedArrBreakdown.aiSpendAnnualizedArr, currency)}
                     </div>
+                    <div>Self-serve today: {formatMoney(data.projectedArrBreakdown.selfserveTodayArr, currency)}</div>
                     <div>
                       Self-serve projected: {formatMoney(data.projectedArrBreakdown.selfserveProjectedArr, currency)}
                     </div>
