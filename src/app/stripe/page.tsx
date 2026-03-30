@@ -438,9 +438,6 @@ export default function StripePage() {
             <Link href="/combined-all-subs" className="stripe-ui__hero-link">
               Open Combined All Subs
             </Link>
-            <Link href="/stripe-arr-correct" className="stripe-ui__hero-link">
-              Open Stripe ARR (Correct)
-            </Link>
             <Link href="/stripe-billing-overview" className="stripe-ui__hero-link">
               Open Stripe Billing Overview
             </Link>
