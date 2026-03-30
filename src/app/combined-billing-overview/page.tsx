@@ -2149,16 +2149,12 @@ export default function CombinedBillingOverviewPage() {
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
             <div className="stripe-ui__stats">
               <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Current MRR</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.currentMrr, currency)}</p>
-              </div>
-              <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Current ARR</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.currentArr, currency)}</p>
-              </div>
-              <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Live ARR</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.liveArr, currency)}</p>
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Live MRR</p>
+                <p className="stripe-ui__stat-value">{formatMoney(round2(data.liveArr / 12), currency)}</p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Projected ARR (EOM)</p>
@@ -2212,10 +2208,6 @@ export default function CombinedBillingOverviewPage() {
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Projected ARR EOM Flat Flat</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.projectedArrEomFlatFlat, currency)}</p>
-              </div>
-              <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Points</p>
-                <p className="stripe-ui__stat-value">{points.length}</p>
               </div>
             </div>
           </section>
