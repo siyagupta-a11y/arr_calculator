@@ -75,6 +75,7 @@ type LtvPoint = {
   periodEnd: string;
   totalArr: number;
   activeCustomers: number;
+  churnedCustomers: number;
   arpuMonthly: number;
   churnRatePct: number;
   ltv: number;
@@ -553,7 +554,7 @@ function buildLtvSeries(
   activeHubByPeriod: Map<string, number>,
   activeStripeByPeriod: Map<string, number>,
   aiSpendArrByMonth: Map<string, number>,
-  logoChurnRateByPeriod: Map<string, number>,
+  logoChurnCountsByPeriod: Map<string, LogoChurnCounts>,
 ): LtvPoint[] {
   return periodOrder.map((period, idx) => {
     const key = canonicalHubPeriodKey(period.key, grain) || period.key;
@@ -566,8 +567,12 @@ function buildLtvSeries(
       (activeHubByPeriod.get(key) || 0) + (activeStripeByPeriod.get(key) || 0),
     );
     const arpuMonthly = activeCustomers > 0 ? round2(totalArr / 12 / activeCustomers) : 0;
-
-    const churnRate = Math.min(1, Math.max(0, Number(logoChurnRateByPeriod.get(key) || 0)));
+    const logoCounts = logoChurnCountsByPeriod.get(key) || { prevActive: 0, churned: 0 };
+    const churnedCustomers = Math.max(0, Math.round(logoCounts.churned || 0));
+    const churnRate =
+      logoCounts.prevActive > 0
+        ? Math.min(1, Math.max(0, Number(logoCounts.churned || 0) / Number(logoCounts.prevActive || 0)))
+        : 0;
     const churnRatePct = round2(churnRate * 100);
     const ltv = churnRate > 1e-9 ? round2(arpuMonthly / churnRate) : 0;
 
@@ -578,6 +583,7 @@ function buildLtvSeries(
       periodEnd: periodStart,
       totalArr,
       activeCustomers,
+      churnedCustomers,
       arpuMonthly,
       churnRatePct,
       ltv,
@@ -825,6 +831,40 @@ async function buildCombinedBillingOverview(
 ) {
   const previousRange = previousPeriodRangeForGrain(startDate, grain);
   const targetCurrency = pickTargetCurrency();
+  const shouldComputeLtv = grain === "monthly";
+  const ltvAiSpendPromise: Promise<Map<string, number>> = shouldComputeLtv
+    ? (async () => {
+        const exclusions = await resolveEnterprisePrepaidAiSpendExclusions({
+          startDate,
+          endDate,
+          targetCurrency,
+        }).catch(() => ({ customerMonthPrepaidOffsets: [] }));
+        const aiSpend = await queryStripeAiSpendFromBigQuery(
+          {
+            startDate,
+            endDate,
+            grain: "monthly",
+            targetCurrency,
+            topLimit: 1,
+            detailLimit: 1,
+            excludeCustomerIds: [],
+            excludeCustomerMonthPairs: [],
+            prepaidOffsetByCustomerMonthPairs: (exclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
+              pairKey: entry.pairKey,
+              prepaidAppliedMajor: entry.prepaidAppliedMajor,
+            })),
+          },
+          { profile: "stripe_arr_correct" },
+        );
+        const aiSpendArrByMonth = new Map<string, number>();
+        for (const point of aiSpend.points || []) {
+          const monthKey = String(point.key || "").slice(0, 7);
+          if (!monthKey) continue;
+          aiSpendArrByMonth.set(monthKey, round2((aiSpendArrByMonth.get(monthKey) || 0) + Number(point.revenue || 0) * 12));
+        }
+        return aiSpendArrByMonth;
+      })()
+    : Promise.resolve(new Map<string, number>());
 
   const stripeMainPromise = queryStripeBillingOverviewFromBigQuery(
     {
@@ -833,7 +873,7 @@ async function buildCombinedBillingOverview(
       grain,
       groupBy: "none",
       targetCurrency,
-      includeCustomerArrRows: includeCac,
+      includeCustomerArrRows: includeCac || shouldComputeLtv,
       includeCurrentMonthProjection: false,
     },
     { profile: "stripe_arr_correct" },
@@ -845,7 +885,7 @@ async function buildCombinedBillingOverview(
     mode: "contracted",
     grain,
   });
-  const stripeBaselinePromise: Promise<Awaited<ReturnType<typeof queryStripeBillingOverviewFromBigQuery>> | null> = includeCac
+  const stripeBaselinePromise: Promise<Awaited<ReturnType<typeof queryStripeBillingOverviewFromBigQuery>> | null> = includeCac || shouldComputeLtv
     ? queryStripeBillingOverviewFromBigQuery(
         {
           startDate: previousRange.startDate,
@@ -853,7 +893,7 @@ async function buildCombinedBillingOverview(
           grain,
           groupBy: "none",
           targetCurrency,
-          includeCustomerArrRows: true,
+          includeCustomerArrRows: includeCac || shouldComputeLtv,
           includeCurrentMonthProjection: false,
         },
         { profile: "stripe_arr_correct" },
@@ -1067,23 +1107,20 @@ async function buildCombinedBillingOverview(
     stripeArrByCustomer,
     stripeBaselineArrByCustomer,
   );
-  const logoChurnRateByPeriod = new Map<string, number>();
+  const logoChurnCountsByPeriod = new Map<string, LogoChurnCounts>();
   for (const period of periodOrder) {
     const key = canonicalHubPeriodKey(period.key, grain) || period.key;
     const hubCounts = hubLogoChurnCountsByPeriod.get(key) || { prevActive: 0, churned: 0 };
     const stripeCounts = stripeLogoChurnCountsByPeriod.get(key) || { prevActive: 0, churned: 0 };
     const prevActive = Math.max(0, hubCounts.prevActive + stripeCounts.prevActive);
     const churned = Math.max(0, hubCounts.churned + stripeCounts.churned);
-    const rate = prevActive > 0 ? churned / prevActive : 0;
-    logoChurnRateByPeriod.set(key, Math.min(1, Math.max(0, rate)));
+    logoChurnCountsByPeriod.set(key, { prevActive, churned });
   }
 
   let ltvPoints: LtvPoint[] = [];
   let ltvNotice: string | null = null;
   if (grain !== "monthly") {
     ltvNotice = "LTV currently supports monthly grain. Switch Time grain to Monthly to load LTV over time.";
-  } else if (!includeCac) {
-    ltvNotice = "Loading LTV data...";
   } else {
     const buildFallbackLtv = () =>
       buildLtvSeries(
@@ -1093,37 +1130,10 @@ async function buildCombinedBillingOverview(
         activeHubByPeriod,
         activeStripeByPeriod,
         new Map<string, number>(),
-        logoChurnRateByPeriod,
+        logoChurnCountsByPeriod,
       );
     try {
-      const exclusions = await resolveEnterprisePrepaidAiSpendExclusions({
-        startDate,
-        endDate,
-        targetCurrency,
-      }).catch(() => ({ customerMonthPrepaidOffsets: [] }));
-      const aiSpend = await queryStripeAiSpendFromBigQuery(
-        {
-          startDate,
-          endDate,
-          grain: "monthly",
-          targetCurrency,
-          topLimit: 1,
-          detailLimit: 1,
-          excludeCustomerIds: [],
-          excludeCustomerMonthPairs: [],
-          prepaidOffsetByCustomerMonthPairs: (exclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
-            pairKey: entry.pairKey,
-            prepaidAppliedMajor: entry.prepaidAppliedMajor,
-          })),
-        },
-        { profile: "stripe_arr_correct" },
-      );
-      const aiSpendArrByMonth = new Map<string, number>();
-      for (const point of aiSpend.points || []) {
-        const monthKey = String(point.key || "").slice(0, 7);
-        if (!monthKey) continue;
-        aiSpendArrByMonth.set(monthKey, round2((aiSpendArrByMonth.get(monthKey) || 0) + Number(point.revenue || 0) * 12));
-      }
+      const aiSpendArrByMonth = await ltvAiSpendPromise;
       ltvPoints = buildLtvSeries(
         periodOrder,
         grain,
@@ -1131,7 +1141,7 @@ async function buildCombinedBillingOverview(
         activeHubByPeriod,
         activeStripeByPeriod,
         aiSpendArrByMonth,
-        logoChurnRateByPeriod,
+        logoChurnCountsByPeriod,
       );
     } catch (error: unknown) {
       ltvNotice = `LTV warning: AI spend component unavailable (${conciseErrorMessage(
