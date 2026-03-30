@@ -8,6 +8,7 @@ import {
   type StripeBillingOverviewCustomerArrRow,
 } from "@/lib/stripeBigquery";
 import { resolveEnterprisePrepaidAiSpendExclusions } from "@/lib/aiSpendEnterprisePrepaidExclusions";
+import { generateCombinedAllSubsReport } from "@/lib/combinedAllSubsReport";
 import { fetchQuickBooksSalesMarketingCostsByMonth } from "@/lib/quickbooks";
 import {
   getMonthlyAverageCurrencyLayerFxRateForCloseMonth,
@@ -553,6 +554,7 @@ function buildLtvSeries(
   combinedPoints: CombinedPoint[],
   activeHubByPeriod: Map<string, number>,
   activeStripeByPeriod: Map<string, number>,
+  activeCombinedUsersByPeriod: Map<string, number>,
   aiSpendArrByMonth: Map<string, number>,
   logoChurnCountsByPeriod: Map<string, LogoChurnCounts>,
 ): LtvPoint[] {
@@ -562,10 +564,11 @@ function buildLtvSeries(
     const point = combinedPoints[idx];
     const aiSpendArr = round2(aiSpendArrByMonth.get(key) || 0);
     const totalArr = round2((point?.arr || 0) + aiSpendArr);
-    const activeCustomers = Math.max(
+    const fallbackActiveCustomers = Math.max(
       0,
       (activeHubByPeriod.get(key) || 0) + (activeStripeByPeriod.get(key) || 0),
     );
+    const activeCustomers = Math.max(0, activeCombinedUsersByPeriod.get(key) || fallbackActiveCustomers);
     const arpuMonthly = activeCustomers > 0 ? round2(totalArr / 12 / activeCustomers) : 0;
     const logoCounts = logoChurnCountsByPeriod.get(key) || { prevActive: 0, churned: 0 };
     const churnedCustomers = Math.max(0, Math.round(logoCounts.churned || 0));
@@ -589,6 +592,25 @@ function buildLtvSeries(
       ltv,
     };
   });
+}
+
+function buildActiveCombinedUsersByPeriod(
+  periods: Array<{ key: string; label: string }>,
+  rows: Array<{ valuesByPeriod?: Record<string, number> }>,
+  grain: CombinedGrain,
+) {
+  const out = new Map<string, number>();
+  for (const period of periods || []) {
+    const key = canonicalHubPeriodKey(String(period.key || ""), grain) || String(period.key || "");
+    if (!key) continue;
+    let count = 0;
+    for (const row of rows || []) {
+      const value = Number(row.valuesByPeriod?.[period.key] || 0);
+      if (Math.abs(value) > 1e-9) count += 1;
+    }
+    out.set(key, count);
+  }
+  return out;
 }
 
 function buildCacAccountMatchNotice(
@@ -832,6 +854,16 @@ async function buildCombinedBillingOverview(
   const previousRange = previousPeriodRangeForGrain(startDate, grain);
   const targetCurrency = pickTargetCurrency();
   const shouldComputeLtv = grain === "monthly";
+  const ltvCombinedUsersPromise: Promise<Map<string, number>> = shouldComputeLtv
+    ? generateCombinedAllSubsReport({
+        startDate,
+        endDate,
+        combineMode: "grouped",
+        displayMode: "arr",
+        planGrain: "monthly",
+        includeSalesAssist: false,
+      }).then((report) => buildActiveCombinedUsersByPeriod(report.periods || [], report.rows || [], "monthly"))
+    : Promise.resolve(new Map<string, number>());
   const ltvAiSpendPromise: Promise<Map<string, number>> = shouldComputeLtv
     ? (async () => {
         const exclusions = await resolveEnterprisePrepaidAiSpendExclusions({
@@ -1095,6 +1127,14 @@ async function buildCombinedBillingOverview(
   }
   const activeHubByPeriod = buildActiveAccountCountByPeriod(periodOrder, accountArrByPeriod);
   const activeStripeByPeriod = buildActiveStripeCustomerCountByPeriod(stripeArrByCustomer);
+  let activeCombinedUsersByPeriod = new Map<string, number>();
+  if (shouldComputeLtv) {
+    try {
+      activeCombinedUsersByPeriod = await ltvCombinedUsersPromise;
+    } catch {
+      activeCombinedUsersByPeriod = new Map<string, number>();
+    }
+  }
   const hubLogoChurnCountsByPeriod = buildHubLogoChurnCountsByPeriod(
     periodOrder,
     grain,
@@ -1129,6 +1169,7 @@ async function buildCombinedBillingOverview(
         points,
         activeHubByPeriod,
         activeStripeByPeriod,
+        activeCombinedUsersByPeriod,
         new Map<string, number>(),
         logoChurnCountsByPeriod,
       );
@@ -1140,6 +1181,7 @@ async function buildCombinedBillingOverview(
         points,
         activeHubByPeriod,
         activeStripeByPeriod,
+        activeCombinedUsersByPeriod,
         aiSpendArrByMonth,
         logoChurnCountsByPeriod,
       );
