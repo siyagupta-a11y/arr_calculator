@@ -51,6 +51,14 @@ function toIsoDateOnlyUtc(d: Date) {
   return d.toISOString().slice(0, 10);
 }
 
+function parseTimestampUtc(value: string) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const ms = Date.parse(text);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms);
+}
+
 function isCloudDeploymentType(value: string) {
   return String(value || "").trim().toLowerCase() === "cloud";
 }
@@ -227,7 +235,15 @@ export async function buildCombinedLiveArrPayload(): Promise<CombinedLiveArrPayl
   const currentMonthArr = round2(hubspotCurrentArr + stripeCurrentArr);
 
   const monthDurationMs = Math.max(1, nextMonthStartUtc.getTime() - monthStartUtc.getTime());
-  const elapsedMsRaw = nowUtc.getTime() - monthStartUtc.getTime();
+  const aiSpendSnapshotTs =
+    parseTimestampUtc(aiSpendUpcoming.snapshotTimestampUtc) ||
+    parseTimestampUtc(aiSpendUpcomingWithoutExclusions.snapshotTimestampUtc) ||
+    nowUtc;
+  const projectionAnchorMs = Math.min(
+    Math.max(aiSpendSnapshotTs.getTime(), monthStartUtc.getTime()),
+    Math.max(monthStartUtc.getTime(), nextMonthStartUtc.getTime() - 1000),
+  );
+  const elapsedMsRaw = projectionAnchorMs - monthStartUtc.getTime();
   const elapsedMs = Math.max(1000, Math.min(monthDurationMs, elapsedMsRaw));
   const timeScale = monthDurationMs / elapsedMs;
 

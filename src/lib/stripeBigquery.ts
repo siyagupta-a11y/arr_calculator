@@ -522,6 +522,7 @@ export type StripeUpcomingCurrentMonthDescriptionAmountRequest = {
 
 export type StripeUpcomingCurrentMonthDescriptionAmountResult = {
   snapshotDate: string;
+  snapshotTimestampUtc: string;
   lineCount: number;
   amountMinorSum: number;
   amountMajorSum: number;
@@ -7083,6 +7084,7 @@ export async function queryStripeUpcomingCurrentMonthDescriptionAmountFromBigQue
   if (!includes.length) {
     return {
       snapshotDate: "",
+      snapshotTimestampUtc: "",
       lineCount: 0,
       amountMinorSum: 0,
       amountMajorSum: 0,
@@ -7216,6 +7218,7 @@ net_customer_totals AS (
 )
 SELECT
   MAX(ls.snapshot_key) AS snapshot_date,
+  CAST(MAX(ls.snapshot_batch_ts) AS STRING) AS snapshot_timestamp_utc,
   COALESCE(SUM(nct.line_count), 0) AS line_count,
   COALESCE(SUM(nct.net_amount_minor_sum), 0.0) AS amount_minor_sum
 FROM latest_snapshot ls
@@ -7251,6 +7254,7 @@ LEFT JOIN net_customer_totals nct
 
   return {
     snapshotDate: asString(first.snapshot_date),
+    snapshotTimestampUtc: asString(first.snapshot_timestamp_utc),
     lineCount: asInt(first.line_count),
     amountMinorSum,
     amountMajorSum: round2(amountMinorSum / 100),
