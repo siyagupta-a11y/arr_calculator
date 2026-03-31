@@ -1,11 +1,21 @@
 type BambooEmployeeRecord = {
   id: string;
+  firstName: string;
+  lastName: string;
+  preferredName: string;
+  displayName: string;
+  fullName: string;
   hireDate: string;
   terminationDate: string;
   employmentStatus: string;
   employmentType: string;
   payType: string;
   fullTimeEquivalent: number | null;
+};
+
+export type BambooHeadcountSnapshot = {
+  count: number;
+  employeeNames: string[];
 };
 
 function clean(value: string | undefined | null) {
@@ -108,6 +118,11 @@ function normalizeEmployeeRow(input: unknown): BambooEmployeeRecord | null {
   if (!input || typeof input !== "object") return null;
   const row = input as Record<string, unknown>;
   const id = firstString(row, ["id", "employeeId", "employee_id", "employee id"]);
+  const firstName = firstString(row, ["firstName", "first name", "givenName", "given name"]);
+  const lastName = firstString(row, ["lastName", "last name", "familyName", "family name", "surname"]);
+  const preferredName = firstString(row, ["preferredName", "preferred name", "nickname", "nick name"]);
+  const displayName = firstString(row, ["displayName", "display name"]);
+  const fullName = firstString(row, ["fullName", "full name", "name"]);
   const hireDate = firstString(row, ["hireDate", "dateOfHire", "hiredDate", "employmentStartDate", "hire date"]);
   const terminationDate = firstString(row, ["terminationDate", "dateOfTermination", "employmentEndDate", "termination date"]);
   const employmentStatus = firstString(row, [
@@ -124,6 +139,11 @@ function normalizeEmployeeRow(input: unknown): BambooEmployeeRecord | null {
   );
   return {
     id,
+    firstName,
+    lastName,
+    preferredName,
+    displayName,
+    fullName,
     hireDate,
     terminationDate,
     employmentStatus,
@@ -178,6 +198,24 @@ function isFullTimeEmployee(employee: BambooEmployeeRecord) {
   return countUnknownAsFullTime;
 }
 
+function employeeDisplayName(employee: BambooEmployeeRecord) {
+  const display = clean(employee.displayName);
+  if (display) return display;
+  const full = clean(employee.fullName);
+  if (full) return full;
+
+  const preferred = clean(employee.preferredName);
+  const first = clean(employee.firstName);
+  const last = clean(employee.lastName);
+  if (preferred && last) return `${preferred} ${last}`;
+  if (preferred) return preferred;
+  if (first && last) return `${first} ${last}`;
+  if (first) return first;
+  if (last) return last;
+  if (employee.id) return `Employee ${employee.id}`;
+  return "Unknown Employee";
+}
+
 async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
   const subdomain = clean(process.env.BAMBOOHR_SUBDOMAIN);
   const apiKey = clean(process.env.BAMBOOHR_API_KEY);
@@ -189,6 +227,35 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
   const authHeader = basicAuthHeader(apiKey);
   const reportUrlBase = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/reports/custom?format=JSON`;
   const reportBodies: Array<Record<string, unknown>> = [
+    {
+      fields: [
+        "id",
+        "firstName",
+        "lastName",
+        "preferredName",
+        "displayName",
+        "employmentStatus",
+        "employmentType",
+        "hireDate",
+        "terminationDate",
+        "fullTimeEquivalent",
+        "payType",
+      ],
+    },
+    {
+      fields: [
+        "id",
+        "firstName",
+        "lastName",
+        "displayName",
+        "status",
+        "type",
+        "dateOfHire",
+        "dateOfTermination",
+        "FTE",
+        "payType",
+      ],
+    },
     {
       fields: [
         "id",
@@ -249,6 +316,15 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
 }
 
 export async function queryBambooHrFullTimeHeadcountByDate(dates: string[]): Promise<Map<string, number>> {
+  const snapshots = await queryBambooHrFullTimeRosterByDate(dates);
+  const out = new Map<string, number>();
+  for (const [dateText, snapshot] of snapshots.entries()) {
+    out.set(dateText, snapshot.count);
+  }
+  return out;
+}
+
+export async function queryBambooHrFullTimeRosterByDate(dates: string[]): Promise<Map<string, BambooHeadcountSnapshot>> {
   const uniqueDates = Array.from(
     new Set(
       (dates || [])
@@ -256,19 +332,25 @@ export async function queryBambooHrFullTimeHeadcountByDate(dates: string[]): Pro
         .filter((value) => !!parseIsoDateOnly(value)),
     ),
   ).sort();
-  const out = new Map<string, number>();
+  const out = new Map<string, BambooHeadcountSnapshot>();
   if (!uniqueDates.length) return out;
 
   const employees = await fetchEmployeeRoster();
   for (const dateText of uniqueDates) {
     const snapshot = parseIsoDateOnly(dateText);
     if (!snapshot) continue;
-    const count = employees.reduce((sum, employee) => {
-      if (!isActiveOnDate(employee, snapshot)) return sum;
-      if (!isFullTimeEmployee(employee)) return sum;
-      return sum + 1;
-    }, 0);
-    out.set(toIsoDateOnly(snapshot), count);
+    const fullTimeEmployees = employees.filter((employee) => {
+      if (!isActiveOnDate(employee, snapshot)) return false;
+      if (!isFullTimeEmployee(employee)) return false;
+      return true;
+    });
+    const employeeNames = fullTimeEmployees
+      .map((employee) => employeeDisplayName(employee))
+      .sort((a, b) => a.localeCompare(b));
+    out.set(toIsoDateOnly(snapshot), {
+      count: fullTimeEmployees.length,
+      employeeNames,
+    });
   }
   return out;
 }

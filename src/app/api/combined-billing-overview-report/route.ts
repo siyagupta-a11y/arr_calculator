@@ -9,7 +9,7 @@ import {
 } from "@/lib/stripeBigquery";
 import { resolveEnterprisePrepaidAiSpendExclusions } from "@/lib/aiSpendEnterprisePrepaidExclusions";
 import { generateCombinedAllSubsReport } from "@/lib/combinedAllSubsReport";
-import { queryBambooHrFullTimeHeadcountByDate } from "@/lib/bamboohr";
+import { queryBambooHrFullTimeRosterByDate } from "@/lib/bamboohr";
 import { fetchQuickBooksSalesMarketingCostsByMonth } from "@/lib/quickbooks";
 import {
   getMonthlyAverageCurrencyLayerFxRateForCloseMonth,
@@ -97,6 +97,7 @@ type ArrPerEmployeePoint = {
   arr: number;
   fullTimeEmployees: number;
   arrPerEmployee: number;
+  employeeNames: string[];
 };
 
 type LogoChurnCounts = {
@@ -1278,6 +1279,7 @@ async function buildCombinedBillingOverview(
     arr: round2(point.arr || 0),
     fullTimeEmployees: 0,
     arrPerEmployee: 0,
+    employeeNames: [],
   }));
   try {
     const snapshotDateByKey = new Map<string, string>();
@@ -1286,11 +1288,13 @@ async function buildCombinedBillingOverview(
       const snapshotDate = periodEndIsoFromKey(key, grain);
       if (snapshotDate) snapshotDateByKey.set(key, snapshotDate);
     }
-    const headcountByDate = await queryBambooHrFullTimeHeadcountByDate(Array.from(snapshotDateByKey.values()));
+    const rosterByDate = await queryBambooHrFullTimeRosterByDate(Array.from(snapshotDateByKey.values()));
     arrPerEmployeePoints = linePoints.map((point) => {
       const key = canonicalHubPeriodKey(point.key, grain) || point.key;
       const snapshotDate = snapshotDateByKey.get(key) || "";
-      const fullTimeEmployees = Math.max(0, Math.round(Number(headcountByDate.get(snapshotDate) || 0)));
+      const rosterSnapshot = rosterByDate.get(snapshotDate);
+      const fullTimeEmployees = Math.max(0, Math.round(Number(rosterSnapshot?.count || 0)));
+      const employeeNames = rosterSnapshot?.employeeNames || [];
       const arr = round2(point.arr || 0);
       const arrPerEmployee = fullTimeEmployees > 0 ? round2(arr / fullTimeEmployees) : 0;
       return {
@@ -1301,6 +1305,7 @@ async function buildCombinedBillingOverview(
         arr,
         fullTimeEmployees,
         arrPerEmployee,
+        employeeNames,
       };
     });
     if (!arrPerEmployeePoints.some((point) => point.fullTimeEmployees > 0)) {
