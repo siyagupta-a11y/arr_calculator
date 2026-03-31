@@ -3,11 +3,15 @@ import { generateReport } from "@/lib/report";
 import type { ReportResponse, ReportRow } from "@/lib/types";
 import {
   queryStripeAiSpendFromBigQuery,
+  queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery,
   queryStripeBillingOverviewFromBigQuery,
   type StripeBillingOverviewPoint,
   type StripeBillingOverviewCustomerArrRow,
 } from "@/lib/stripeBigquery";
-import { resolveEnterprisePrepaidAiSpendExclusions } from "@/lib/aiSpendEnterprisePrepaidExclusions";
+import {
+  resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOffsets,
+  resolveEnterprisePrepaidAiSpendExclusions,
+} from "@/lib/aiSpendEnterprisePrepaidExclusions";
 import { generateCombinedAllSubsReport } from "@/lib/combinedAllSubsReport";
 import { queryBambooHrFullTimeRosterByDate } from "@/lib/bamboohr";
 import { fetchQuickBooksSalesMarketingCostsByMonth } from "@/lib/quickbooks";
@@ -21,6 +25,7 @@ import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseC
 export const runtime = "nodejs";
 export const maxDuration = 300;
 const CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_CACHE_TTL_MS", 60_000);
+const AI_SPEND_UPCOMING_PRODUCT_TERMS = ["ai tokens", "web search and crawl"];
 
 type CombinedGrain = "daily" | "monthly" | "quarterly";
 type CacFxProvider = "frankfurter" | "currencylayer";
@@ -977,6 +982,19 @@ async function buildCombinedBillingOverview(
 ) {
   const previousRange = previousPeriodRangeForGrain(startDate, grain);
   const targetCurrency = pickTargetCurrency();
+  const nowUtc = new Date();
+  const todayIso = toIsoDateOnly(nowUtc);
+  const currentMonthStartObj = new Date(Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), 1, 0, 0, 0, 0));
+  const nextMonthStartObj = new Date(Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1, 1, 0, 0, 0, 0));
+  const currentMonthStartIso = toIsoDateOnly(currentMonthStartObj);
+  const startDateObj = parseIsoDateOnly(startDate);
+  const endDateObj = parseIsoDateOnly(endDate);
+  const currentMonthIncludedInRange =
+    grain === "monthly" &&
+    !!startDateObj &&
+    !!endDateObj &&
+    endDateObj.getTime() >= currentMonthStartObj.getTime() &&
+    startDateObj.getTime() < nextMonthStartObj.getTime();
   const shouldComputeLtv = grain === "monthly";
   const ltvCombinedUsersPromise: Promise<CombinedLtvUserCounts> = shouldComputeLtv
     ? generateCombinedAllSubsReport({
@@ -994,7 +1012,7 @@ async function buildCombinedBillingOverview(
       endDate,
       targetCurrency,
     }).catch(() => ({ customerMonthPrepaidOffsets: [] }));
-    return queryStripeAiSpendFromBigQuery(
+    const historical = await queryStripeAiSpendFromBigQuery(
       {
         startDate: previousRange.startDate,
         endDate,
@@ -1011,6 +1029,79 @@ async function buildCombinedBillingOverview(
       },
       { profile: "stripe_arr_correct" },
     );
+    if (!currentMonthIncludedInRange) return historical;
+
+    const effectiveCurrentMonthEndIso =
+      endDateObj && endDateObj.getTime() < nowUtc.getTime() ? endDate : todayIso;
+    if (effectiveCurrentMonthEndIso < currentMonthStartIso) return historical;
+
+    const carryForward = await getOrSetCache(
+      `api:combined-billing-overview:ai-spend-carry-forward:${stableStringify({
+        monthStartDate: currentMonthStartIso,
+        targetCurrency,
+      })}`,
+      CACHE_TTL_MS,
+      () =>
+        resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOffsets({
+          currentMonthStartDate: currentMonthStartIso,
+          asOfDate: todayIso,
+          targetCurrency,
+        }),
+    ).catch(() => ({
+      currentMonthStartDate: currentMonthStartIso,
+      currentMonthEndDate: currentMonthStartIso,
+      lastMonthStartDate: "",
+      lastMonthEndDate: "",
+      carriedCustomerIds: [],
+      prepaidOffsetByCustomerIds: [],
+      excludedCustomers: [],
+    }));
+
+    const upcomingCurrentMonth = await getOrSetCache(
+      `api:combined-billing-overview:ai-spend-upcoming:${stableStringify({
+        startDate: currentMonthStartIso,
+        endDate: effectiveCurrentMonthEndIso,
+        grain,
+        targetCurrency,
+        productDescriptionIncludes: AI_SPEND_UPCOMING_PRODUCT_TERMS,
+        prepaidOffsetByCustomerIds: carryForward.prepaidOffsetByCustomerIds || [],
+      })}`,
+      CACHE_TTL_MS,
+      () =>
+        queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery(
+          {
+            startDate: currentMonthStartIso,
+            endDate: effectiveCurrentMonthEndIso,
+            grain,
+            targetCurrency,
+            topLimit: 1,
+            detailLimit: 1,
+            productDescriptionIncludes: AI_SPEND_UPCOMING_PRODUCT_TERMS,
+            excludeCustomerIds: [],
+            prepaidOffsetByCustomerIds: carryForward.prepaidOffsetByCustomerIds || [],
+          },
+          { profile: "stripe_arr_correct" },
+        ),
+    ).catch(() => null);
+    if (!upcomingCurrentMonth) return historical;
+
+    const currentMonthKey = currentMonthStartIso.slice(0, 7);
+    const replacementPoint = (upcomingCurrentMonth.points || []).find(
+      (point) => periodKeyFromIsoDateForGrain(String(point.periodStart || ""), "monthly") === currentMonthKey,
+    );
+    if (!replacementPoint) return historical;
+
+    const nextPoints = (historical.points || []).filter(
+      (point) => periodKeyFromIsoDateForGrain(String(point.periodStart || ""), "monthly") !== currentMonthKey,
+    );
+    nextPoints.push(replacementPoint);
+    nextPoints.sort((a, b) => String(a.periodStart || "").localeCompare(String(b.periodStart || "")));
+
+    return {
+      ...historical,
+      points: nextPoints,
+      totalRevenue: round2(nextPoints.reduce((sum, point) => sum + Number(point.revenue || 0), 0)),
+    };
   })();
   const ltvAiSpendPromise: Promise<Map<string, number>> = shouldComputeLtv
     ? (async () => {
