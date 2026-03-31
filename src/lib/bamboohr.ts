@@ -18,6 +18,17 @@ type BambooEmployeeRecord = {
   fullTimeEquivalent: number | null;
 };
 
+type BambooClientConfig = {
+  subdomain: string;
+  authHeader: string;
+  baseUrls: string[];
+};
+
+type BambooEmploymentStatusTimelineRow = {
+  effectiveDate: Date;
+  status: string;
+};
+
 export type BambooHeadcountSnapshot = {
   count: number;
   employeeNames: string[];
@@ -25,6 +36,13 @@ export type BambooHeadcountSnapshot = {
 
 function clean(value: string | undefined | null) {
   return String(value || "").trim();
+}
+
+function normalizeLoose(value: string | undefined | null) {
+  return clean(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
 function normalizeFieldKey(value: string) {
@@ -176,9 +194,18 @@ function extractRows(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload;
   if (typeof payload !== "object") return [];
   const obj = payload as Record<string, unknown>;
+  if (Array.isArray(obj.rows)) return obj.rows as unknown[];
+  if (Array.isArray(obj.table)) return obj.table as unknown[];
   if (Array.isArray(obj.employees)) return obj.employees as unknown[];
   if (Array.isArray(obj.results)) return obj.results as unknown[];
   if (Array.isArray(obj.data)) return obj.data as unknown[];
+  if (obj.table && typeof obj.table === "object") {
+    const nested = obj.table as Record<string, unknown>;
+    if (Array.isArray(nested.rows)) return nested.rows as unknown[];
+    if (Array.isArray(nested.row)) return nested.row as unknown[];
+    const objectRows = Object.values(nested).filter((value) => !!value && typeof value === "object");
+    if (objectRows.length) return objectRows;
+  }
   if (obj.employees && typeof obj.employees === "object") {
     const nested = obj.employees as Record<string, unknown>;
     if (Array.isArray(nested.employee)) return nested.employee as unknown[];
@@ -202,31 +229,93 @@ function normalizeBaseUrl(value: string) {
   return clean(value).replace(/\/+$/, "");
 }
 
+function resolveBambooClientConfig(): BambooClientConfig {
+  const subdomain = clean(process.env.BAMBOOHR_SUBDOMAIN);
+  const apiKey = clean(process.env.BAMBOOHR_API_KEY);
+  if (!subdomain || !apiKey) {
+    throw new Error("BambooHR is not configured. Set BAMBOOHR_SUBDOMAIN and BAMBOOHR_API_KEY.");
+  }
+  const authHeader = basicAuthHeader(apiKey);
+  const configuredBase = normalizeBaseUrl(clean(process.env.BAMBOOHR_BASE_URL || ""));
+  const canonicalBase = normalizeBaseUrl(`https://${subdomain}.bamboohr.com`);
+  const apiBase = normalizeBaseUrl("https://api.bamboohr.com");
+  const baseUrls = Array.from(new Set([canonicalBase, configuredBase, apiBase].filter(Boolean)));
+  return { subdomain, authHeader, baseUrls };
+}
+
 function isActiveOnDate(employee: BambooEmployeeRecord, snapshotDate: Date) {
   const hire = parseIsoDateOnly(employee.hireDate);
   const term = parseIsoDateOnly(employee.terminationDate);
   if (hire && hire.getTime() > snapshotDate.getTime()) return false;
-  if (term && term.getTime() < snapshotDate.getTime()) return false;
+  if (term && term.getTime() <= snapshotDate.getTime()) return false;
   return true;
 }
 
-function isFullTimeEmployee(employee: BambooEmployeeRecord) {
-  const employmentStatus = clean(employee.employmentStatus).toLowerCase();
-  const compactEmploymentStatus = employmentStatus.replace(/[^a-z0-9]/g, "");
-
-  // Canonical mapping requested: include Employee Perm/FT* and Contractor only.
-  if (employmentStatus.includes("contractor")) return true;
-  if (compactEmploymentStatus.includes("employeepermft")) return true;
-
-  // Keep narrowly-scoped fallback for tenants where "Employment Status" may not be present.
-  const fallbackText = `${employee.employmentType} ${employee.payType} ${employee.rawText}`
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!employmentStatus && /\bcontract(or)?\b/.test(fallbackText)) return true;
-  if (!employmentStatus && /\bemployee\s*perm\s*\/?\s*ft\b/.test(fallbackText)) return true;
-
+function isIncludedEmploymentStatus(status: string) {
+  const normalized = normalizeLoose(status);
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+  if (normalized.includes("contractor")) return true;
+  if (compact.includes("employeepermft")) return true;
   return false;
+}
+
+function isInactiveEmploymentStatus(status: string) {
+  const normalized = normalizeLoose(status);
+  return normalized.includes("terminated") || normalized.includes("inactive");
+}
+
+function parseEmploymentStatusTimelineRows(payload: unknown): BambooEmploymentStatusTimelineRow[] {
+  const rows = extractRows(payload);
+  const parsed: BambooEmploymentStatusTimelineRow[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const obj = row as Record<string, unknown>;
+    const effectiveDateText = firstString(obj, ["date", "effectiveDate", "effective_date"]);
+    const status = firstString(obj, ["employmentStatus", "status", "value", "label", "name"]);
+    const effectiveDate = parseIsoDateOnly(effectiveDateText);
+    if (!effectiveDate || !status) continue;
+    parsed.push({ effectiveDate, status });
+  }
+  parsed.sort((a, b) => a.effectiveDate.getTime() - b.effectiveDate.getTime());
+  return parsed;
+}
+
+function pickEmploymentStatusAsOf(
+  timeline: BambooEmploymentStatusTimelineRow[],
+  snapshotDate: Date,
+): string {
+  let best: BambooEmploymentStatusTimelineRow | null = null;
+  for (const row of timeline) {
+    if (row.effectiveDate.getTime() > snapshotDate.getTime()) continue;
+    if (isInactiveEmploymentStatus(row.status)) continue;
+    if (!best || row.effectiveDate.getTime() > best.effectiveDate.getTime()) {
+      best = row;
+    }
+  }
+  return best ? best.status : "";
+}
+
+async function mapWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  handler: (item: T) => Promise<void>,
+): Promise<void> {
+  if (!items.length) return;
+  const queue = [...items];
+  const workers: Promise<void>[] = [];
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  for (let i = 0; i < workerCount; i += 1) {
+    workers.push(
+      (async () => {
+        while (queue.length) {
+          const item = queue.shift();
+          if (item == null) return;
+          await handler(item);
+        }
+      })(),
+    );
+  }
+  await Promise.all(workers);
 }
 
 function employeeDisplayName(employee: BambooEmployeeRecord) {
@@ -248,17 +337,7 @@ function employeeDisplayName(employee: BambooEmployeeRecord) {
 }
 
 async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
-  const subdomain = clean(process.env.BAMBOOHR_SUBDOMAIN);
-  const apiKey = clean(process.env.BAMBOOHR_API_KEY);
-  if (!subdomain || !apiKey) {
-    throw new Error("BambooHR is not configured. Set BAMBOOHR_SUBDOMAIN and BAMBOOHR_API_KEY.");
-  }
-
-  const authHeader = basicAuthHeader(apiKey);
-  const configuredBase = normalizeBaseUrl(clean(process.env.BAMBOOHR_BASE_URL || ""));
-  const canonicalBase = normalizeBaseUrl(`https://${subdomain}.bamboohr.com`);
-  const apiBase = normalizeBaseUrl("https://api.bamboohr.com");
-  const baseUrls = Array.from(new Set([canonicalBase, configuredBase, apiBase].filter(Boolean)));
+  const { subdomain, authHeader, baseUrls } = resolveBambooClientConfig();
   const reportBodies: Array<Record<string, unknown>> = [
     {
       title: "Current employees with employment fields",
@@ -402,6 +481,41 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
   return [];
 }
 
+async function fetchEmploymentStatusTimelineByEmployee(
+  employeeIds: string[],
+): Promise<Map<string, BambooEmploymentStatusTimelineRow[]>> {
+  const { subdomain, authHeader, baseUrls } = resolveBambooClientConfig();
+  const out = new Map<string, BambooEmploymentStatusTimelineRow[]>();
+  const uniqueIds = Array.from(
+    new Set(
+      employeeIds
+        .map((id) => clean(id))
+        .filter(Boolean),
+    ),
+  );
+  await mapWithConcurrency(uniqueIds, 8, async (employeeId) => {
+    let best: BambooEmploymentStatusTimelineRow[] = [];
+    for (const baseUrl of baseUrls) {
+      const url = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/employees/${encodeURIComponent(employeeId)}/tables/employmentStatus?format=JSON`;
+      try {
+        const payload = await fetchJsonWithRetry(url, {
+          method: "GET",
+          headers: {
+            Authorization: authHeader,
+            Accept: "application/json",
+          },
+        });
+        const parsed = parseEmploymentStatusTimelineRows(payload);
+        if (parsed.length > best.length) best = parsed;
+      } catch {
+        // Try next base URL.
+      }
+    }
+    out.set(employeeId, best);
+  });
+  return out;
+}
+
 export async function queryBambooHrFullTimeHeadcountByDate(dates: string[]): Promise<Map<string, number>> {
   const snapshots = await queryBambooHrFullTimeRosterByDate(dates);
   const out = new Map<string, number>();
@@ -423,12 +537,33 @@ export async function queryBambooHrFullTimeRosterByDate(dates: string[]): Promis
   if (!uniqueDates.length) return out;
 
   const employees = await fetchEmployeeRoster();
+  if (!employees.length) return out;
+  const snapshots = uniqueDates
+    .map((value) => parseIsoDateOnly(value))
+    .filter((value): value is Date => !!value)
+    .sort((a, b) => a.getTime() - b.getTime());
+  if (!snapshots.length) return out;
+  const minSnapshot = snapshots[0];
+  const maxSnapshot = snapshots[snapshots.length - 1];
+  const candidateEmployees = employees.filter((employee) => {
+    const hire = parseIsoDateOnly(employee.hireDate);
+    const term = parseIsoDateOnly(employee.terminationDate);
+    if (hire && hire.getTime() > maxSnapshot.getTime()) return false;
+    if (term && term.getTime() <= minSnapshot.getTime()) return false;
+    return true;
+  });
+  const employmentStatusByEmployee = await fetchEmploymentStatusTimelineByEmployee(
+    candidateEmployees.map((employee) => employee.id),
+  );
+
   for (const dateText of uniqueDates) {
     const snapshot = parseIsoDateOnly(dateText);
     if (!snapshot) continue;
-    const fullTimeEmployees = employees.filter((employee) => {
+    const fullTimeEmployees = candidateEmployees.filter((employee) => {
       if (!isActiveOnDate(employee, snapshot)) return false;
-      if (!isFullTimeEmployee(employee)) return false;
+      const timeline = employmentStatusByEmployee.get(clean(employee.id)) || [];
+      const asOfStatus = pickEmploymentStatusAsOf(timeline, snapshot) || employee.employmentStatus;
+      if (!isIncludedEmploymentStatus(asOfStatus)) return false;
       return true;
     });
     const employeeNames = fullTimeEmployees
