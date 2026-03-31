@@ -203,6 +203,7 @@ function isFullTimeEmployee(employee: BambooEmployeeRecord) {
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
+  if (/\bterminated\b|\binactive\b/.test(statusText)) return false;
   if (/\bintern(ship)?\b/.test(statusText)) return false;
   if (/\btemporary\b|\btemp\b/.test(statusText)) return false;
   if (/\bcontract(or)?\b|\bcontingent\b/.test(statusText)) return true;
@@ -212,7 +213,9 @@ function isFullTimeEmployee(employee: BambooEmployeeRecord) {
   if (isFullTime) return true;
 
   if (employee.fullTimeEquivalent != null && employee.fullTimeEquivalent >= 0.99) return true;
-  return false;
+  // BambooHR schemas vary across endpoints; many full-time permanent employees are only marked as Active.
+  if (/\bactive\b/.test(statusText)) return true;
+  return clean(process.env.BAMBOOHR_COUNT_UNKNOWN_AS_FULL_TIME || "true").toLowerCase() !== "false";
 }
 
 function employeeDisplayName(employee: BambooEmployeeRecord) {
