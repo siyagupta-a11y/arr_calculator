@@ -247,43 +247,6 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
     {
       fields: [
         "id",
-        "firstName",
-        "lastName",
-        "preferredName",
-        "displayName",
-        "jobTitle",
-        "department",
-        "division",
-        "location",
-        "employmentStatus",
-        "employmentType",
-        "hireDate",
-        "terminationDate",
-        "fullTimeEquivalent",
-        "payType",
-      ],
-    },
-    {
-      fields: [
-        "id",
-        "firstName",
-        "lastName",
-        "displayName",
-        "jobTitle",
-        "department",
-        "division",
-        "location",
-        "status",
-        "type",
-        "dateOfHire",
-        "dateOfTermination",
-        "FTE",
-        "payType",
-      ],
-    },
-    {
-      fields: [
-        "id",
         "employmentStatus",
         "employmentType",
         "hireDate",
@@ -305,6 +268,20 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
     },
   ];
 
+  const fetchDirectoryRows = async () => {
+    const directoryUrl = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/employees/directory`;
+    const directoryPayload = await fetchJsonWithRetry(directoryUrl, {
+      method: "GET",
+      headers: {
+        Authorization: authHeader,
+        Accept: "application/json",
+      },
+    });
+    return extractRows(directoryPayload)
+      .map(normalizeEmployeeRow)
+      .filter((row): row is BambooEmployeeRecord => !!row);
+  };
+
   for (const suffix of ["&onlyCurrent=false", ""]) {
     for (const body of reportBodies) {
       try {
@@ -318,7 +295,40 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
           body: JSON.stringify(body),
         });
         const rows = extractRows(payload).map(normalizeEmployeeRow).filter((row): row is BambooEmployeeRecord => !!row);
-        if (rows.length) return rows;
+        if (rows.length) {
+          // Custom reports contain the employment fields we need for classification.
+          // Enrich names/details from directory rows when available.
+          try {
+            const directoryRows = await fetchDirectoryRows();
+            if (!directoryRows.length) return rows;
+            const byId = new Map<string, BambooEmployeeRecord>();
+            for (const directoryRow of directoryRows) {
+              const id = clean(directoryRow.id);
+              if (!id || byId.has(id)) continue;
+              byId.set(id, directoryRow);
+            }
+            return rows.map((row) => {
+              const id = clean(row.id);
+              const extra = id ? byId.get(id) : undefined;
+              if (!extra) return row;
+              return {
+                ...row,
+                firstName: clean(extra.firstName) || row.firstName,
+                lastName: clean(extra.lastName) || row.lastName,
+                preferredName: clean(extra.preferredName) || row.preferredName,
+                displayName: clean(extra.displayName) || row.displayName,
+                fullName: clean(extra.fullName) || row.fullName,
+                jobTitle: clean(extra.jobTitle) || row.jobTitle,
+                department: clean(extra.department) || row.department,
+                division: clean(extra.division) || row.division,
+                location: clean(extra.location) || row.location,
+                rawText: `${row.rawText} ${extra.rawText}`.trim(),
+              };
+            });
+          } catch {
+            return rows;
+          }
+        }
       } catch {
         // Try next variant.
       }
@@ -326,18 +336,7 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
   }
 
   // Fallback to directory endpoint if custom report is unavailable.
-  const directoryUrl = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/employees/directory`;
-  const directoryPayload = await fetchJsonWithRetry(directoryUrl, {
-    method: "GET",
-    headers: {
-      Authorization: authHeader,
-      Accept: "application/json",
-    },
-  });
-  const directoryRows = extractRows(directoryPayload)
-    .map(normalizeEmployeeRow)
-    .filter((row): row is BambooEmployeeRecord => !!row);
-  return directoryRows;
+  return fetchDirectoryRows();
 }
 
 export async function queryBambooHrFullTimeHeadcountByDate(dates: string[]): Promise<Map<string, number>> {
