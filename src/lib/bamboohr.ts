@@ -12,6 +12,10 @@ function clean(value: string | undefined | null) {
   return String(value || "").trim();
 }
 
+function normalizeFieldKey(value: string) {
+  return clean(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 function parseIsoDateOnly(value: string) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(clean(value));
   if (!match) return null;
@@ -68,12 +72,31 @@ async function fetchJsonWithRetry(url: string, init: RequestInit, maxAttempts = 
   throw lastError instanceof Error ? lastError : new Error("BambooHR request failed");
 }
 
-function firstString(obj: Record<string, unknown>, keys: string[]) {
+function firstValue(obj: Record<string, unknown>, keys: string[]) {
   for (const key of keys) {
-    const value = clean(String(obj[key] ?? ""));
-    if (value) return value;
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      const value = obj[key];
+      if (value != null && clean(String(value)) !== "") return value;
+    }
   }
-  return "";
+  const aliasToField = new Map<string, string>();
+  for (const field of Object.keys(obj)) {
+    const normalized = normalizeFieldKey(field);
+    if (!normalized || aliasToField.has(normalized)) continue;
+    aliasToField.set(normalized, field);
+  }
+  for (const alias of keys.map(normalizeFieldKey)) {
+    const field = aliasToField.get(alias);
+    if (!field) continue;
+    const value = obj[field];
+    if (value != null && clean(String(value)) !== "") return value;
+  }
+  return null;
+}
+
+function firstString(obj: Record<string, unknown>, keys: string[]) {
+  const value = firstValue(obj, keys);
+  return value == null ? "" : clean(String(value));
 }
 
 function parseNumber(value: unknown) {
@@ -84,13 +107,21 @@ function parseNumber(value: unknown) {
 function normalizeEmployeeRow(input: unknown): BambooEmployeeRecord | null {
   if (!input || typeof input !== "object") return null;
   const row = input as Record<string, unknown>;
-  const id = firstString(row, ["id", "employeeId", "employee_id"]);
-  const hireDate = firstString(row, ["hireDate", "dateOfHire", "hiredDate", "employmentStartDate"]);
-  const terminationDate = firstString(row, ["terminationDate", "dateOfTermination", "employmentEndDate"]);
-  const employmentStatus = firstString(row, ["employmentStatus", "status", "employeeStatus"]);
-  const employmentType = firstString(row, ["employmentType", "type"]);
-  const payType = firstString(row, ["payType"]);
-  const fullTimeEquivalent = parseNumber(row.fullTimeEquivalent ?? row.fte ?? row.FTE);
+  const id = firstString(row, ["id", "employeeId", "employee_id", "employee id"]);
+  const hireDate = firstString(row, ["hireDate", "dateOfHire", "hiredDate", "employmentStartDate", "hire date"]);
+  const terminationDate = firstString(row, ["terminationDate", "dateOfTermination", "employmentEndDate", "termination date"]);
+  const employmentStatus = firstString(row, [
+    "employmentStatus",
+    "employeeStatus",
+    "status",
+    "employment status",
+    "employee status",
+  ]);
+  const employmentType = firstString(row, ["employmentType", "type", "employment type", "employee type"]);
+  const payType = firstString(row, ["payType", "pay type"]);
+  const fullTimeEquivalent = parseNumber(
+    firstValue(row, ["fullTimeEquivalent", "FTE", "fte", "full time equivalent"]),
+  );
   return {
     id,
     hireDate,
