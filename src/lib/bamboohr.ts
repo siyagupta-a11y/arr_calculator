@@ -182,6 +182,18 @@ function extractRows(payload: unknown): unknown[] {
   if (obj.employees && typeof obj.employees === "object") {
     const nested = obj.employees as Record<string, unknown>;
     if (Array.isArray(nested.employee)) return nested.employee as unknown[];
+    const objectRows = Object.values(nested).filter((value) => !!value && typeof value === "object");
+    if (objectRows.length) return objectRows;
+  }
+  if (obj.results && typeof obj.results === "object") {
+    const objectRows = Object.values(obj.results as Record<string, unknown>).filter(
+      (value) => !!value && typeof value === "object",
+    );
+    if (objectRows.length) return objectRows;
+  }
+  if (obj.data && typeof obj.data === "object") {
+    const objectRows = Object.values(obj.data as Record<string, unknown>).filter((value) => !!value && typeof value === "object");
+    if (objectRows.length) return objectRows;
   }
   return [];
 }
@@ -203,17 +215,19 @@ function isFullTimeEmployee(employee: BambooEmployeeRecord) {
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
+  if (!statusText) return false;
   if (/\bterminated\b|\binactive\b/.test(statusText)) return false;
   if (/\bintern(ship)?\b/.test(statusText)) return false;
-  if (/\btemporary\b|\btemp\b/.test(statusText)) return false;
+  if (/\btemporary\b|\btemp\b|\bseasonal\b|\bco[- ]?op\b|\bstudent\b/.test(statusText)) return false;
+  if (/\bcasual\b/.test(statusText)) return false;
   if (/\bcontract(or)?\b|\bcontingent\b/.test(statusText)) return true;
   if (/part[- ]?time|pt\b/.test(statusText)) return false;
 
-  const isFullTime = /\bfull[- ]?time\b|\bfulltime\b|\bft\b/.test(statusText);
+  const isFullTime = /\bfull[- ]?time\b|\bfulltime\b|\bft\b|\bpermanent\b|\bregular\b/.test(statusText);
   if (isFullTime) return true;
 
   if (employee.fullTimeEquivalent != null && employee.fullTimeEquivalent >= 0.99) return true;
-  // BambooHR schemas vary across endpoints; many full-time permanent employees are only marked as Active.
+  // Some BambooHR schemas expose only "Active" without an explicit type. Keep a fallback for those rows.
   if (/\bactive\b/.test(statusText)) return true;
   return clean(process.env.BAMBOOHR_COUNT_UNKNOWN_AS_FULL_TIME || "true").toLowerCase() !== "false";
 }
@@ -244,15 +258,10 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
   }
 
   const authHeader = basicAuthHeader(apiKey);
-  const baseUrls = Array.from(
-    new Set(
-      [
-        normalizeBaseUrl(clean(process.env.BAMBOOHR_BASE_URL || "")),
-        normalizeBaseUrl(`https://${subdomain}.bamboohr.com`),
-        normalizeBaseUrl("https://api.bamboohr.com"),
-      ].filter(Boolean),
-    ),
-  );
+  const configuredBase = normalizeBaseUrl(clean(process.env.BAMBOOHR_BASE_URL || ""));
+  const canonicalBase = normalizeBaseUrl(`https://${subdomain}.bamboohr.com`);
+  const apiBase = normalizeBaseUrl("https://api.bamboohr.com");
+  const baseUrls = Array.from(new Set([canonicalBase, configuredBase, apiBase].filter(Boolean)));
   const reportBodies: Array<Record<string, unknown>> = [
     {
       title: "Current employees with employment fields",
@@ -301,7 +310,61 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
       .filter((row): row is BambooEmployeeRecord => !!row);
   };
 
+  const pickBestRoster = (existing: BambooEmployeeRecord[], candidate: BambooEmployeeRecord[]) => {
+    if (candidate.length > existing.length) return candidate;
+    return existing;
+  };
+  const dedupeByIdOrName = (rows: BambooEmployeeRecord[]) => {
+    const out: BambooEmployeeRecord[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const id = clean(row.id);
+      const nameKey = clean(employeeDisplayName(row)).toLowerCase();
+      const key = id ? `id:${id}` : `name:${nameKey}`;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(row);
+    }
+    return out;
+  };
+  const mergeWithDirectory = (rows: BambooEmployeeRecord[], directoryRows: BambooEmployeeRecord[]) => {
+    if (!rows.length || !directoryRows.length) return rows;
+    const byId = new Map<string, BambooEmployeeRecord>();
+    for (const directoryRow of directoryRows) {
+      const id = clean(directoryRow.id);
+      if (!id || byId.has(id)) continue;
+      byId.set(id, directoryRow);
+    }
+    return rows.map((row) => {
+      const id = clean(row.id);
+      const extra = id ? byId.get(id) : undefined;
+      if (!extra) return row;
+      return {
+        ...row,
+        firstName: clean(extra.firstName) || row.firstName,
+        lastName: clean(extra.lastName) || row.lastName,
+        preferredName: clean(extra.preferredName) || row.preferredName,
+        displayName: clean(extra.displayName) || row.displayName,
+        fullName: clean(extra.fullName) || row.fullName,
+        jobTitle: clean(extra.jobTitle) || row.jobTitle,
+        department: clean(extra.department) || row.department,
+        division: clean(extra.division) || row.division,
+        location: clean(extra.location) || row.location,
+        rawText: `${row.rawText} ${extra.rawText}`.trim(),
+      };
+    });
+  };
+
+  let bestReportRows: BambooEmployeeRecord[] = [];
+  let bestDirectoryRows: BambooEmployeeRecord[] = [];
   for (const baseUrl of baseUrls) {
+    try {
+      const directoryRows = dedupeByIdOrName(await fetchDirectoryRows(baseUrl));
+      bestDirectoryRows = pickBestRoster(bestDirectoryRows, directoryRows);
+    } catch {
+      // Try next source.
+    }
+
     const reportUrlBase = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/reports/custom?format=JSON`;
     for (const suffix of ["&onlyCurrent=false", ""]) {
       for (const body of reportBodies) {
@@ -315,47 +378,20 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
             },
             body: JSON.stringify(body),
           });
-          const rows = extractRows(payload).map(normalizeEmployeeRow).filter((row): row is BambooEmployeeRecord => !!row);
-          if (rows.length) {
-            // Custom reports contain the employment fields we need for classification.
-            // Enrich names/details from directory rows when available.
-            try {
-              const directoryRows = await fetchDirectoryRows(baseUrl);
-              if (!directoryRows.length) return rows;
-              const byId = new Map<string, BambooEmployeeRecord>();
-              for (const directoryRow of directoryRows) {
-                const id = clean(directoryRow.id);
-                if (!id || byId.has(id)) continue;
-                byId.set(id, directoryRow);
-              }
-              return rows.map((row) => {
-                const id = clean(row.id);
-                const extra = id ? byId.get(id) : undefined;
-                if (!extra) return row;
-                return {
-                  ...row,
-                  firstName: clean(extra.firstName) || row.firstName,
-                  lastName: clean(extra.lastName) || row.lastName,
-                  preferredName: clean(extra.preferredName) || row.preferredName,
-                  displayName: clean(extra.displayName) || row.displayName,
-                  fullName: clean(extra.fullName) || row.fullName,
-                  jobTitle: clean(extra.jobTitle) || row.jobTitle,
-                  department: clean(extra.department) || row.department,
-                  division: clean(extra.division) || row.division,
-                  location: clean(extra.location) || row.location,
-                  rawText: `${row.rawText} ${extra.rawText}`.trim(),
-                };
-              });
-            } catch {
-              return rows;
-            }
-          }
+          const rows = dedupeByIdOrName(
+            extractRows(payload).map(normalizeEmployeeRow).filter((row): row is BambooEmployeeRecord => !!row),
+          );
+          bestReportRows = pickBestRoster(bestReportRows, rows);
         } catch {
           // Try next variant.
         }
       }
     }
   }
+  if (bestReportRows.length) {
+    return dedupeByIdOrName(mergeWithDirectory(bestReportRows, bestDirectoryRows));
+  }
+  if (bestDirectoryRows.length) return bestDirectoryRows;
 
   // Fallback to directory endpoint if custom report is unavailable.
   for (const baseUrl of baseUrls) {
