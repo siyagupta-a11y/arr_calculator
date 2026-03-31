@@ -205,18 +205,11 @@ function isFullTimeEmployee(employee: BambooEmployeeRecord) {
     .trim();
   if (/\bintern(ship)?\b/.test(statusText)) return false;
   if (/\btemporary\b|\btemp\b/.test(statusText)) return false;
-  // Explicitly include contractors in FTE count per business rule.
   if (/\bcontract(or)?\b|\bcontingent\b/.test(statusText)) return true;
-  if (/part[- ]?time|pt\b/.test(statusText)) return false;
-  if (/full[- ]?time|ft\b/.test(statusText)) return true;
 
-  if (employee.fullTimeEquivalent != null) {
-    if (employee.fullTimeEquivalent >= 0.99) return true;
-    if (employee.fullTimeEquivalent > 0 && employee.fullTimeEquivalent < 0.99) return false;
-  }
-
-  const countUnknownAsFullTime = clean(process.env.BAMBOOHR_COUNT_UNKNOWN_AS_FULL_TIME || "true").toLowerCase() !== "false";
-  return countUnknownAsFullTime;
+  const isPermanent = /\bpermanent\b|\bperm\b/.test(statusText);
+  const isFullTime = /\bfull[- ]?time\b|\bft\b/.test(statusText);
+  return isPermanent && isFullTime;
 }
 
 function employeeDisplayName(employee: BambooEmployeeRecord) {
