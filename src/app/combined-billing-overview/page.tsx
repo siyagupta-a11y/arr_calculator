@@ -784,7 +784,7 @@ function ArrPerEmployeeChartCard({ points, currency }: ArrPerEmployeeChartCardPr
         <div>
           <h2 className="stripe-ui__panel-title">ARR Per Employee Over Time</h2>
           <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-            Combined ARR divided by BambooHR headcount at each period (only permanent full-time employees and contractors). Click a point to list employees included in that count.
+            Combined ARR divided by BambooHR headcount at each period (full-time employees and contractors; interns, temporary, and part-time excluded). Click a point to list employees included in that count.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>

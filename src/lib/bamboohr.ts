@@ -206,10 +206,13 @@ function isFullTimeEmployee(employee: BambooEmployeeRecord) {
   if (/\bintern(ship)?\b/.test(statusText)) return false;
   if (/\btemporary\b|\btemp\b/.test(statusText)) return false;
   if (/\bcontract(or)?\b|\bcontingent\b/.test(statusText)) return true;
+  if (/part[- ]?time|pt\b/.test(statusText)) return false;
 
-  const isPermanent = /\bpermanent\b|\bperm\b/.test(statusText);
-  const isFullTime = /\bfull[- ]?time\b|\bft\b/.test(statusText);
-  return isPermanent && isFullTime;
+  const isFullTime = /\bfull[- ]?time\b|\bfulltime\b|\bft\b/.test(statusText);
+  if (isFullTime) return true;
+
+  if (employee.fullTimeEquivalent != null && employee.fullTimeEquivalent >= 0.99) return true;
+  return false;
 }
 
 function employeeDisplayName(employee: BambooEmployeeRecord) {
