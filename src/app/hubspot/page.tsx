@@ -309,7 +309,9 @@ type HubspotViewModelResponse = {
   displayedRows: UiRow[];
   totalsByPeriodForDisplayed: Array<{ key: string; label: string; total: number }>;
   chartPoints: TrendPoint[];
+  growthContributorRowsByPeriod?: Record<string, GrowthContributorRow[]>;
   groupedChartSeries: GroupTrendSeries[];
+  groupedGrowthContributorRowsByPeriod?: Record<string, Record<string, GrowthContributorRow[]>>;
   deploymentTypeOptions: string[];
   territoryOptions: string[];
   countryOptions: string[];
@@ -1829,7 +1831,10 @@ export default function Home() {
     [hubspotVm, data],
   );
 
-  const chartPeriodOrder = useMemo(() => (chartDisplayData?.periods || []) as PeriodRef[], [chartDisplayData]);
+  const chartPeriodOrder = useMemo(
+    () => (hubspotVm?.periods || chartDisplayData?.periods || []) as PeriodRef[],
+    [hubspotVm, chartDisplayData],
+  );
 
   const accountArrByPeriod = useMemo(() => {
     const grouped = new Map<string, Record<string, number>>();
@@ -2121,6 +2126,36 @@ export default function Home() {
   ]);
 
   const growthContributorRowsByPeriod = useMemo(() => {
+    const sortRows = (rows: GrowthContributorRow[]) =>
+      [...rows].sort((a, b) => {
+        const absDiff = Math.abs(b.mrrImpact) - Math.abs(a.mrrImpact);
+        if (Math.abs(absDiff) > 1e-9) return absDiff;
+        return a.accountLabel.localeCompare(b.accountLabel);
+      });
+
+    if (hubspotVm) {
+      if (chartGroupBy === "none") {
+        const out = new Map<string, GrowthContributorRow[]>();
+        const record = hubspotVm.growthContributorRowsByPeriod || {};
+        for (const point of barChartPoints) {
+          out.set(point.key, sortRows(record[point.key] || []));
+        }
+        return out;
+      }
+
+      const selectedKeys = selectedBarSeriesList.map((series) => series.key);
+      const groupedRecord = hubspotVm.groupedGrowthContributorRowsByPeriod || {};
+      const out = new Map<string, GrowthContributorRow[]>();
+      for (const point of barChartPoints) {
+        const combined: GrowthContributorRow[] = [];
+        for (const groupKey of selectedKeys) {
+          combined.push(...(groupedRecord[groupKey]?.[point.key] || []));
+        }
+        out.set(point.key, sortRows(combined));
+      }
+      return out;
+    }
+
     return buildGrowthContributorsByPeriod(
       chartPeriodOrder,
       selectedBarAccountArrByPeriod,
@@ -2128,6 +2163,10 @@ export default function Home() {
       chartAccountMetaByAccount,
     );
   }, [
+    hubspotVm,
+    chartGroupBy,
+    barChartPoints,
+    selectedBarSeriesList,
     chartPeriodOrder,
     selectedBarAccountArrByPeriod,
     selectedBarBaselineAccountArrByAccount,

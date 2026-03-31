@@ -68,6 +68,26 @@ type TrendPoint = {
   arrGrowth: number;
 };
 
+type GrowthContributorCategory = "new" | "expansion" | "contraction" | "churn";
+
+type GrowthContributorMeta = {
+  accountLabel: string;
+  dealNames: string[];
+};
+
+type GrowthContributorRow = {
+  category: GrowthContributorCategory;
+  accountKey: string;
+  accountLabel: string;
+  dealNames: string[];
+  prevArr: number;
+  currArr: number;
+  deltaArr: number;
+  mrrImpact: number;
+};
+
+type GrowthContributorRowsByPeriod = Record<string, GrowthContributorRow[]>;
+
 type GroupTrendSeries = {
   key: string;
   label: string;
@@ -247,6 +267,20 @@ function accountGroupingKey(row: UiRow) {
     return raw.toLowerCase();
   }
   return "";
+}
+
+function accountDisplayWithDetails(row: UiRow) {
+  const accountId = String(row.accountId || "").trim();
+  const accountName = String(row.accountName || "").trim();
+  const parts: string[] = [];
+  if (accountName && accountId) parts.push(`${accountName} (${accountId})`);
+  else if (accountName) parts.push(accountName);
+  else if (accountId) parts.push(accountId);
+  const workspaceId = String(row.workspaceId || "").trim();
+  const deliveryStage = String(row.deliveryStage || "").trim();
+  if (workspaceId) parts.push(`Workspace ID: ${workspaceId}`);
+  if (deliveryStage) parts.push(`Delivery Stage: ${deliveryStage}`);
+  return parts.length ? parts.join(" | ") : "(blank)";
 }
 
 function groupValueForRow(r: UiRow, field: GroupField) {
@@ -497,6 +531,118 @@ function buildTrendPointsFromAccounts(
   });
 }
 
+function buildGrowthContributorMetaByAccount(rows: UiRow[]) {
+  const byAccount = new Map<string, { accountLabel: string; dealNames: Set<string> }>();
+  for (const row of rows) {
+    const key = accountGroupingKey(row);
+    if (!key) continue;
+    if (!byAccount.has(key)) {
+      byAccount.set(key, {
+        accountLabel: accountDisplayWithDetails(row),
+        dealNames: new Set<string>(),
+      });
+    }
+    const entry = byAccount.get(key)!;
+    const candidateLabel = accountDisplayWithDetails(row);
+    const currentLabel = String(entry.accountLabel || "").trim();
+    if ((!currentLabel || currentLabel === "(blank)") && candidateLabel && candidateLabel !== "(blank)") {
+      entry.accountLabel = candidateLabel;
+    }
+    const dealName = String(row.dealName || "").trim();
+    if (dealName) entry.dealNames.add(dealName);
+  }
+
+  const out = new Map<string, GrowthContributorMeta>();
+  for (const [accountKey, value] of byAccount.entries()) {
+    out.set(accountKey, {
+      accountLabel: value.accountLabel || accountKey,
+      dealNames: Array.from(value.dealNames).sort((a, b) => a.localeCompare(b)),
+    });
+  }
+  return out;
+}
+
+function buildGrowthContributorRowsByPeriod(
+  periodOrder: PeriodRef[],
+  accountArrByPeriod: Map<string, Record<string, number>>,
+  baselineAccountArrByAccount: Map<string, number>,
+  accountMetaByKey: Map<string, GrowthContributorMeta>,
+) {
+  const rowsByPeriod = new Map<string, GrowthContributorRow[]>();
+  const allAccountKeys = new Set<string>([
+    ...Array.from(accountArrByPeriod.keys()),
+    ...Array.from(baselineAccountArrByAccount.keys()),
+  ]);
+
+  for (let idx = 0; idx < periodOrder.length; idx += 1) {
+    const period = periodOrder[idx];
+    const prevPeriodKey = idx > 0 ? periodOrder[idx - 1].key : "";
+    const rows: GrowthContributorRow[] = [];
+
+    for (const accountKey of allAccountKeys) {
+      const accountTotals = accountArrByPeriod.get(accountKey) || {};
+      const currArr = round2(accountTotals[period.key] || 0);
+      const prevArr = round2(
+        idx === 0
+          ? baselineAccountArrByAccount.get(accountKey) || 0
+          : prevPeriodKey
+            ? accountTotals[prevPeriodKey] || 0
+            : 0,
+      );
+      const currHas = Math.abs(currArr) > 1e-9;
+      const prevHas = Math.abs(prevArr) > 1e-9;
+      if (!currHas && !prevHas) continue;
+
+      const deltaArr = round2(currArr - prevArr);
+      let category: GrowthContributorCategory | null = null;
+      let mrrImpact = 0;
+      if (!prevHas && currHas) {
+        category = "new";
+        mrrImpact = round2(currArr / 12);
+      } else if (prevHas && !currHas) {
+        category = "churn";
+        mrrImpact = round2(-prevArr / 12);
+      } else if (deltaArr > 1e-9) {
+        category = "expansion";
+        mrrImpact = round2(deltaArr / 12);
+      } else if (deltaArr < -1e-9) {
+        category = "contraction";
+        mrrImpact = round2(deltaArr / 12);
+      }
+
+      if (!category || Math.abs(mrrImpact) < 1e-9) continue;
+      const meta = accountMetaByKey.get(accountKey);
+      rows.push({
+        category,
+        accountKey,
+        accountLabel: meta?.accountLabel || accountKey,
+        dealNames: meta?.dealNames || [],
+        prevArr,
+        currArr,
+        deltaArr,
+        mrrImpact,
+      });
+    }
+
+    rows.sort((a, b) => {
+      const absDiff = Math.abs(b.mrrImpact) - Math.abs(a.mrrImpact);
+      if (Math.abs(absDiff) > 1e-9) return absDiff;
+      return a.accountLabel.localeCompare(b.accountLabel);
+    });
+    rowsByPeriod.set(period.key, rows);
+  }
+
+  return rowsByPeriod;
+}
+
+function serializeGrowthContributorRowsByPeriod(rowsByPeriod: Map<string, GrowthContributorRow[]>) {
+  const out: GrowthContributorRowsByPeriod = {};
+  for (const [periodKey, rows] of rowsByPeriod.entries()) {
+    out[periodKey] = rows;
+  }
+  return out;
+}
+
 function toUiRows(sourceData: ReportResponse | null): UiRow[] {
   if (!sourceData) return [];
   return (sourceData.rows || []).map((r: ReportRow) => ({
@@ -716,10 +862,20 @@ function computeForPayload(
     return baseline;
   })();
 
+  const chartAccountMetaByKey = buildGrowthContributorMetaByAccount(filteredChartLineItemRows);
+
   const chartPoints: TrendPoint[] = buildTrendPointsFromAccounts(
     chartPeriodOrder,
     accountArrByPeriod,
     baselineAccountArrByAccount,
+  );
+  const growthContributorRowsByPeriod: GrowthContributorRowsByPeriod = serializeGrowthContributorRowsByPeriod(
+    buildGrowthContributorRowsByPeriod(
+      chartPeriodOrder,
+      accountArrByPeriod,
+      baselineAccountArrByAccount,
+      chartAccountMetaByKey,
+    ),
   );
 
   const groupedAccountArrByPeriod = (() => {
@@ -762,8 +918,13 @@ function computeForPayload(
     return grouped;
   })();
 
-  const groupedChartSeries = (() => {
-    if (payload.chartGroupBy === "none" || !chartPeriodOrder.length) return [] as GroupTrendSeries[];
+  const groupedChartData = (() => {
+    if (payload.chartGroupBy === "none" || !chartPeriodOrder.length) {
+      return {
+        series: [] as GroupTrendSeries[],
+        contributorsByGroup: {} as Record<string, GrowthContributorRowsByPeriod>,
+      };
+    }
 
     const raw = Array.from(groupedAccountArrByPeriod.entries())
       .map(([groupKey, groupData]) => {
@@ -811,20 +972,39 @@ function computeForPayload(
       });
     }
 
-    return finalized.map((group, idx) => ({
-      key: group.key,
-      label: group.label,
-      points: group.points,
-      color: GROUP_LINE_COLORS[idx % GROUP_LINE_COLORS.length],
-    }));
+    const contributorsByGroup: Record<string, GrowthContributorRowsByPeriod> = {};
+    for (const group of finalized) {
+      contributorsByGroup[group.key] = serializeGrowthContributorRowsByPeriod(
+        buildGrowthContributorRowsByPeriod(
+          chartPeriodOrder,
+          group.accounts,
+          group.baseline,
+          chartAccountMetaByKey,
+        ),
+      );
+    }
+
+    return {
+      series: finalized.map((group, idx) => ({
+        key: group.key,
+        label: group.label,
+        points: group.points,
+        color: GROUP_LINE_COLORS[idx % GROUP_LINE_COLORS.length],
+      })),
+      contributorsByGroup,
+    };
   })();
+  const groupedChartSeries = groupedChartData.series;
+  const groupedGrowthContributorRowsByPeriod = groupedChartData.contributorsByGroup;
 
   return {
     periods: (data.periods || []).map((period) => ({ key: String(period.key || ""), label: String(period.label || period.key || "") })),
     displayedRows,
     totalsByPeriodForDisplayed,
     chartPoints,
+    growthContributorRowsByPeriod,
     groupedChartSeries,
+    groupedGrowthContributorRowsByPeriod,
     deploymentTypeOptions,
     territoryOptions,
     countryOptions,
