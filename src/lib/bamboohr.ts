@@ -204,7 +204,7 @@ function isFullTimeEmployee(employee: BambooEmployeeRecord) {
     .replace(/\s+/g, " ")
     .trim();
   if (/\bintern(ship)?\b/.test(statusText)) return false;
-  if (/\bcontract(or)?\b|\bcontingent\b|\btemporary\b|\btemp\b/.test(statusText)) return false;
+  if (/\btemporary\b|\btemp\b/.test(statusText)) return false;
   if (/part[- ]?time|pt\b/.test(statusText)) return false;
   if (/full[- ]?time|ft\b/.test(statusText)) return true;
 
