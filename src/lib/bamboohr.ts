@@ -205,6 +205,8 @@ function isFullTimeEmployee(employee: BambooEmployeeRecord) {
     .trim();
   if (/\bintern(ship)?\b/.test(statusText)) return false;
   if (/\btemporary\b|\btemp\b/.test(statusText)) return false;
+  // Explicitly include contractors in FTE count per business rule.
+  if (/\bcontract(or)?\b|\bcontingent\b/.test(statusText)) return true;
   if (/part[- ]?time|pt\b/.test(statusText)) return false;
   if (/full[- ]?time|ft\b/.test(statusText)) return true;
 
