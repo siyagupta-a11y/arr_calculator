@@ -3932,6 +3932,9 @@ events_base AS (
     ) AS workspace_id,
     es.mrr_change_major,
     CASE
+      -- Explicit overrides for known Stripe products.
+      WHEN LOWER(es.product_id_norm) = 'prod_m9gpcuhm0q9uzg' THEN 0
+      WHEN LOWER(es.product_id_norm) = 'prod_pbflquwvpscoaw' THEN 1
       WHEN REGEXP_CONTAINS(plan_hints, r'enterprise') THEN 5
       WHEN REGEXP_CONTAINS(plan_hints, r'managed') THEN 4
       WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])team([^a-z]|$)') THEN 3
