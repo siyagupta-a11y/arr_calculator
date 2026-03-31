@@ -1,0 +1,243 @@
+type BambooEmployeeRecord = {
+  id: string;
+  hireDate: string;
+  terminationDate: string;
+  employmentStatus: string;
+  employmentType: string;
+  payType: string;
+  fullTimeEquivalent: number | null;
+};
+
+function clean(value: string | undefined | null) {
+  return String(value || "").trim();
+}
+
+function parseIsoDateOnly(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(clean(value));
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) {
+    return null;
+  }
+  return date;
+}
+
+function toIsoDateOnly(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function basicAuthHeader(apiKey: string) {
+  return `Basic ${Buffer.from(`${apiKey}:x`).toString("base64")}`;
+}
+
+function parseRetryAfterMs(raw: string | null) {
+  if (!raw) return null;
+  const asSeconds = Number(raw);
+  if (Number.isFinite(asSeconds) && asSeconds >= 0) return Math.round(asSeconds * 1000);
+  const parsed = Date.parse(raw);
+  if (!Number.isNaN(parsed)) {
+    const delta = parsed - Date.now();
+    return delta > 0 ? delta : 0;
+  }
+  return null;
+}
+
+async function fetchJsonWithRetry(url: string, init: RequestInit, maxAttempts = 4): Promise<unknown> {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const res = await fetch(url, init);
+    if (res.ok) {
+      const text = await res.text();
+      if (!text) return null;
+      return JSON.parse(text) as unknown;
+    }
+    const retryable = res.status === 429 || res.status >= 500;
+    if (!retryable || attempt >= maxAttempts) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`BambooHR request failed (${res.status}): ${text || res.statusText}`);
+    }
+    const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
+    const backoffMs = 250 * Math.pow(2, attempt - 1);
+    const waitMs = Math.max(retryAfterMs ?? 0, backoffMs);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    lastError = new Error(`Retrying BambooHR request after ${waitMs}ms`);
+  }
+  throw lastError instanceof Error ? lastError : new Error("BambooHR request failed");
+}
+
+function firstString(obj: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = clean(String(obj[key] ?? ""));
+    if (value) return value;
+  }
+  return "";
+}
+
+function parseNumber(value: unknown) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeEmployeeRow(input: unknown): BambooEmployeeRecord | null {
+  if (!input || typeof input !== "object") return null;
+  const row = input as Record<string, unknown>;
+  const id = firstString(row, ["id", "employeeId", "employee_id"]);
+  const hireDate = firstString(row, ["hireDate", "dateOfHire", "hiredDate", "employmentStartDate"]);
+  const terminationDate = firstString(row, ["terminationDate", "dateOfTermination", "employmentEndDate"]);
+  const employmentStatus = firstString(row, ["employmentStatus", "status", "employeeStatus"]);
+  const employmentType = firstString(row, ["employmentType", "type"]);
+  const payType = firstString(row, ["payType"]);
+  const fullTimeEquivalent = parseNumber(row.fullTimeEquivalent ?? row.fte ?? row.FTE);
+  return {
+    id,
+    hireDate,
+    terminationDate,
+    employmentStatus,
+    employmentType,
+    payType,
+    fullTimeEquivalent,
+  };
+}
+
+function extractRows(payload: unknown): unknown[] {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  if (typeof payload !== "object") return [];
+  const obj = payload as Record<string, unknown>;
+  if (Array.isArray(obj.employees)) return obj.employees as unknown[];
+  if (Array.isArray(obj.results)) return obj.results as unknown[];
+  if (Array.isArray(obj.data)) return obj.data as unknown[];
+  if (obj.employees && typeof obj.employees === "object") {
+    const nested = obj.employees as Record<string, unknown>;
+    if (Array.isArray(nested.employee)) return nested.employee as unknown[];
+  }
+  return [];
+}
+
+function normalizeBaseUrl(value: string) {
+  return clean(value).replace(/\/+$/, "");
+}
+
+function isActiveOnDate(employee: BambooEmployeeRecord, snapshotDate: Date) {
+  const hire = parseIsoDateOnly(employee.hireDate);
+  const term = parseIsoDateOnly(employee.terminationDate);
+  if (hire && hire.getTime() > snapshotDate.getTime()) return false;
+  if (term && term.getTime() < snapshotDate.getTime()) return false;
+  return true;
+}
+
+function isFullTimeEmployee(employee: BambooEmployeeRecord) {
+  const statusText = `${employee.employmentStatus} ${employee.employmentType} ${employee.payType}`
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/contractor|contingent|intern|temporary|temp/.test(statusText)) return false;
+  if (/part[- ]?time|pt\b/.test(statusText)) return false;
+  if (/full[- ]?time|ft\b/.test(statusText)) return true;
+
+  if (employee.fullTimeEquivalent != null) {
+    if (employee.fullTimeEquivalent >= 0.99) return true;
+    if (employee.fullTimeEquivalent > 0 && employee.fullTimeEquivalent < 0.99) return false;
+  }
+
+  const countUnknownAsFullTime = clean(process.env.BAMBOOHR_COUNT_UNKNOWN_AS_FULL_TIME || "true").toLowerCase() !== "false";
+  return countUnknownAsFullTime;
+}
+
+async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
+  const subdomain = clean(process.env.BAMBOOHR_SUBDOMAIN);
+  const apiKey = clean(process.env.BAMBOOHR_API_KEY);
+  if (!subdomain || !apiKey) {
+    throw new Error("BambooHR is not configured. Set BAMBOOHR_SUBDOMAIN and BAMBOOHR_API_KEY.");
+  }
+
+  const baseUrl = normalizeBaseUrl(clean(process.env.BAMBOOHR_BASE_URL || "https://api.bamboohr.com"));
+  const authHeader = basicAuthHeader(apiKey);
+  const reportUrlBase = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/reports/custom?format=JSON`;
+  const reportBodies: Array<Record<string, unknown>> = [
+    {
+      fields: [
+        "id",
+        "employmentStatus",
+        "employmentType",
+        "hireDate",
+        "terminationDate",
+        "fullTimeEquivalent",
+        "payType",
+      ],
+    },
+    {
+      fields: [
+        "id",
+        "status",
+        "type",
+        "dateOfHire",
+        "dateOfTermination",
+        "FTE",
+        "payType",
+      ],
+    },
+  ];
+
+  for (const suffix of ["&onlyCurrent=false", ""]) {
+    for (const body of reportBodies) {
+      try {
+        const payload = await fetchJsonWithRetry(`${reportUrlBase}${suffix}`, {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+        const rows = extractRows(payload).map(normalizeEmployeeRow).filter((row): row is BambooEmployeeRecord => !!row);
+        if (rows.length) return rows;
+      } catch {
+        // Try next variant.
+      }
+    }
+  }
+
+  // Fallback to directory endpoint if custom report is unavailable.
+  const directoryUrl = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/employees/directory`;
+  const directoryPayload = await fetchJsonWithRetry(directoryUrl, {
+    method: "GET",
+    headers: {
+      Authorization: authHeader,
+      Accept: "application/json",
+    },
+  });
+  const directoryRows = extractRows(directoryPayload)
+    .map(normalizeEmployeeRow)
+    .filter((row): row is BambooEmployeeRecord => !!row);
+  return directoryRows;
+}
+
+export async function queryBambooHrFullTimeHeadcountByDate(dates: string[]): Promise<Map<string, number>> {
+  const uniqueDates = Array.from(
+    new Set(
+      (dates || [])
+        .map((value) => clean(value))
+        .filter((value) => !!parseIsoDateOnly(value)),
+    ),
+  ).sort();
+  const out = new Map<string, number>();
+  if (!uniqueDates.length) return out;
+
+  const employees = await fetchEmployeeRoster();
+  for (const dateText of uniqueDates) {
+    const snapshot = parseIsoDateOnly(dateText);
+    if (!snapshot) continue;
+    const count = employees.reduce((sum, employee) => {
+      if (!isActiveOnDate(employee, snapshot)) return sum;
+      if (!isFullTimeEmployee(employee)) return sum;
+      return sum + 1;
+    }, 0);
+    out.set(toIsoDateOnly(snapshot), count);
+  }
+  return out;
+}

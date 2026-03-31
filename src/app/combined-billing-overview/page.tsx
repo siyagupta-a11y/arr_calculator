@@ -26,6 +26,12 @@ type CombinedPoint = {
   arrGrowth: number;
 };
 
+type LineSourcePoints = {
+  salesled: CombinedPoint[];
+  selfserve: CombinedPoint[];
+  aiSpend: CombinedPoint[];
+};
+
 type QuickBooksExpenseAccount = {
   id: string;
   name: string;
@@ -70,6 +76,16 @@ type LtvPoint = {
   ltv: number;
 };
 
+type ArrPerEmployeePoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  arr: number;
+  fullTimeEmployees: number;
+  arrPerEmployee: number;
+};
+
 type CombinedLiveArrResponse = {
   generatedAtUtc: string;
   liveArr: number;
@@ -94,9 +110,13 @@ type CombinedBillingOverviewReportResponse = {
   currentMrr: number;
   currentArr: number;
   points: CombinedPoint[];
+  linePoints: CombinedPoint[];
+  lineSourcePoints: LineSourcePoints;
+  arrPerEmployeePoints: ArrPerEmployeePoint[];
   retentionPoints: RetentionSeriesPoint[];
   ltvPoints: LtvPoint[];
   ltvNotice: string | null;
+  arrPerEmployeeNotice: string | null;
   cacPoints: CacPoint[];
   cacCurrencyLayerPoints: CacPoint[];
   cacCadPoints: CacPoint[];
@@ -140,6 +160,9 @@ type CombinedOverviewData = {
   projectedArrEomFlatAdjusted: number;
   projectedArrEomFlatFlat: number;
   points: CombinedPoint[];
+  linePoints: CombinedPoint[];
+  lineSourcePoints: LineSourcePoints;
+  arrPerEmployeePoints: ArrPerEmployeePoint[];
   retentionPoints: RetentionSeriesPoint[];
   ltvPoints: LtvPoint[];
   cacPoints: CacPoint[];
@@ -439,10 +462,433 @@ function LineChartCard<TPoint extends LineChartPointBase>({
   );
 }
 
+type GroupedSourceSeries = {
+  id: "salesled" | "selfserve" | "ai";
+  label: string;
+  color: string;
+  points: CombinedPoint[];
+};
+
+type GroupedSourceLineChartCardProps = {
+  title: string;
+  subtitle: string;
+  series: GroupedSourceSeries[];
+  valueAccessor: (point: CombinedPoint) => number;
+  valueFormatter: (value: number) => string;
+  includeZero?: boolean;
+};
+
+function GroupedSourceLineChartCard({
+  title,
+  subtitle,
+  series,
+  valueAccessor,
+  valueFormatter,
+  includeZero = false,
+}: GroupedSourceLineChartCardProps) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const chartRef = useRef<SVGSVGElement | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const basePoints = useMemo(() => {
+    let best: CombinedPoint[] = [];
+    for (const item of series) {
+      if ((item.points || []).length > best.length) best = item.points;
+    }
+    return best;
+  }, [series]);
+
+  const width = 640;
+  const height = 250;
+  const paddingLeft = 54;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 42;
+  const plotWidth = width - paddingLeft - paddingRight;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  const allValues: number[] = [];
+  for (const item of series) {
+    for (const point of item.points || []) {
+      allValues.push(valueAccessor(point));
+    }
+  }
+  const minRaw = allValues.length ? Math.min(...allValues) : 0;
+  const maxRaw = allValues.length ? Math.max(...allValues) : 1;
+  let minValue = includeZero ? Math.min(minRaw, 0) : minRaw;
+  let maxValue = includeZero ? Math.max(maxRaw, 0) : maxRaw;
+  if (Math.abs(maxValue - minValue) < 1e-9) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+
+  const xAt = (idx: number) => {
+    if (basePoints.length <= 1) return paddingLeft + plotWidth / 2;
+    return paddingLeft + (idx / (basePoints.length - 1)) * plotWidth;
+  };
+  const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+
+  const pathFor = (points: CombinedPoint[]) =>
+    points.map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(valueAccessor(point))}`).join(" ");
+
+  const hoveredPoint = hoverIndex != null && hoverIndex >= 0 && hoverIndex < basePoints.length ? basePoints[hoverIndex] : null;
+  const hoveredX = hoveredPoint && hoverIndex != null ? xAt(hoverIndex) : 0;
+  const hoveredY = (() => {
+    if (hoverIndex == null || hoverIndex < 0) return 0;
+    let value = 0;
+    for (const item of series) {
+      const point = item.points[hoverIndex];
+      if (point) {
+        value = Math.max(value, valueAccessor(point));
+      }
+    }
+    return yAt(value);
+  })();
+  const tooltipWidth = 250;
+  const tooltipHeight = 18 + series.length * 14 + 6;
+  const tooltipX = Math.max(
+    paddingLeft,
+    Math.min(paddingLeft + plotWidth - tooltipWidth, hoveredX - tooltipWidth / 2),
+  );
+  const tooltipY = Math.max(paddingTop + 4, hoveredY - tooltipHeight - 10);
+  const downloadChart = useCallback(async () => {
+    if (!chartRef.current || downloading) return;
+    setDownloading(true);
+    try {
+      await downloadSvgAsPng(chartRef.current, `combined-billing-overview-${title}-by-source`);
+    } finally {
+      setDownloading(false);
+    }
+  }, [downloading, title]);
+
+  return (
+    <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+      <div className="stripe-ui__section-head">
+        <div>
+          <h2 className="stripe-ui__panel-title">{title}</h2>
+          <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+            {subtitle}
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
+            {downloading ? "Downloading..." : "Download SVG"}
+          </button>
+          <div className="stripe-ui__hint" aria-live="polite">
+            {hoveredPoint ? hoveredPoint.label : "Hover on chart for values"}
+          </div>
+        </div>
+      </div>
+
+      <div className="stripe-ui__hint" style={{ marginTop: "0.45rem", display: "flex", gap: "0.9rem", flexWrap: "wrap" }}>
+        {series.map((item) => (
+          <span key={`legend-${item.id}`} style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}>
+            <span style={{ width: 10, height: 10, borderRadius: "50%", background: item.color, display: "inline-block" }} />
+            {item.label}
+          </span>
+        ))}
+      </div>
+
+      {basePoints.length === 0 ? (
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>
+          No data for selected range.
+        </p>
+      ) : (
+        <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
+          <svg
+            ref={chartRef}
+            viewBox={`0 0 ${width} ${height}`}
+            role="img"
+            aria-label={`${title} by source`}
+            style={{ width: "100%", display: "block" }}
+            onMouseLeave={() => setHoverIndex(null)}
+            onMouseMove={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const relX = ((e.clientX - rect.left) / rect.width) * width;
+              const clamped = Math.max(paddingLeft, Math.min(paddingLeft + plotWidth, relX));
+              const ratio = basePoints.length > 1 ? (clamped - paddingLeft) / plotWidth : 0;
+              const idx = Math.max(0, Math.min(basePoints.length - 1, Math.round(ratio * Math.max(basePoints.length - 1, 0))));
+              setHoverIndex(idx);
+            }}
+          >
+            <line
+              x1={paddingLeft}
+              y1={paddingTop + plotHeight}
+              x2={paddingLeft + plotWidth}
+              y2={paddingTop + plotHeight}
+              stroke="#36557f"
+              strokeWidth={1}
+            />
+            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#36557f" strokeWidth={1} />
+
+            {series.map((item) => (
+              <path
+                key={`path-${item.id}`}
+                d={pathFor(item.points || [])}
+                fill="none"
+                stroke={item.color}
+                strokeWidth={2.2}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+              />
+            ))}
+
+            {hoverIndex != null && basePoints[hoverIndex] && (
+              <line
+                x1={xAt(hoverIndex)}
+                y1={paddingTop}
+                x2={xAt(hoverIndex)}
+                y2={paddingTop + plotHeight}
+                stroke="#89a9d4"
+                strokeOpacity={0.5}
+                strokeDasharray="4 4"
+              />
+            )}
+
+            {hoveredPoint && (
+              <g>
+                <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx={6} fill="#0e203b" opacity={0.97} />
+                <text x={tooltipX + 10} y={tooltipY + 16} fill="#d9e6fa" fontSize="11.5">
+                  {hoveredPoint.label}
+                </text>
+                {series.map((item, idx) => {
+                  const point = item.points[hoverIndex || 0];
+                  const value = point ? valueAccessor(point) : 0;
+                  return (
+                    <text key={`tip-${item.id}`} x={tooltipX + 10} y={tooltipY + 32 + idx * 14} fill={item.color} fontSize="11.5">
+                      {item.label}: {valueFormatter(value)}
+                    </text>
+                  );
+                })}
+              </g>
+            )}
+
+            {series.map((item) =>
+              (item.points || []).map((point, idx) => (
+                <circle
+                  key={`${item.id}-${point.key}`}
+                  cx={xAt(idx)}
+                  cy={yAt(valueAccessor(point))}
+                  r={hoverIndex === idx ? 4 : 2.8}
+                  fill={item.color}
+                  onMouseEnter={() => setHoverIndex(idx)}
+                />
+              )),
+            )}
+
+            {tickIndices(basePoints.length).map((idx) => (
+              <text
+                key={`tick-${idx}`}
+                x={xAt(idx)}
+                y={height - 12}
+                textAnchor={idx === 0 ? "start" : idx === basePoints.length - 1 ? "end" : "middle"}
+                fill="#b7c9e6"
+                fontSize="12"
+              >
+                {basePoints[idx]?.label || ""}
+              </text>
+            ))}
+
+            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#8ea7cb" fontSize="12">
+              {valueFormatter(maxValue)}
+            </text>
+            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#8ea7cb" fontSize="12">
+              {valueFormatter(minValue)}
+            </text>
+          </svg>
+        </div>
+      )}
+    </section>
+  );
+}
+
 type LtvChartCardProps = {
   points: LtvPoint[];
   currency: string;
 };
+
+type ArrPerEmployeeChartCardProps = {
+  points: ArrPerEmployeePoint[];
+  currency: string;
+};
+
+function ArrPerEmployeeChartCard({ points, currency }: ArrPerEmployeeChartCardProps) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const chartRef = useRef<SVGSVGElement | null>(null);
+  const [downloading, setDownloading] = useState(false);
+
+  const width = 640;
+  const height = 250;
+  const paddingLeft = 54;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 42;
+  const plotWidth = width - paddingLeft - paddingRight;
+  const plotHeight = height - paddingTop - paddingBottom;
+
+  const values = points.map((point) => point.arrPerEmployee);
+  const minRaw = values.length ? Math.min(...values) : 0;
+  const maxRaw = values.length ? Math.max(...values) : 1;
+  let minValue = Math.min(minRaw, 0);
+  let maxValue = Math.max(maxRaw, 0);
+  if (Math.abs(maxValue - minValue) < 1e-9) {
+    minValue -= 1;
+    maxValue += 1;
+  }
+
+  const xAt = (idx: number) => {
+    if (points.length <= 1) return paddingLeft + plotWidth / 2;
+    return paddingLeft + (idx / (points.length - 1)) * plotWidth;
+  };
+  const yAt = (value: number) => paddingTop + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+
+  const pathD = points
+    .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xAt(idx)} ${yAt(point.arrPerEmployee)}`)
+    .join(" ");
+
+  const hoveredPoint =
+    hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length ? points[hoverIndex] : null;
+  const hoveredX = hoveredPoint && hoverIndex != null ? xAt(hoverIndex) : 0;
+  const hoveredY = hoveredPoint ? yAt(hoveredPoint.arrPerEmployee) : 0;
+
+  const tooltipWidth = 300;
+  const tooltipHeight = 72;
+  const tooltipX = Math.max(
+    paddingLeft,
+    Math.min(paddingLeft + plotWidth - tooltipWidth, hoveredX - tooltipWidth / 2),
+  );
+  const tooltipY = Math.max(paddingTop + 4, hoveredY - tooltipHeight - 10);
+
+  const downloadChart = useCallback(async () => {
+    if (!chartRef.current || downloading) return;
+    setDownloading(true);
+    try {
+      await downloadSvgAsPng(chartRef.current, "combined-billing-overview-arr-per-employee");
+    } finally {
+      setDownloading(false);
+    }
+  }, [downloading]);
+
+  return (
+    <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+      <div className="stripe-ui__section-head">
+        <div>
+          <h2 className="stripe-ui__panel-title">ARR Per Employee Over Time</h2>
+          <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+            Combined ARR divided by BambooHR full-time employee count at each period.
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button className="stripe-ui__btn stripe-ui__btn--ghost" onClick={() => void downloadChart()} disabled={downloading}>
+            {downloading ? "Downloading..." : "Download SVG"}
+          </button>
+          <div className="stripe-ui__hint" aria-live="polite">
+            {hoveredPoint
+              ? `${hoveredPoint.label}: ${formatMoney(hoveredPoint.arrPerEmployee, currency)}`
+              : "Hover on chart for values"}
+          </div>
+        </div>
+      </div>
+
+      {points.length === 0 ? (
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>
+          No data for selected range.
+        </p>
+      ) : (
+        <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
+          <svg
+            ref={chartRef}
+            viewBox={`0 0 ${width} ${height}`}
+            role="img"
+            aria-label="ARR per employee over time chart"
+            style={{ width: "100%", display: "block" }}
+            onMouseLeave={() => setHoverIndex(null)}
+            onMouseMove={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const relX = ((e.clientX - rect.left) / rect.width) * width;
+              const clamped = Math.max(paddingLeft, Math.min(paddingLeft + plotWidth, relX));
+              const ratio = points.length > 1 ? (clamped - paddingLeft) / plotWidth : 0;
+              const idx = Math.max(0, Math.min(points.length - 1, Math.round(ratio * Math.max(points.length - 1, 0))));
+              setHoverIndex(idx);
+            }}
+          >
+            <line
+              x1={paddingLeft}
+              y1={paddingTop + plotHeight}
+              x2={paddingLeft + plotWidth}
+              y2={paddingTop + plotHeight}
+              stroke="#36557f"
+              strokeWidth={1}
+            />
+            <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + plotHeight} stroke="#36557f" strokeWidth={1} />
+
+            <path d={pathD} fill="none" stroke="#06b6d4" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+
+            {hoverIndex != null && points[hoverIndex] && (
+              <line
+                x1={xAt(hoverIndex)}
+                y1={paddingTop}
+                x2={xAt(hoverIndex)}
+                y2={paddingTop + plotHeight}
+                stroke="#89a9d4"
+                strokeOpacity={0.5}
+                strokeDasharray="4 4"
+              />
+            )}
+
+            {hoveredPoint && (
+              <g>
+                <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx={6} fill="#0e203b" opacity={0.97} />
+                <text x={tooltipX + 10} y={tooltipY + 16} fill="#d9e6fa" fontSize="11.5">
+                  {hoveredPoint.label}
+                </text>
+                <text x={tooltipX + 10} y={tooltipY + 33} fill="#06b6d4" fontSize="12.5" fontWeight="600">
+                  ARR/FTE: {formatMoney(hoveredPoint.arrPerEmployee, currency)}
+                </text>
+                <text x={tooltipX + 10} y={tooltipY + 50} fill="#d9e6fa" fontSize="11.5">
+                  ARR: {formatMoney(hoveredPoint.arr, currency)}
+                </text>
+                <text x={tooltipX + 10} y={tooltipY + 65} fill="#d9e6fa" fontSize="11.5">
+                  FTE: {Math.max(0, Math.round(hoveredPoint.fullTimeEmployees || 0))}
+                </text>
+              </g>
+            )}
+
+            {points.map((point, idx) => (
+              <circle
+                key={point.key}
+                cx={xAt(idx)}
+                cy={yAt(point.arrPerEmployee)}
+                r={hoverIndex === idx ? 4.6 : 3.2}
+                fill="#06b6d4"
+                onMouseEnter={() => setHoverIndex(idx)}
+              />
+            ))}
+
+            {tickIndices(points.length).map((idx) => (
+              <text
+                key={`tick-${idx}`}
+                x={xAt(idx)}
+                y={height - 12}
+                textAnchor={idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle"}
+                fill="#b7c9e6"
+                fontSize="12"
+              >
+                {points[idx]?.label || ""}
+              </text>
+            ))}
+
+            <text x={paddingLeft - 8} y={paddingTop + 10} textAnchor="end" fill="#8ea7cb" fontSize="12">
+              {formatMoney(maxValue, currency)}
+            </text>
+            <text x={paddingLeft - 8} y={paddingTop + plotHeight} textAnchor="end" fill="#8ea7cb" fontSize="12">
+              {formatMoney(minValue, currency)}
+            </text>
+          </svg>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function LtvChartCard({ points, currency }: LtvChartCardProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
@@ -1935,7 +2381,9 @@ export default function CombinedBillingOverviewPage() {
   const [hasRunOnce, setHasRunOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<CombinedOverviewData | null>(null);
+  const [lineChartMode, setLineChartMode] = useState<"combined" | "source">("combined");
   const [ltvNotice, setLtvNotice] = useState<string | null>(null);
+  const [arrPerEmployeeNotice, setArrPerEmployeeNotice] = useState<string | null>(null);
   const [cacNotice, setCacNotice] = useState<string | null>(null);
   const [selectedCacAccountIds, setSelectedCacAccountIds] = useState<string[]>([]);
   const [cacAccountMenuTarget, setCacAccountMenuTarget] = useState<CacMenuTarget>(null);
@@ -2095,6 +2543,7 @@ export default function CombinedBillingOverviewPage() {
     setCacLoading(false);
     setError(null);
     setLtvNotice(null);
+    setArrPerEmployeeNotice(null);
     setCacNotice(null);
     setShowProjectedArrBreakdown(false);
 
@@ -2150,6 +2599,7 @@ export default function CombinedBillingOverviewPage() {
       if (isStale()) return;
 
       setLtvNotice(overview.ltvNotice);
+      setArrPerEmployeeNotice(overview.arrPerEmployeeNotice);
       setCacNotice(overview.cacNotice);
 
       setData((prev) => ({
@@ -2177,6 +2627,13 @@ export default function CombinedBillingOverviewPage() {
         projectedArrEomFlatAdjusted: round2(prev?.projectedArrEomFlatAdjusted || 0),
         projectedArrEomFlatFlat: round2(prev?.projectedArrEomFlatFlat || 0),
         points: overview.points || [],
+        linePoints: overview.linePoints || overview.points || [],
+        lineSourcePoints: {
+          salesled: overview.lineSourcePoints?.salesled || [],
+          selfserve: overview.lineSourcePoints?.selfserve || [],
+          aiSpend: overview.lineSourcePoints?.aiSpend || [],
+        },
+        arrPerEmployeePoints: overview.arrPerEmployeePoints || [],
         retentionPoints: overview.retentionPoints || [],
         ltvPoints: overview.ltvPoints || [],
         cacPoints: overview.cacPoints || [],
@@ -2270,6 +2727,17 @@ export default function CombinedBillingOverviewPage() {
   }
 
   const points = useMemo(() => data?.points ?? [], [data]);
+  const linePoints = useMemo(() => data?.linePoints ?? data?.points ?? [], [data]);
+  const lineSourcePoints = useMemo<LineSourcePoints>(
+    () =>
+      data?.lineSourcePoints || {
+        salesled: [],
+        selfserve: [],
+        aiSpend: [],
+      },
+    [data],
+  );
+  const arrPerEmployeePoints = useMemo(() => data?.arrPerEmployeePoints ?? [], [data]);
   const retentionPoints = useMemo(() => data?.retentionPoints ?? [], [data]);
   const ltvPoints = useMemo(() => data?.ltvPoints ?? [], [data]);
   const cacPoints = useMemo(() => data?.cacPoints ?? [], [data]);
@@ -2410,6 +2878,14 @@ export default function CombinedBillingOverviewPage() {
         </section>
       )}
 
+      {!loading && !error && arrPerEmployeeNotice && (
+        <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+          <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+            {arrPerEmployeeNotice}
+          </p>
+        </section>
+      )}
+
       {!loading && !error && data && (
         <>
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
@@ -2486,40 +2962,113 @@ export default function CombinedBillingOverviewPage() {
               alignItems: "start",
             }}
           >
-            <LineChartCard
-              title="MRR Over Time"
-              subtitle="Combined MRR at period end (HubSpot method + Stripe method)."
-              points={points}
-              valueAccessor={(p) => p.mrrEnd}
-              valueFormatter={(v) => formatMoney(v, currency)}
-              stroke="#4f8df9"
-            />
+            <section
+              className="stripe-ui__panel ui-reveal ui-reveal-2"
+              style={{ gridColumn: "1 / -1", padding: "0.8rem 0.95rem" }}
+            >
+              <div className="stripe-ui__section-head" style={{ marginBottom: 0 }}>
+                <h2 className="stripe-ui__panel-title" style={{ margin: 0, fontSize: "1rem" }}>
+                  Line Chart View
+                </h2>
+                <div style={{ display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
+                  <button
+                    className={`stripe-ui__btn ${lineChartMode === "combined" ? "stripe-ui__btn--primary" : "stripe-ui__btn--secondary"}`}
+                    onClick={() => setLineChartMode("combined")}
+                  >
+                    Combined
+                  </button>
+                  <button
+                    className={`stripe-ui__btn ${lineChartMode === "source" ? "stripe-ui__btn--primary" : "stripe-ui__btn--secondary"}`}
+                    onClick={() => setLineChartMode("source")}
+                  >
+                    Grouped by source
+                  </button>
+                </div>
+              </div>
+              <p className="stripe-ui__hint" style={{ marginTop: "0.45rem", marginBottom: 0 }}>
+                Combined includes sales-led + self-serve + AI spend.
+              </p>
+            </section>
+
+            {lineChartMode === "combined" ? (
+              <LineChartCard
+                title="MRR Over Time"
+                subtitle="Combined MRR at period end (sales-led + self-serve + AI spend)."
+                points={linePoints}
+                valueAccessor={(p) => p.mrrEnd}
+                valueFormatter={(v) => formatMoney(v, currency)}
+                stroke="#4f8df9"
+              />
+            ) : (
+              <GroupedSourceLineChartCard
+                title="MRR Over Time"
+                subtitle="MRR by source."
+                series={[
+                  { id: "salesled", label: "Sales-led", color: "#4f8df9", points: lineSourcePoints.salesled },
+                  { id: "selfserve", label: "Self-serve", color: "#1fc16b", points: lineSourcePoints.selfserve },
+                  { id: "ai", label: "AI spend", color: "#f59e0b", points: lineSourcePoints.aiSpend },
+                ]}
+                valueAccessor={(p) => p.mrrEnd}
+                valueFormatter={(v) => formatMoney(v, currency)}
+              />
+            )}
 
             <GrowthBreakdownChart points={points} currency={currency} />
 
-            <LineChartCard
-              title="MRR Growth Rate Over Time"
-              subtitle="Period-over-period combined MRR growth rate."
-              points={points}
-              valueAccessor={(p) => p.mrrGrowthRatePct}
-              valueFormatter={(v) => formatPercent(v)}
-              stroke="#f59e0b"
-              includeZero
-            />
+            {lineChartMode === "combined" ? (
+              <LineChartCard
+                title="MRR Growth Rate Over Time"
+                subtitle="Period-over-period combined MRR growth rate (including AI spend)."
+                points={linePoints}
+                valueAccessor={(p) => p.mrrGrowthRatePct}
+                valueFormatter={(v) => formatPercent(v)}
+                stroke="#f59e0b"
+                includeZero
+              />
+            ) : (
+              <GroupedSourceLineChartCard
+                title="MRR Growth Rate Over Time"
+                subtitle="MRR growth rate by source."
+                series={[
+                  { id: "salesled", label: "Sales-led", color: "#4f8df9", points: lineSourcePoints.salesled },
+                  { id: "selfserve", label: "Self-serve", color: "#1fc16b", points: lineSourcePoints.selfserve },
+                  { id: "ai", label: "AI spend", color: "#f59e0b", points: lineSourcePoints.aiSpend },
+                ]}
+                valueAccessor={(p) => p.mrrGrowthRatePct}
+                valueFormatter={(v) => formatPercent(v)}
+                includeZero
+              />
+            )}
 
-            <LineChartCard
-              title="ARR Over Time"
-              subtitle="Combined ARR at period end."
-              points={points}
-              valueAccessor={(p) => p.arr}
-              valueFormatter={(v) => formatMoney(v, currency)}
-              stroke="#1fc16b"
-            />
+            {lineChartMode === "combined" ? (
+              <LineChartCard
+                title="ARR Over Time"
+                subtitle="Combined ARR at period end (sales-led + self-serve + AI spend)."
+                points={linePoints}
+                valueAccessor={(p) => p.arr}
+                valueFormatter={(v) => formatMoney(v, currency)}
+                stroke="#1fc16b"
+              />
+            ) : (
+              <GroupedSourceLineChartCard
+                title="ARR Over Time"
+                subtitle="ARR by source."
+                series={[
+                  { id: "salesled", label: "Sales-led", color: "#4f8df9", points: lineSourcePoints.salesled },
+                  { id: "selfserve", label: "Self-serve", color: "#1fc16b", points: lineSourcePoints.selfserve },
+                  { id: "ai", label: "AI spend", color: "#f59e0b", points: lineSourcePoints.aiSpend },
+                ]}
+                valueAccessor={(p) => p.arr}
+                valueFormatter={(v) => formatMoney(v, currency)}
+              />
+            )}
+
+            <ArrPerEmployeeChartCard points={arrPerEmployeePoints} currency={currency} />
 
             <DeltaBarChartCard
               title="ARR Growth Over Time"
-              subtitle="Absolute combined ARR change per period."
-              points={points}
+              subtitle="Absolute combined ARR change per period (including AI spend)."
+              points={linePoints}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => formatMoney(v, currency)}
             />

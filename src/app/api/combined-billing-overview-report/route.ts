@@ -9,6 +9,7 @@ import {
 } from "@/lib/stripeBigquery";
 import { resolveEnterprisePrepaidAiSpendExclusions } from "@/lib/aiSpendEnterprisePrepaidExclusions";
 import { generateCombinedAllSubsReport } from "@/lib/combinedAllSubsReport";
+import { queryBambooHrFullTimeHeadcountByDate } from "@/lib/bamboohr";
 import { fetchQuickBooksSalesMarketingCostsByMonth } from "@/lib/quickbooks";
 import {
   getMonthlyAverageCurrencyLayerFxRateForCloseMonth,
@@ -40,6 +41,12 @@ type CombinedPoint = {
   gdrPct: number;
   arr: number;
   arrGrowth: number;
+};
+
+type LineSourcePoints = {
+  salesled: CombinedPoint[];
+  selfserve: CombinedPoint[];
+  aiSpend: CombinedPoint[];
 };
 
 type PeriodRef = {
@@ -82,6 +89,16 @@ type LtvPoint = {
   ltv: number;
 };
 
+type ArrPerEmployeePoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  arr: number;
+  fullTimeEmployees: number;
+  arrPerEmployee: number;
+};
+
 type LogoChurnCounts = {
   prevActive: number;
   churned: number;
@@ -90,6 +107,12 @@ type LogoChurnCounts = {
 type CombinedLtvUserCounts = {
   activeByPeriod: Map<string, number>;
   logoChurnByPeriod: Map<string, LogoChurnCounts>;
+};
+
+type AiSpendSeriesBuildResult = {
+  points: CombinedPoint[];
+  monthlyArrByPeriod: Map<string, number>;
+  initialPrevMrr: number;
 };
 
 type QuickBooksSalesMarketingCostPoint = {
@@ -398,6 +421,145 @@ function canonicalStripeCustomerPeriodKey(row: StripeBillingOverviewCustomerArrR
   const quarterKeyMatch = /^(\d{4})-Q([1-4])$/i.exec(periodKey);
   if (quarterKeyMatch) return `${quarterKeyMatch[1]}-Q${quarterKeyMatch[2]}`;
   return periodKey;
+}
+
+function periodKeyFromIsoDateForGrain(isoDate: string, grain: CombinedGrain) {
+  const normalized = String(isoDate || "").trim();
+  if (!normalized) return "";
+  if (grain === "daily") return normalized.slice(0, 10);
+  if (grain === "monthly") return normalized.slice(0, 7);
+  return quarterKeyFromIsoDate(normalized);
+}
+
+function periodEndIsoFromKey(periodKey: string, grain: CombinedGrain) {
+  const key = String(periodKey || "").trim();
+  if (!key) return "";
+  if (grain === "daily") {
+    return parseIsoDateOnly(key) ? key.slice(0, 10) : "";
+  }
+  if (grain === "monthly") {
+    const m = /^(\d{4})-(\d{2})$/.exec(key);
+    if (!m) return "";
+    const year = Number(m[1]);
+    const month = Number(m[2]) - 1;
+    const last = new Date(Date.UTC(year, month + 1, 0));
+    return toIsoDateOnly(last);
+  }
+  const q = /^(\d{4})-Q([1-4])$/i.exec(key);
+  if (!q) return "";
+  const year = Number(q[1]);
+  const quarter = Number(q[2]);
+  const endMonth = quarter * 3;
+  const last = new Date(Date.UTC(year, endMonth, 0));
+  return toIsoDateOnly(last);
+}
+
+function annualizedArrFromRevenueForPeriod(revenue: number, periodStart: string, periodEnd: string) {
+  const start = parseIsoDateOnly(String(periodStart || "").slice(0, 10));
+  const end = parseIsoDateOnly(String(periodEnd || "").slice(0, 10));
+  if (!start || !end || end.getTime() < start.getTime()) {
+    return round2(Number(revenue || 0) * 12);
+  }
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / msPerDay) + 1);
+  return round2((Number(revenue || 0) * 365) / days);
+}
+
+function buildAiSpendSourceSeries(
+  periodOrder: PeriodRef[],
+  grain: CombinedGrain,
+  aiSpendPoints: Array<{ periodStart: string; periodEnd: string; revenue: number }>,
+  previousPeriodStartDate: string,
+): AiSpendSeriesBuildResult {
+  const totalsByPeriodKey = new Map<string, { mrr: number; arr: number }>();
+  for (const point of aiSpendPoints || []) {
+    const key = periodKeyFromIsoDateForGrain(point.periodStart, grain);
+    if (!key) continue;
+    const arr = annualizedArrFromRevenueForPeriod(Number(point.revenue || 0), point.periodStart, point.periodEnd);
+    const mrr = round2(arr / 12);
+    const current = totalsByPeriodKey.get(key) || { mrr: 0, arr: 0 };
+    totalsByPeriodKey.set(key, {
+      mrr: round2(current.mrr + mrr),
+      arr: round2(current.arr + arr),
+    });
+  }
+
+  const previousKey = periodKeyFromIsoDateForGrain(previousPeriodStartDate, grain);
+  const initialPrevMrr = previousKey ? round2(totalsByPeriodKey.get(previousKey)?.mrr || 0) : 0;
+  const monthlyArrByPeriod = new Map<string, number>();
+  const rawPoints: CombinedPoint[] = periodOrder.map((period) => {
+    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+    const totals = totalsByPeriodKey.get(key) || { mrr: 0, arr: 0 };
+    if (grain === "monthly") {
+      monthlyArrByPeriod.set(key, round2(totals.arr));
+    }
+    const periodStart = grain === "monthly" ? `${key}-01` : key;
+    return {
+      key,
+      label: period.label,
+      periodStart,
+      periodEnd: periodStart,
+      mrrEnd: round2(totals.mrr),
+      newMrr: 0,
+      expansionMrr: 0,
+      contractionMrr: 0,
+      churnMrr: 0,
+      netMrrChange: 0,
+      mrrGrowthRatePct: 0,
+      ndrPct: 0,
+      gdrPct: 0,
+      arr: round2(totals.arr),
+      arrGrowth: 0,
+    };
+  });
+
+  const points: CombinedPoint[] = [];
+  for (let idx = 0; idx < rawPoints.length; idx += 1) {
+    const point = rawPoints[idx];
+    const prevMrr = idx === 0 ? initialPrevMrr : points[idx - 1].mrrEnd;
+    const prevArr = round2(prevMrr * 12);
+    const netMrrChange = round2(point.mrrEnd - prevMrr);
+    const mrrGrowthRatePct =
+      Math.abs(prevMrr) > 1e-9 ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100) : 0;
+    points.push({
+      ...point,
+      newMrr: netMrrChange,
+      netMrrChange,
+      mrrGrowthRatePct,
+      arrGrowth: round2(point.arr - prevArr),
+    });
+  }
+
+  return { points, monthlyArrByPeriod, initialPrevMrr };
+}
+
+function mergeCombinedAndAiSeries(
+  combinedPoints: CombinedPoint[],
+  aiPoints: CombinedPoint[],
+  initialPrevCombinedMrr: number,
+  initialPrevAiMrr: number,
+): CombinedPoint[] {
+  const out: CombinedPoint[] = [];
+  for (let idx = 0; idx < combinedPoints.length; idx += 1) {
+    const combined = combinedPoints[idx];
+    const ai = aiPoints[idx];
+    const mrrEnd = round2((combined?.mrrEnd || 0) + (ai?.mrrEnd || 0));
+    const arr = round2((combined?.arr || 0) + (ai?.arr || 0));
+    const prevMrr = idx === 0 ? round2(initialPrevCombinedMrr + initialPrevAiMrr) : out[idx - 1].mrrEnd;
+    const prevArr = round2(prevMrr * 12);
+    const netMrrChange = round2(mrrEnd - prevMrr);
+    const mrrGrowthRatePct =
+      Math.abs(prevMrr) > 1e-9 ? round2(((mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100) : 0;
+    out.push({
+      ...combined,
+      mrrEnd,
+      arr,
+      netMrrChange,
+      mrrGrowthRatePct,
+      arrGrowth: round2(arr - prevArr),
+    });
+  }
+  return out;
 }
 
 function buildCostByMonth(points: QuickBooksSalesMarketingCostPoint[]) {
@@ -825,35 +987,43 @@ async function buildCombinedBillingOverview(
         includeSalesAssist: false,
       }).then((report) => buildCombinedLtvUserCounts(report.periods || [], report.rows || [], "monthly"))
     : Promise.resolve({ activeByPeriod: new Map<string, number>(), logoChurnByPeriod: new Map<string, LogoChurnCounts>() });
+  const aiSpendSeriesPromise = (async () => {
+    const exclusions = await resolveEnterprisePrepaidAiSpendExclusions({
+      startDate,
+      endDate,
+      targetCurrency,
+    }).catch(() => ({ customerMonthPrepaidOffsets: [] }));
+    return queryStripeAiSpendFromBigQuery(
+      {
+        startDate: previousRange.startDate,
+        endDate,
+        grain,
+        targetCurrency,
+        topLimit: 1,
+        detailLimit: 1,
+        excludeCustomerIds: [],
+        excludeCustomerMonthPairs: [],
+        prepaidOffsetByCustomerMonthPairs: (exclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
+          pairKey: entry.pairKey,
+          prepaidAppliedMajor: entry.prepaidAppliedMajor,
+        })),
+      },
+      { profile: "stripe_arr_correct" },
+    );
+  })();
   const ltvAiSpendPromise: Promise<Map<string, number>> = shouldComputeLtv
     ? (async () => {
-        const exclusions = await resolveEnterprisePrepaidAiSpendExclusions({
-          startDate,
-          endDate,
-          targetCurrency,
-        }).catch(() => ({ customerMonthPrepaidOffsets: [] }));
-        const aiSpend = await queryStripeAiSpendFromBigQuery(
-          {
-            startDate,
-            endDate,
-            grain: "monthly",
-            targetCurrency,
-            topLimit: 1,
-            detailLimit: 1,
-            excludeCustomerIds: [],
-            excludeCustomerMonthPairs: [],
-            prepaidOffsetByCustomerMonthPairs: (exclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
-              pairKey: entry.pairKey,
-              prepaidAppliedMajor: entry.prepaidAppliedMajor,
-            })),
-          },
-          { profile: "stripe_arr_correct" },
-        );
+        const aiSpend = await aiSpendSeriesPromise;
         const aiSpendArrByMonth = new Map<string, number>();
         for (const point of aiSpend.points || []) {
-          const monthKey = String(point.key || "").slice(0, 7);
+          const monthKey = periodKeyFromIsoDateForGrain(String(point.periodStart || ""), "monthly");
           if (!monthKey) continue;
-          aiSpendArrByMonth.set(monthKey, round2((aiSpendArrByMonth.get(monthKey) || 0) + Number(point.revenue || 0) * 12));
+          const arr = annualizedArrFromRevenueForPeriod(
+            Number(point.revenue || 0),
+            String(point.periodStart || ""),
+            String(point.periodEnd || ""),
+          );
+          aiSpendArrByMonth.set(monthKey, round2((aiSpendArrByMonth.get(monthKey) || 0) + arr));
         }
         return aiSpendArrByMonth;
       })()
@@ -1052,6 +1222,96 @@ async function buildCombinedBillingOverview(
     const retention = calculateRetentionRates(prevMrr, point.expansionMrr, point.contractionMrr, point.churnMrr);
     return { ...point, mrrGrowthRatePct, ndrPct: retention.ndrPct, gdrPct: retention.gdrPct };
   });
+
+  let aiSpendSourcePoints: CombinedPoint[] = periodOrder.map((period) => {
+    const key = canonicalHubPeriodKey(period.key, grain) || period.key;
+    const periodStart = grain === "monthly" ? `${key}-01` : key;
+    return {
+      key,
+      label: period.label,
+      periodStart,
+      periodEnd: periodStart,
+      mrrEnd: 0,
+      newMrr: 0,
+      expansionMrr: 0,
+      contractionMrr: 0,
+      churnMrr: 0,
+      netMrrChange: 0,
+      mrrGrowthRatePct: 0,
+      ndrPct: 0,
+      gdrPct: 0,
+      arr: 0,
+      arrGrowth: 0,
+    };
+  });
+  let linePoints: CombinedPoint[] = points;
+  try {
+    const aiSpendSeries = await aiSpendSeriesPromise;
+    const aiBuild = buildAiSpendSourceSeries(
+      periodOrder,
+      grain,
+      (aiSpendSeries.points || []).map((point) => ({
+        periodStart: String(point.periodStart || ""),
+        periodEnd: String(point.periodEnd || ""),
+        revenue: Number(point.revenue || 0),
+      })),
+      previousRange.startDate,
+    );
+    aiSpendSourcePoints = aiBuild.points;
+    linePoints = mergeCombinedAndAiSeries(points, aiSpendSourcePoints, initialPrevCombinedMrr, aiBuild.initialPrevMrr);
+  } catch {
+    aiSpendSourcePoints = aiSpendSourcePoints.map((point) => ({ ...point }));
+    linePoints = points;
+  }
+  const lineSourcePoints: LineSourcePoints = {
+    salesled: hubPoints,
+    selfserve: selfservePoints,
+    aiSpend: aiSpendSourcePoints,
+  };
+
+  let arrPerEmployeeNotice: string | null = null;
+  let arrPerEmployeePoints: ArrPerEmployeePoint[] = linePoints.map((point) => ({
+    key: point.key,
+    label: point.label,
+    periodStart: point.periodStart,
+    periodEnd: point.periodEnd,
+    arr: round2(point.arr || 0),
+    fullTimeEmployees: 0,
+    arrPerEmployee: 0,
+  }));
+  try {
+    const snapshotDateByKey = new Map<string, string>();
+    for (const point of linePoints) {
+      const key = canonicalHubPeriodKey(point.key, grain) || point.key;
+      const snapshotDate = periodEndIsoFromKey(key, grain);
+      if (snapshotDate) snapshotDateByKey.set(key, snapshotDate);
+    }
+    const headcountByDate = await queryBambooHrFullTimeHeadcountByDate(Array.from(snapshotDateByKey.values()));
+    arrPerEmployeePoints = linePoints.map((point) => {
+      const key = canonicalHubPeriodKey(point.key, grain) || point.key;
+      const snapshotDate = snapshotDateByKey.get(key) || "";
+      const fullTimeEmployees = Math.max(0, Math.round(Number(headcountByDate.get(snapshotDate) || 0)));
+      const arr = round2(point.arr || 0);
+      const arrPerEmployee = fullTimeEmployees > 0 ? round2(arr / fullTimeEmployees) : 0;
+      return {
+        key: point.key,
+        label: point.label,
+        periodStart: point.periodStart,
+        periodEnd: point.periodEnd,
+        arr,
+        fullTimeEmployees,
+        arrPerEmployee,
+      };
+    });
+    if (!arrPerEmployeePoints.some((point) => point.fullTimeEmployees > 0)) {
+      arrPerEmployeeNotice = "BambooHR returned no full-time employee counts for this range.";
+    }
+  } catch (error: unknown) {
+    arrPerEmployeeNotice = `ARR per employee unavailable: ${conciseErrorMessage(
+      error,
+      "BambooHR query failed.",
+    )}`;
+  }
 
   const currentMrr = points.length ? points[points.length - 1].mrrEnd : 0;
   const retentionPoints: RetentionSeriesPoint[] = periodOrder.map((period, idx) => {
@@ -1318,12 +1578,16 @@ async function buildCombinedBillingOverview(
     currentMrr: round2(currentMrr),
     currentArr: round2(currentMrr * 12),
     points,
+    linePoints,
+    lineSourcePoints,
+    arrPerEmployeePoints,
     retentionPoints,
     ltvPoints,
     cacPoints,
     cacCurrencyLayerPoints,
     cacCadPoints,
     ltvNotice,
+    arrPerEmployeeNotice,
     cacNotice,
     cacCurrencyLayerNotice,
     cacCadNotice,
