@@ -243,22 +243,37 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
     throw new Error("BambooHR is not configured. Set BAMBOOHR_SUBDOMAIN and BAMBOOHR_API_KEY.");
   }
 
-  const baseUrl = normalizeBaseUrl(clean(process.env.BAMBOOHR_BASE_URL || "https://api.bamboohr.com"));
   const authHeader = basicAuthHeader(apiKey);
-  const reportUrlBase = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/reports/custom?format=JSON`;
+  const baseUrls = Array.from(
+    new Set(
+      [
+        normalizeBaseUrl(clean(process.env.BAMBOOHR_BASE_URL || "")),
+        normalizeBaseUrl(`https://${subdomain}.bamboohr.com`),
+        normalizeBaseUrl("https://api.bamboohr.com"),
+      ].filter(Boolean),
+    ),
+  );
   const reportBodies: Array<Record<string, unknown>> = [
     {
+      title: "Current employees with employment fields",
       fields: [
         "id",
         "employmentStatus",
         "employmentType",
+        "status",
+        "type",
         "hireDate",
+        "dateOfHire",
         "terminationDate",
+        "dateOfTermination",
         "fullTimeEquivalent",
+        "FTE",
         "payType",
+        "displayName",
       ],
     },
     {
+      title: "Current employees with alternative employment fields",
       fields: [
         "id",
         "status",
@@ -267,11 +282,12 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
         "dateOfTermination",
         "FTE",
         "payType",
+        "displayName",
       ],
     },
   ];
 
-  const fetchDirectoryRows = async () => {
+  const fetchDirectoryRows = async (baseUrl: string) => {
     const directoryUrl = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/employees/directory`;
     const directoryPayload = await fetchJsonWithRetry(directoryUrl, {
       method: "GET",
@@ -285,61 +301,72 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
       .filter((row): row is BambooEmployeeRecord => !!row);
   };
 
-  for (const suffix of ["&onlyCurrent=false", ""]) {
-    for (const body of reportBodies) {
-      try {
-        const payload = await fetchJsonWithRetry(`${reportUrlBase}${suffix}`, {
-          method: "POST",
-          headers: {
-            Authorization: authHeader,
-            Accept: "application/json",
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(body),
-        });
-        const rows = extractRows(payload).map(normalizeEmployeeRow).filter((row): row is BambooEmployeeRecord => !!row);
-        if (rows.length) {
-          // Custom reports contain the employment fields we need for classification.
-          // Enrich names/details from directory rows when available.
-          try {
-            const directoryRows = await fetchDirectoryRows();
-            if (!directoryRows.length) return rows;
-            const byId = new Map<string, BambooEmployeeRecord>();
-            for (const directoryRow of directoryRows) {
-              const id = clean(directoryRow.id);
-              if (!id || byId.has(id)) continue;
-              byId.set(id, directoryRow);
+  for (const baseUrl of baseUrls) {
+    const reportUrlBase = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/reports/custom?format=JSON`;
+    for (const suffix of ["&onlyCurrent=false", ""]) {
+      for (const body of reportBodies) {
+        try {
+          const payload = await fetchJsonWithRetry(`${reportUrlBase}${suffix}`, {
+            method: "POST",
+            headers: {
+              Authorization: authHeader,
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(body),
+          });
+          const rows = extractRows(payload).map(normalizeEmployeeRow).filter((row): row is BambooEmployeeRecord => !!row);
+          if (rows.length) {
+            // Custom reports contain the employment fields we need for classification.
+            // Enrich names/details from directory rows when available.
+            try {
+              const directoryRows = await fetchDirectoryRows(baseUrl);
+              if (!directoryRows.length) return rows;
+              const byId = new Map<string, BambooEmployeeRecord>();
+              for (const directoryRow of directoryRows) {
+                const id = clean(directoryRow.id);
+                if (!id || byId.has(id)) continue;
+                byId.set(id, directoryRow);
+              }
+              return rows.map((row) => {
+                const id = clean(row.id);
+                const extra = id ? byId.get(id) : undefined;
+                if (!extra) return row;
+                return {
+                  ...row,
+                  firstName: clean(extra.firstName) || row.firstName,
+                  lastName: clean(extra.lastName) || row.lastName,
+                  preferredName: clean(extra.preferredName) || row.preferredName,
+                  displayName: clean(extra.displayName) || row.displayName,
+                  fullName: clean(extra.fullName) || row.fullName,
+                  jobTitle: clean(extra.jobTitle) || row.jobTitle,
+                  department: clean(extra.department) || row.department,
+                  division: clean(extra.division) || row.division,
+                  location: clean(extra.location) || row.location,
+                  rawText: `${row.rawText} ${extra.rawText}`.trim(),
+                };
+              });
+            } catch {
+              return rows;
             }
-            return rows.map((row) => {
-              const id = clean(row.id);
-              const extra = id ? byId.get(id) : undefined;
-              if (!extra) return row;
-              return {
-                ...row,
-                firstName: clean(extra.firstName) || row.firstName,
-                lastName: clean(extra.lastName) || row.lastName,
-                preferredName: clean(extra.preferredName) || row.preferredName,
-                displayName: clean(extra.displayName) || row.displayName,
-                fullName: clean(extra.fullName) || row.fullName,
-                jobTitle: clean(extra.jobTitle) || row.jobTitle,
-                department: clean(extra.department) || row.department,
-                division: clean(extra.division) || row.division,
-                location: clean(extra.location) || row.location,
-                rawText: `${row.rawText} ${extra.rawText}`.trim(),
-              };
-            });
-          } catch {
-            return rows;
           }
+        } catch {
+          // Try next variant.
         }
-      } catch {
-        // Try next variant.
       }
     }
   }
 
   // Fallback to directory endpoint if custom report is unavailable.
-  return fetchDirectoryRows();
+  for (const baseUrl of baseUrls) {
+    try {
+      const rows = await fetchDirectoryRows(baseUrl);
+      if (rows.length) return rows;
+    } catch {
+      // Try next base URL.
+    }
+  }
+  return [];
 }
 
 export async function queryBambooHrFullTimeHeadcountByDate(dates: string[]): Promise<Map<string, number>> {
