@@ -45,6 +45,7 @@ type RawDetailRow = {
 type GroupedDetailRow = {
   groupKey: string;
   groupLabel: string;
+  customerCountry?: string;
   monthKey: string;
   monthLabel: string;
   eventCount: number;
@@ -202,6 +203,17 @@ function mergeStringLists(current: string[] | undefined, next: string[] | undefi
   return Array.from(seen);
 }
 
+function parseCountryFilterRulesInput(raw: string) {
+  return Array.from(
+    new Set(
+      String(raw || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, 50);
+}
+
 export default function StripeThroughMrrPage() {
   const defaults = useMemo(() => defaultDateRange(), []);
 
@@ -227,7 +239,12 @@ export default function StripeThroughMrrPage() {
   const [filterCustomerId, setFilterCustomerId] = useState("");
   const [filterProductSearch, setFilterProductSearch] = useState("");
   const [filterGroupSearch, setFilterGroupSearch] = useState("");
+  const [filterCustomerCountryRules, setFilterCustomerCountryRules] = useState("");
   const [groupedSortMode, setGroupedSortMode] = useState<GroupedSortMode>("range_arr_sum_desc");
+  const countryFilterRules = useMemo(
+    () => parseCountryFilterRulesInput(filterCustomerCountryRules),
+    [filterCustomerCountryRules],
+  );
 
   async function run(targetPage = 1) {
     setHasRunOnce(true);
@@ -244,6 +261,7 @@ export default function StripeThroughMrrPage() {
           detailEndMonth,
           grain,
           groupBy,
+          countryFilters: countryFilterRules,
           page: targetPage,
           pageSize: PAGE_SIZE,
         }),
@@ -330,6 +348,7 @@ export default function StripeThroughMrrPage() {
       {
         groupKey: string;
         groupLabel: string;
+        customerCountry: string;
         associatedCustomerIds: string[];
         associatedWorkspaceIds: string[];
         salesAssist: "yes" | "no";
@@ -338,11 +357,12 @@ export default function StripeThroughMrrPage() {
       }
     >();
     for (const row of groupedRows) {
-      const mapKey = `${row.groupKey}|${row.groupLabel}`;
+      const mapKey = `${row.groupKey}|${row.groupLabel}|${row.customerCountry || "N/A"}`;
       if (!byGroup.has(mapKey)) {
         byGroup.set(mapKey, {
           groupKey: row.groupKey,
           groupLabel: row.groupLabel || row.groupKey || "(blank)",
+          customerCountry: row.customerCountry || "N/A",
           associatedCustomerIds: row.associatedCustomerIds || [],
           associatedWorkspaceIds: row.associatedWorkspaceIds || [],
           salesAssist: row.salesAssist === "yes" ? "yes" : "no",
@@ -351,6 +371,9 @@ export default function StripeThroughMrrPage() {
         });
       }
       const entry = byGroup.get(mapKey)!;
+      if ((entry.customerCountry === "N/A" || !entry.customerCountry) && row.customerCountry) {
+        entry.customerCountry = row.customerCountry;
+      }
       entry.associatedCustomerIds = mergeStringLists(entry.associatedCustomerIds, row.associatedCustomerIds);
       entry.associatedWorkspaceIds = mergeStringLists(entry.associatedWorkspaceIds, row.associatedWorkspaceIds);
       if (row.salesAssist === "yes") entry.salesAssist = "yes";
@@ -406,6 +429,7 @@ export default function StripeThroughMrrPage() {
     return groupedMatrixRows.filter(
       (g) =>
         String(g.groupLabel || g.groupKey || "").toLowerCase().includes(needle) ||
+        String(g.customerCountry || "").toLowerCase().includes(needle) ||
         g.associatedCustomerIds.some((customerId) => customerId.toLowerCase().includes(needle)),
     );
   }, [groupedMatrixRows, filterGroupSearch]);
@@ -416,6 +440,7 @@ export default function StripeThroughMrrPage() {
       {
         groupKey: string;
         groupLabel: string;
+        customerCountry: string;
         associatedCustomerIds: string[];
         associatedWorkspaceIds: string[];
         salesAssist: "yes" | "no";
@@ -423,11 +448,12 @@ export default function StripeThroughMrrPage() {
       }
     >();
     for (const row of rows) {
-      const mapKey = `${row.groupKey}|${row.groupLabel}`;
+      const mapKey = `${row.groupKey}|${row.groupLabel}|${row.customerCountry || "N/A"}`;
       if (!byGroup.has(mapKey)) {
         byGroup.set(mapKey, {
           groupKey: row.groupKey,
           groupLabel: row.groupLabel || row.groupKey || "(blank)",
+          customerCountry: row.customerCountry || "N/A",
           associatedCustomerIds: row.associatedCustomerIds || [],
           associatedWorkspaceIds: row.associatedWorkspaceIds || [],
           salesAssist: row.salesAssist === "yes" ? "yes" : "no",
@@ -435,12 +461,22 @@ export default function StripeThroughMrrPage() {
         });
       }
       const entry = byGroup.get(mapKey)!;
+      if ((entry.customerCountry === "N/A" || !entry.customerCountry) && row.customerCountry) {
+        entry.customerCountry = row.customerCountry;
+      }
       entry.associatedCustomerIds = mergeStringLists(entry.associatedCustomerIds, row.associatedCustomerIds);
       entry.associatedWorkspaceIds = mergeStringLists(entry.associatedWorkspaceIds, row.associatedWorkspaceIds);
       if (row.salesAssist === "yes") entry.salesAssist = "yes";
       entry.byMonth.set(row.monthKey, row);
     }
     return Array.from(byGroup.values());
+  }
+
+  function displayGroupLabel(group: { groupKey: string; groupLabel: string; customerCountry?: string }) {
+    const base = group.groupLabel || group.groupKey || "(blank)";
+    if (groupBy !== "customer_id") return base;
+    const country = group.customerCountry || "N/A";
+    return `${base} (${country})`;
   }
 
   function exportMonthlyCsv() {
@@ -475,6 +511,7 @@ export default function StripeThroughMrrPage() {
             detailEndMonth,
             grain,
             groupBy,
+            countryFilters: countryFilterRules,
             page: p,
             pageSize: PAGE_SIZE,
           }),
@@ -545,6 +582,7 @@ export default function StripeThroughMrrPage() {
         ? allMatrix.filter(
             (g) =>
               String(g.groupLabel || g.groupKey || "").toLowerCase().includes(needle) ||
+              String(g.customerCountry || "").toLowerCase().includes(needle) ||
               g.associatedCustomerIds.some((customerId) => customerId.toLowerCase().includes(needle)),
           )
         : allMatrix;
@@ -553,14 +591,18 @@ export default function StripeThroughMrrPage() {
       );
       const baseHeaders = groupBy === "email"
         ? ["Group", "Customer IDs", "Sales assist", ...metricHeaders]
+        : groupBy === "customer_id"
+          ? ["Group", "Customer country", ...metricHeaders]
         : ["Group", ...metricHeaders];
       const csvRows = filtered.map((group) => {
         const values = detailMonthsInRange.flatMap((month) =>
           selectedMetrics.map((metric) => String(metricValue(group.byMonth.get(month.monthKey), metric))),
         );
         return groupBy === "email"
-          ? [group.groupLabel || group.groupKey || "(blank)", group.associatedCustomerIds.join(" | "), group.salesAssist, ...values]
-          : [group.groupLabel || group.groupKey || "(blank)", ...values];
+          ? [displayGroupLabel(group), group.associatedCustomerIds.join(" | "), group.salesAssist, ...values]
+          : groupBy === "customer_id"
+            ? [displayGroupLabel(group), group.customerCountry || "N/A", ...values]
+            : [displayGroupLabel(group), ...values];
       });
       downloadCsv("stripe-through-mrr-detail-grouped.csv", baseHeaders, csvRows);
     } catch (e) {
@@ -922,6 +964,22 @@ export default function StripeThroughMrrPage() {
                       <option value="latest_arr_desc">Latest month ARR (desc)</option>
                     </select>
                   </div>
+                  {groupBy === "customer_id" && (
+                    <div className="stripe-ui__field">
+                      <label className="stripe-ui__field-label" htmlFor="filter-customer-country-rules">
+                        Country filter rules
+                      </label>
+                      <input
+                        id="filter-customer-country-rules"
+                        className="stripe-ui__control"
+                        type="text"
+                        value={filterCustomerCountryRules}
+                        onChange={(e) => setFilterCustomerCountryRules(e.target.value)}
+                        placeholder="india, china, not russia"
+                      />
+                      <div className="stripe-ui__hint">Comma-separated. Use `not ...` for exclusions.</div>
+                    </div>
+                  )}
                 </>
               )}
             </div>
@@ -1064,8 +1122,8 @@ export default function StripeThroughMrrPage() {
                       </tr>
                     )
                       : filteredGroupedMatrixRows.map((group) => (
-                        <tr key={`${group.groupKey}|${group.groupLabel}`}>
-                          <td>{group.groupLabel || group.groupKey || "(blank)"}</td>
+                        <tr key={`${group.groupKey}|${group.groupLabel}|${group.customerCountry || "N/A"}`}>
+                          <td>{displayGroupLabel(group)}</td>
                           {groupBy === "email" && <td>{group.associatedCustomerIds.join(", ")}</td>}
                           {groupBy === "email" && <td>{group.salesAssist}</td>}
                           {detailMonthsInRange.flatMap((month) =>

@@ -52,9 +52,32 @@ type ApiBody = {
   detailMonth?: string;
   grain?: string;
   groupBy?: string;
+  countryFilters?: string[] | string;
   page?: number;
   pageSize?: number;
 };
+
+function normalizeCountryFilters(raw: string[] | string | undefined) {
+  if (Array.isArray(raw)) {
+    return Array.from(
+      new Set(
+        raw
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      ),
+    ).slice(0, 50);
+  }
+  const single = String(raw || "").trim();
+  if (!single) return [] as string[];
+  return Array.from(
+    new Set(
+      single
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, 50);
+}
 
 function parsePayload(raw: Partial<ApiBody>): StripeThroughMrrReportRequest {
   const startDate = String(raw.startDate || "").trim();
@@ -92,6 +115,7 @@ function parsePayload(raw: Partial<ApiBody>): StripeThroughMrrReportRequest {
     detailEndMonth,
     grain,
     groupBy,
+    countryFilters: normalizeCountryFilters(raw.countryFilters),
     page,
     pageSize,
     targetCurrency,
@@ -134,6 +158,7 @@ export async function GET(req: Request) {
       detailMonth: searchParams.get("detailMonth") || "",
       grain: searchParams.get("grain") || "monthly",
       groupBy: searchParams.get("groupBy") || "none",
+      countryFilters: searchParams.get("countryFilters") || "",
       page: Number(searchParams.get("page") || 1),
       pageSize: Number(searchParams.get("pageSize") || DEFAULT_PAGE_SIZE),
     };

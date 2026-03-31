@@ -3,6 +3,7 @@ import { fetchWorkspaceIdsForDealStageLabel } from "@/lib/hubspot";
 import {
   canonicalCountryLabel,
   canonicalTerritoryLabel,
+  countryCodeFromValue,
   countryCodeToTerritoryEntries,
   countryNameKeyToCodeEntries,
 } from "@/lib/geo";
@@ -115,6 +116,7 @@ export type StripeThroughMrrRawDetailRow = {
 export type StripeThroughMrrGroupedDetailRow = {
   groupKey: string;
   groupLabel: string;
+  customerCountry?: string;
   monthKey: string;
   monthLabel: string;
   eventCount: number;
@@ -137,6 +139,7 @@ export type StripeThroughMrrReportRequest = {
   detailEndMonth: string;
   grain?: StripeThroughMrrGrain;
   groupBy: StripeThroughMrrGroupBy;
+  countryFilters?: string[];
   page: number;
   pageSize: number;
   targetCurrency: string;
@@ -2315,6 +2318,65 @@ function normalizeStripeThroughMrrGroupBy(groupBy: string | undefined): StripeTh
   return "none";
 }
 
+type StripeThroughMrrCountryFilterRule = {
+  negate: boolean;
+  labelLower: string;
+  codeUpper: string;
+};
+
+function normalizeStripeThroughMrrCountryFilterRules(values: string[] | undefined): StripeThroughMrrCountryFilterRule[] {
+  const seen = new Set<string>();
+  const out: StripeThroughMrrCountryFilterRule[] = [];
+  for (const raw of values || []) {
+    const source = String(raw || "").trim();
+    if (!source) continue;
+    const negateMatch = /^(?:not|!|-)\s+/i.exec(source);
+    const negate = !!negateMatch;
+    const token = source.replace(/^(?:not|!|-)\s+/i, "").trim();
+    if (!token) continue;
+    const labelLower = String(canonicalCountryLabel(token) || token).trim().toLowerCase();
+    if (!labelLower) continue;
+    const codeUpper = String(countryCodeFromValue(token) || "").trim().toUpperCase();
+    const dedupeKey = `${negate ? "not" : "in"}|${codeUpper}|${labelLower}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    out.push({ negate, labelLower, codeUpper });
+    if (out.length >= 50) break;
+  }
+  return out;
+}
+
+function buildStripeThroughMrrCountryFilterSql(
+  rules: StripeThroughMrrCountryFilterRule[],
+  countryCodeFieldSql: string,
+  countryLabelFieldSql: string,
+) {
+  if (!rules.length) return { whereSql: "", params: [] as BigQueryNamedParameter[] };
+  const clauses: string[] = [];
+  const params: BigQueryNamedParameter[] = [];
+  for (let idx = 0; idx < rules.length; idx += 1) {
+    const rule = rules[idx];
+    const codeParam = `country_filter_${idx}_code`;
+    const labelParam = `country_filter_${idx}_label`;
+    const baseMatch = rule.codeUpper
+      ? `(
+      UPPER(COALESCE(NULLIF(TRIM(${countryCodeFieldSql}), ''), '')) = @${codeParam}
+      OR LOWER(COALESCE(NULLIF(TRIM(${countryLabelFieldSql}), ''), '')) = @${labelParam}
+    )`
+      : `(LOWER(COALESCE(NULLIF(TRIM(${countryLabelFieldSql}), ''), '')) = @${labelParam})`;
+    clauses.push(rule.negate ? `NOT ${baseMatch}` : baseMatch);
+    if (rule.codeUpper) {
+      params.push({ name: codeParam, type: "STRING", value: rule.codeUpper });
+    }
+    params.push({ name: labelParam, type: "STRING", value: rule.labelLower });
+  }
+  return {
+    // OR semantics across entered rules (e.g. "india, china, not russia")
+    whereSql: `(${clauses.join(" OR ")})`,
+    params,
+  };
+}
+
 function normalizeStripeThroughMrrGrain(grain: string | undefined): StripeThroughMrrGrain {
   const candidate = String(grain || "").trim().toLowerCase();
   return candidate === "daily" ? "daily" : "monthly";
@@ -2736,6 +2798,13 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const detailEndMonth = isoMonthFromDateUtc(detailEndMonthDate);
   const grain = normalizeStripeThroughMrrGrain(request.grain);
   const groupBy = normalizeStripeThroughMrrGroupBy(request.groupBy);
+  const countryFilterRules =
+    groupBy === "customer_id" ? normalizeStripeThroughMrrCountryFilterRules(request.countryFilters) : [];
+  const countryFilter = buildStripeThroughMrrCountryFilterSql(
+    countryFilterRules,
+    "group_customer_country_code",
+    "group_customer_country",
+  );
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
   const pageSize = Math.max(1, Math.min(5000, Math.floor(asNumber(request.pageSize) || 1000)));
   const page = Math.max(1, Math.floor(asNumber(request.page) || 1));
@@ -2953,6 +3022,10 @@ WHERE
     { name: "detail_end_exclusive_date", type: "STRING", value: detailEndExclusiveDateIso },
     { name: "detail_start_month_date", type: "STRING", value: detailStartMonthDateIso },
   ];
+  const groupedDetailParamsWithCountryFilters: BigQueryNamedParameter[] = [
+    ...groupedDetailBaseParams,
+    ...countryFilter.params,
+  ];
 
   let totalRows = 0;
   let detailRowsRaw: Record<string, unknown>[] = [];
@@ -3002,14 +3075,25 @@ OFFSET @offset_rows`;
     ${groupSql.labelExpr} AS group_label,
     event_timestamp,
     event_type,
-    mrr_change_major
+    mrr_change_major,
+    customer_country,
+    customer_country_code,
+    customer_created
   FROM enriched
 ),
 group_totals AS (
   SELECT
     group_key,
     group_label,
-    ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change
+    ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country, 'N/A') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      'N/A'
+    ) AS group_customer_country,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country_code, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      ''
+    ) AS group_customer_country_code
   FROM grouped_source
   GROUP BY group_key, group_label
 ),
@@ -3084,25 +3168,44 @@ history_by_group AS (
   SELECT
     ${groupSql.keyExpr} AS group_key,
     ${groupSql.labelExpr} AS group_label,
-    COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr
+    COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country, 'N/A') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      'N/A'
+    ) AS group_customer_country,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country_code, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      ''
+    ) AS group_customer_country_code
   FROM history_enriched
   GROUP BY group_key, group_label
 ),
 all_group_totals AS (
-  SELECT group_key, group_label FROM group_totals
+  SELECT group_key, group_label, group_customer_country, group_customer_country_code FROM group_totals
   UNION ALL
-  SELECT hbg.group_key, hbg.group_label
+  SELECT hbg.group_key, hbg.group_label, hbg.group_customer_country, hbg.group_customer_country_code
   FROM history_by_group hbg
   WHERE ${historyGroupFilterSql}
     AND NOT EXISTS (
       SELECT 1 FROM group_totals gt
       WHERE gt.group_key = hbg.group_key AND gt.group_label = hbg.group_label
     )
+),
+filtered_group_totals AS (
+  SELECT *
+  FROM all_group_totals
+  ${countryFilter.whereSql ? `WHERE ${countryFilter.whereSql}` : ""}
 )
 SELECT
   COUNT(*) AS total_rows
-FROM all_group_totals`;
-    const countRows = await runBigQueryQueryRows(accessToken, projectId, location, countQuery, groupedDetailBaseParams);
+FROM filtered_group_totals`;
+    const countRows = await runBigQueryQueryRows(
+      accessToken,
+      projectId,
+      location,
+      countQuery,
+      groupedDetailParamsWithCountryFilters,
+    );
     totalRows = asInt((countRows[0] || {}).total_rows);
     const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
     const clampedPage = Math.min(page, totalPages);
@@ -3118,6 +3221,8 @@ FROM all_group_totals`;
     mrr_change_major,
     customer_id,
     customer_workspace_id,
+    customer_country,
+    customer_country_code,
     customer_created
   FROM enriched
 ),
@@ -3127,7 +3232,15 @@ group_totals AS (
     group_label,
     ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
     ${groupSql.customerIdsExpr ?? "ARRAY_AGG(NULLIF(customer_id, '(blank)') IGNORE NULLS LIMIT 1)"} AS associated_customer_ids,
-    ${groupSql.workspaceIdsExpr ?? "ARRAY_AGG(NULLIF(customer_workspace_id, '') IGNORE NULLS LIMIT 1)"} AS associated_workspace_ids
+    ${groupSql.workspaceIdsExpr ?? "ARRAY_AGG(NULLIF(customer_workspace_id, '') IGNORE NULLS LIMIT 1)"} AS associated_workspace_ids,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country, 'N/A') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      'N/A'
+    ) AS group_customer_country,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country_code, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      ''
+    ) AS group_customer_country_code
   FROM grouped_source
   GROUP BY group_key, group_label
 ),
@@ -3213,19 +3326,37 @@ history_by_group AS (
     ${groupSql.labelExpr} AS group_label,
     COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr,
     ${groupSql.customerIdsExpr ?? "ARRAY_AGG(NULLIF(customer_id, '(blank)') IGNORE NULLS LIMIT 1)"} AS associated_customer_ids,
-    ${groupSql.workspaceIdsExpr ?? "ARRAY_AGG(NULLIF(customer_workspace_id, '') IGNORE NULLS LIMIT 1)"} AS associated_workspace_ids
+    ${groupSql.workspaceIdsExpr ?? "ARRAY_AGG(NULLIF(customer_workspace_id, '') IGNORE NULLS LIMIT 1)"} AS associated_workspace_ids,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country, 'N/A') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      'N/A'
+    ) AS group_customer_country,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country_code, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      ''
+    ) AS group_customer_country_code
   FROM history_enriched
   GROUP BY group_key, group_label
 ),
 all_group_totals AS (
-  SELECT group_key, group_label, net_mrr_change, associated_customer_ids, associated_workspace_ids FROM group_totals
+  SELECT
+    group_key,
+    group_label,
+    net_mrr_change,
+    associated_customer_ids,
+    associated_workspace_ids,
+    group_customer_country,
+    group_customer_country_code
+  FROM group_totals
   UNION ALL
   SELECT
     hbg.group_key,
     hbg.group_label,
     0.0 AS net_mrr_change,
     hbg.associated_customer_ids,
-    hbg.associated_workspace_ids
+    hbg.associated_workspace_ids,
+    hbg.group_customer_country,
+    hbg.group_customer_country_code
   FROM history_by_group hbg
   WHERE ${historyGroupFilterSql}
     AND NOT EXISTS (
@@ -3233,14 +3364,21 @@ all_group_totals AS (
       WHERE gt.group_key = hbg.group_key AND gt.group_label = hbg.group_label
     )
 ),
+filtered_group_totals AS (
+  SELECT *
+  FROM all_group_totals
+  ${countryFilter.whereSql ? `WHERE ${countryFilter.whereSql}` : ""}
+),
 paged_groups AS (
   SELECT
     group_key,
     group_label,
     net_mrr_change,
     associated_customer_ids,
-    associated_workspace_ids
-  FROM all_group_totals
+    associated_workspace_ids,
+    group_customer_country,
+    group_customer_country_code
+  FROM filtered_group_totals
   ORDER BY net_mrr_change DESC, group_label ASC
   LIMIT @limit_rows
   OFFSET @offset_rows
@@ -3263,6 +3401,8 @@ group_monthly AS (
     pg.net_mrr_change AS group_total_net_mrr_change,
     ANY_VALUE(pg.associated_customer_ids) AS associated_customer_ids,
     ANY_VALUE(pg.associated_workspace_ids) AS associated_workspace_ids,
+    ANY_VALUE(pg.group_customer_country) AS group_customer_country,
+    ANY_VALUE(pg.group_customer_country_code) AS group_customer_country_code,
     m.month_start,
     COUNT(gs.event_timestamp) AS event_count,
     COALESCE(SUM(gs.mrr_change_major), 0.0) AS net_mrr_change,
@@ -3288,6 +3428,8 @@ group_monthly_with_base AS (
     gm.group_label,
     gm.associated_customer_ids,
     gm.associated_workspace_ids,
+    gm.group_customer_country,
+    gm.group_customer_country_code,
     gm.group_total_net_mrr_change,
     gm.month_start,
     gm.event_count,
@@ -3307,6 +3449,8 @@ SELECT
   gmb.group_label,
   gmb.associated_customer_ids,
   gmb.associated_workspace_ids,
+  gmb.group_customer_country,
+  gmb.group_customer_country_code,
   FORMAT_DATE('%Y-%m', gmb.month_start) AS month_key,
   FORMAT_DATE('%b %Y', gmb.month_start) AS month_label,
   gmb.event_count,
@@ -3338,7 +3482,7 @@ SELECT
 FROM group_monthly_with_base gmb
 ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_start ASC`;
       detailRowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, rowsQuery, [
-        ...groupedDetailBaseParams,
+        ...groupedDetailParamsWithCountryFilters,
         { name: "limit_rows", type: "INT64", value: String(pageSize) },
         { name: "offset_rows", type: "INT64", value: String(offsetRows) },
       ]);
@@ -3400,6 +3544,10 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
           return {
             groupKey: asString(row.group_key),
             groupLabel: groupLabelForDisplay(asString(row.group_key), asString(row.group_label)),
+            customerCountry:
+              canonicalCountryLabel(asString(row.group_customer_country_code) || asString(row.group_customer_country)) ||
+              asString(row.group_customer_country) ||
+              "N/A",
             monthKey: asString(row.month_key),
             monthLabel: asString(row.month_label),
             eventCount: asInt(row.event_count),
