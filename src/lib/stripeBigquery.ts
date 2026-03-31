@@ -1427,6 +1427,9 @@ function buildStripeCurrentMonthProjection(params: {
         ),
       )
     : 1;
+  const observedPosition = observedDayInProgress
+    ? Math.max(0, observedIndex - (1 - observedDayProgress))
+    : observedIndex;
 
   const historicalShapes: StripeMonthlyShape[] = [];
   const historicalPerDaySlopes: number[] = [];
@@ -1481,9 +1484,9 @@ function buildStripeCurrentMonthProjection(params: {
 
   const monthDays = monthDates.length;
   const currentObservedSlope =
-    observedIndex > 0 ? (observedMrr - monthStartMrr) / Math.max(observedIndex, 1) : 0;
+    observedPosition > 0 ? (observedMrr - monthStartMrr) / Math.max(observedPosition, 1e-9) : 0;
   const historicalSlope = median(historicalPerDaySlopes);
-  const monthProgress = dayFraction(observedIndex, monthDays);
+  const monthProgress = Math.max(0, Math.min(1, observedPosition / Math.max(monthDays - 1, 1)));
   const currentWeight = Math.max(0.2, Math.min(0.9, monthProgress));
   const blendedSlope = currentObservedSlope * currentWeight + historicalSlope * (1 - currentWeight);
   const projectedLinearEnd = monthStartMrr + blendedSlope * Math.max(monthDays - 1, 0);
@@ -1499,9 +1502,12 @@ function buildStripeCurrentMonthProjection(params: {
   const dipEndFrac = dayFraction(dipWindow.end - 1, monthDays);
   const dipMidFrac = (dipStartFrac + dipEndFrac) / 2;
 
-  const modeledObserved = linearInterpolation(monthStartMrr, projectedLinearEnd, monthProgress)
-    + dipAdjustmentForFraction(monthProgress, dipStartFrac, dipMidFrac, dipEndFrac, dipDepth, postDipLevel);
-  const anchorOffset = observedMrr - modeledObserved;
+  const anchorIndex = observedDayInProgress ? Math.max(0, observedIndex - 1) : observedIndex;
+  const anchorMrr = monthActualValues[anchorIndex] == null ? observedMrr : (monthActualValues[anchorIndex] as number);
+  const anchorFrac = dayFraction(anchorIndex, monthDays);
+  const modeledAtAnchor = linearInterpolation(monthStartMrr, projectedLinearEnd, anchorFrac)
+    + dipAdjustmentForFraction(anchorFrac, dipStartFrac, dipMidFrac, dipEndFrac, dipDepth, postDipLevel);
+  const anchorOffset = anchorMrr - modeledAtAnchor;
 
   const points: StripeBillingOverviewCurrentMonthProjectionPoint[] = monthDates.map((date, idx) => {
     const actual = monthActualValues[idx];
@@ -1509,8 +1515,12 @@ function buildStripeCurrentMonthProjection(params: {
     const baseline = linearInterpolation(monthStartMrr, projectedLinearEnd, frac);
     const dipAdj = dipAdjustmentForFraction(frac, dipStartFrac, dipMidFrac, dipEndFrac, dipDepth, postDipLevel);
     const modeled = baseline + dipAdj + anchorOffset;
-    let projected = idx <= observedIndex && actual != null ? actual : modeled;
-    if (observedDayInProgress && idx === observedIndex && actual != null) {
+    let projected = modeled;
+    if (idx < observedIndex && actual != null) {
+      projected = actual;
+    } else if (idx === observedIndex && actual != null && !observedDayInProgress) {
+      projected = actual;
+    } else if (idx === observedIndex && observedDayInProgress && actual != null) {
       projected = actual + (modeled - actual) * (1 - observedDayProgress);
     }
     return {
