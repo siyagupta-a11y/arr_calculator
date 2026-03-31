@@ -274,6 +274,24 @@ type TrendPoint = {
   arrGrowth: number;
 };
 
+type GrowthContributorCategory = "new" | "expansion" | "contraction" | "churn";
+
+type GrowthContributorMeta = {
+  accountLabel: string;
+  dealNames: string[];
+};
+
+type GrowthContributorRow = {
+  category: GrowthContributorCategory;
+  accountKey: string;
+  accountLabel: string;
+  dealNames: string[];
+  prevArr: number;
+  currArr: number;
+  deltaArr: number;
+  mrrImpact: number;
+};
+
 type GroupTrendSeries = {
   key: string;
   label: string;
@@ -465,6 +483,80 @@ function buildTrendPointsFromAccounts(
       arrGrowth,
     };
   });
+}
+
+function buildGrowthContributorsByPeriod(
+  periodOrder: PeriodRef[],
+  accountArrByPeriod: Map<string, Record<string, number>>,
+  baselineAccountArrByAccount: Map<string, number>,
+  accountMetaByKey: Map<string, GrowthContributorMeta>,
+) {
+  const rowsByPeriod = new Map<string, GrowthContributorRow[]>();
+  const allAccountKeys = new Set<string>([
+    ...Array.from(accountArrByPeriod.keys()),
+    ...Array.from(baselineAccountArrByAccount.keys()),
+  ]);
+
+  for (let idx = 0; idx < periodOrder.length; idx += 1) {
+    const period = periodOrder[idx];
+    const prevPeriodKey = idx > 0 ? periodOrder[idx - 1].key : "";
+    const rows: GrowthContributorRow[] = [];
+
+    for (const accountKey of allAccountKeys) {
+      const accountTotals = accountArrByPeriod.get(accountKey) || {};
+      const currArr = round2(accountTotals[period.key] || 0);
+      const prevArr = round2(
+        idx === 0
+          ? baselineAccountArrByAccount.get(accountKey) || 0
+          : prevPeriodKey
+            ? accountTotals[prevPeriodKey] || 0
+            : 0,
+      );
+      const currHas = Math.abs(currArr) > 1e-9;
+      const prevHas = Math.abs(prevArr) > 1e-9;
+      if (!currHas && !prevHas) continue;
+
+      const deltaArr = round2(currArr - prevArr);
+      let category: GrowthContributorCategory | null = null;
+      let mrrImpact = 0;
+
+      if (!prevHas && currHas) {
+        category = "new";
+        mrrImpact = round2(currArr / 12);
+      } else if (prevHas && !currHas) {
+        category = "churn";
+        mrrImpact = round2(-prevArr / 12);
+      } else if (deltaArr > 1e-9) {
+        category = "expansion";
+        mrrImpact = round2(deltaArr / 12);
+      } else if (deltaArr < -1e-9) {
+        category = "contraction";
+        mrrImpact = round2(deltaArr / 12);
+      }
+
+      if (!category || Math.abs(mrrImpact) < 1e-9) continue;
+      const meta = accountMetaByKey.get(accountKey);
+      rows.push({
+        category,
+        accountKey,
+        accountLabel: meta?.accountLabel || accountKey,
+        dealNames: meta?.dealNames || [],
+        prevArr,
+        currArr,
+        deltaArr,
+        mrrImpact,
+      });
+    }
+
+    rows.sort((a, b) => {
+      const absDiff = Math.abs(b.mrrImpact) - Math.abs(a.mrrImpact);
+      if (Math.abs(absDiff) > 1e-9) return absDiff;
+      return a.accountLabel.localeCompare(b.accountLabel);
+    });
+    rowsByPeriod.set(period.key, rows);
+  }
+
+  return rowsByPeriod;
 }
 
 function aggregateTrendPointsByPeriod(
@@ -952,12 +1044,26 @@ function MultiLineChartCard({
 
 type GrowthBreakdownChartProps = {
   points: TrendPoint[];
+  contributorRowsByPeriod: Map<string, GrowthContributorRow[]>;
 };
 
-function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
+function GrowthBreakdownChart({ points, contributorRowsByPeriod }: GrowthBreakdownChartProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [selectedPeriodKey, setSelectedPeriodKey] = useState<string | null>(null);
   const chartRef = useRef<SVGSVGElement | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const categoryLabel: Record<GrowthContributorCategory, string> = {
+    new: "New",
+    expansion: "Expansion",
+    contraction: "Contraction",
+    churn: "Churn",
+  };
+  const categoryColor: Record<GrowthContributorCategory, string> = {
+    new: "#1fc16b",
+    expansion: "#2698f0",
+    contraction: "#f59e0b",
+    churn: "#ef4444",
+  };
 
   const width = 640;
   const height = 280;
@@ -1000,6 +1106,27 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
 
   const barWidth = points.length > 0 ? Math.max(8, Math.min(28, (plotWidth / Math.max(points.length, 1)) * 0.62)) : 14;
   const hovered = hoverIndex != null && hoverIndex >= 0 && hoverIndex < bars.length ? bars[hoverIndex] : null;
+  useEffect(() => {
+    if (!selectedPeriodKey) return;
+    if (points.some((point) => point.key === selectedPeriodKey)) return;
+    setSelectedPeriodKey(null);
+  }, [points, selectedPeriodKey]);
+
+  const selectedPeriod = selectedPeriodKey ? points.find((point) => point.key === selectedPeriodKey) || null : null;
+  const selectedPeriodIndex = selectedPeriod
+    ? points.findIndex((point) => point.key === selectedPeriod.key)
+    : -1;
+  const previousPeriodLabel =
+    selectedPeriodIndex > 0 ? points[selectedPeriodIndex - 1].label : "baseline";
+  const selectedRows = selectedPeriod ? contributorRowsByPeriod.get(selectedPeriod.key) || [] : [];
+  const selectedRowsByCategory = new Map<GrowthContributorCategory, GrowthContributorRow[]>();
+  for (const category of ["new", "expansion", "contraction", "churn"] as GrowthContributorCategory[]) {
+    selectedRowsByCategory.set(
+      category,
+      selectedRows.filter((row) => row.category === category),
+    );
+  }
+
   const chartTitle = "Growth Breakdown";
   const downloadChart = useCallback(async () => {
     if (!chartRef.current || downloading) return;
@@ -1025,7 +1152,9 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
             {downloading ? "Downloading..." : "Download SVG"}
           </button>
           <div className="stripe-ui__hint" aria-live="polite">
-            {hovered ? `${hovered.point.label}: Net ${fmtMoney(hovered.point.netMrrChange, "normal")}` : "Hover on bars for values"}
+            {hovered
+              ? `${hovered.point.label}: Net ${fmtMoney(hovered.point.netMrrChange, "normal")}`
+              : "Hover for values, click a bar for contributors"}
           </div>
         </div>
       </div>
@@ -1074,6 +1203,8 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
                   height={plotHeight}
                   fill="transparent"
                   onMouseEnter={() => setHoverIndex(idx)}
+                  onClick={() => setSelectedPeriodKey(bar.point.key)}
+                  style={{ cursor: "pointer" }}
                 />
               );
             })}
@@ -1105,6 +1236,8 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
                           rx={1.2}
                           data-tooltip={`${bar.point.label}: ${component.label}: ${fmtMoney(value, "normal")}`}
                           onMouseEnter={() => setHoverIndex(idx)}
+                          onClick={() => setSelectedPeriodKey(bar.point.key)}
+                          style={{ cursor: "pointer" }}
                         />
                       );
                     }
@@ -1124,6 +1257,8 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
                         rx={1.2}
                         data-tooltip={`${bar.point.label}: ${component.label}: ${fmtMoney(value, "normal")}`}
                         onMouseEnter={() => setHoverIndex(idx)}
+                        onClick={() => setSelectedPeriodKey(bar.point.key)}
+                        style={{ cursor: "pointer" }}
                       />
                     );
                   })}
@@ -1162,6 +1297,72 @@ function GrowthBreakdownChart({ points }: GrowthBreakdownChartProps) {
               <div className="stripe-ui__hint">Contraction: {fmtMoney(hovered.point.contractionMrr, "normal")}</div>
               <div className="stripe-ui__hint">Churn: {fmtMoney(hovered.point.churnMrr, "normal")}</div>
               <div className="stripe-ui__hint">Net: {fmtMoney(hovered.point.netMrrChange, "normal")}</div>
+            </div>
+          )}
+
+          {selectedPeriod && (
+            <div className="stripe-ui__panel" style={{ marginTop: "0.8rem", padding: "0.75rem" }}>
+              <div className="stripe-ui__section-head">
+                <div>
+                  <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.15rem" }}>
+                    Contributors: {selectedPeriod.label} (vs {previousPeriodLabel})
+                  </h3>
+                  <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+                    Account transitions that make up this period&apos;s New, Expansion, Contraction, and Churn bars.
+                  </p>
+                </div>
+                <button
+                  className="stripe-ui__btn stripe-ui__btn--ghost"
+                  type="button"
+                  onClick={() => setSelectedPeriodKey(null)}
+                >
+                  Clear
+                </button>
+              </div>
+
+              {selectedRows.length === 0 ? (
+                <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.6rem", marginBottom: 0 }}>
+                  No contributors for this period.
+                </p>
+              ) : (
+                <div className="stripe-ui__table-wrap" style={{ marginTop: "0.6rem" }}>
+                  <table className="stripe-ui__table">
+                    <thead>
+                      <tr>
+                        <th>Category</th>
+                        <th>Account</th>
+                        <th>Deals</th>
+                        <th style={{ textAlign: "right" }}>Prev ARR</th>
+                        <th style={{ textAlign: "right" }}>Curr ARR</th>
+                        <th style={{ textAlign: "right" }}>Delta ARR</th>
+                        <th style={{ textAlign: "right" }}>MRR Impact</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(["new", "expansion", "contraction", "churn"] as GrowthContributorCategory[]).map((category) => {
+                        const categoryRows = selectedRowsByCategory.get(category) || [];
+                        return categoryRows.map((row) => {
+                          const dealPreview =
+                            row.dealNames.length <= 3
+                              ? row.dealNames.join(", ")
+                              : `${row.dealNames.slice(0, 3).join(", ")} (+${row.dealNames.length - 3} more)`;
+                          return (
+                            <tr key={`${selectedPeriod.key}-${category}-${row.accountKey}`}>
+                              <td style={{ color: categoryColor[category] }}>{categoryLabel[category]}</td>
+                              <td>{row.accountLabel}</td>
+                              <td>{dealPreview || "(n/a)"}</td>
+                              <td style={{ textAlign: "right" }}>{fmtMoney(row.prevArr, "normal")}</td>
+                              <td style={{ textAlign: "right" }}>{fmtMoney(row.currArr, "normal")}</td>
+                              <td style={{ textAlign: "right" }}>{fmtMoney(row.deltaArr, "normal")}</td>
+                              <td style={{ textAlign: "right" }}>{fmtMoney(row.mrrImpact, "normal")}</td>
+                            </tr>
+                          );
+                        });
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1643,6 +1844,41 @@ export default function Home() {
     return grouped;
   }, [chartPeriodOrder, filteredChartLineItemRows]);
 
+  const chartAccountMetaByAccount = useMemo(() => {
+    const byAccount = new Map<string, { accountLabel: string; dealNames: Set<string> }>();
+    for (const row of filteredChartLineItemRows) {
+      const key = accountGroupingKey(row);
+      if (!key) continue;
+      if (!byAccount.has(key)) {
+        byAccount.set(key, {
+          accountLabel: accountDisplayWithDetails(row),
+          dealNames: new Set<string>(),
+        });
+      }
+      const entry = byAccount.get(key)!;
+      const candidateLabel = accountDisplayWithDetails(row);
+      const currentLabel = String(entry.accountLabel || "").trim();
+      if (
+        (!currentLabel || currentLabel === "(blank)") &&
+        candidateLabel &&
+        candidateLabel !== "(blank)"
+      ) {
+        entry.accountLabel = candidateLabel;
+      }
+      const dealName = String(row.dealName || "").trim();
+      if (dealName) entry.dealNames.add(dealName);
+    }
+
+    const out = new Map<string, GrowthContributorMeta>();
+    for (const [accountKey, value] of byAccount.entries()) {
+      out.set(accountKey, {
+        accountLabel: value.accountLabel || accountKey,
+        dealNames: Array.from(value.dealNames).sort((a, b) => a.localeCompare(b)),
+      });
+    }
+    return out;
+  }, [filteredChartLineItemRows]);
+
   const baselineAccountArrByAccount = useMemo(() => {
     const baseline = new Map<string, number>();
     if (!chartBaselineData) return baseline;
@@ -1805,6 +2041,98 @@ export default function Home() {
     if (chartGroupBy === "none") return chartPoints;
     return aggregateTrendPointsByPeriod(chartPoints, selectedBarSeriesList);
   }, [chartGroupBy, chartPoints, selectedBarSeriesList]);
+  const selectedBarAccountArrByPeriod = useMemo(() => {
+    if (chartGroupBy === "none") return accountArrByPeriod;
+    const selectedKeys = new Set(selectedBarSeriesList.map((series) => series.key));
+    if (!selectedKeys.size) return new Map<string, Record<string, number>>();
+
+    const grouped = new Map<string, Record<string, number>>();
+    const explicitDisplayedGroupKeys = new Set(
+      groupedChartSeries
+        .map((series) => series.key)
+        .filter((key) => key && key !== "__other__"),
+    );
+
+    for (const key of selectedKeys) {
+      if (key === "__other__") {
+        for (const [groupKey, groupData] of groupedAccountArrByPeriod.entries()) {
+          if (explicitDisplayedGroupKeys.has(groupKey)) continue;
+          for (const [accountKey, valuesByPeriod] of groupData.accounts.entries()) {
+            addAccountPeriodValues(grouped, accountKey, valuesByPeriod, chartPeriodOrder);
+          }
+        }
+        continue;
+      }
+
+      const groupData = groupedAccountArrByPeriod.get(key);
+      if (!groupData) continue;
+      for (const [accountKey, valuesByPeriod] of groupData.accounts.entries()) {
+        addAccountPeriodValues(grouped, accountKey, valuesByPeriod, chartPeriodOrder);
+      }
+    }
+
+    return grouped;
+  }, [
+    chartGroupBy,
+    accountArrByPeriod,
+    selectedBarSeriesList,
+    groupedChartSeries,
+    groupedAccountArrByPeriod,
+    chartPeriodOrder,
+  ]);
+
+  const selectedBarBaselineAccountArrByAccount = useMemo(() => {
+    if (chartGroupBy === "none") return baselineAccountArrByAccount;
+    const selectedKeys = new Set(selectedBarSeriesList.map((series) => series.key));
+    if (!selectedKeys.size) return new Map<string, number>();
+
+    const grouped = new Map<string, number>();
+    const explicitDisplayedGroupKeys = new Set(
+      groupedChartSeries
+        .map((series) => series.key)
+        .filter((key) => key && key !== "__other__"),
+    );
+
+    for (const key of selectedKeys) {
+      if (key === "__other__") {
+        for (const [groupKey, baseline] of groupedBaselineAccountArrByAccount.entries()) {
+          if (explicitDisplayedGroupKeys.has(groupKey)) continue;
+          for (const [accountKey, value] of baseline.entries()) {
+            grouped.set(accountKey, round2((grouped.get(accountKey) || 0) + value));
+          }
+        }
+        continue;
+      }
+
+      const baseline = groupedBaselineAccountArrByAccount.get(key);
+      if (!baseline) continue;
+      for (const [accountKey, value] of baseline.entries()) {
+        grouped.set(accountKey, round2((grouped.get(accountKey) || 0) + value));
+      }
+    }
+
+    return grouped;
+  }, [
+    chartGroupBy,
+    baselineAccountArrByAccount,
+    selectedBarSeriesList,
+    groupedChartSeries,
+    groupedBaselineAccountArrByAccount,
+  ]);
+
+  const growthContributorRowsByPeriod = useMemo(() => {
+    return buildGrowthContributorsByPeriod(
+      chartPeriodOrder,
+      selectedBarAccountArrByPeriod,
+      selectedBarBaselineAccountArrByAccount,
+      chartAccountMetaByAccount,
+    );
+  }, [
+    chartPeriodOrder,
+    selectedBarAccountArrByPeriod,
+    selectedBarBaselineAccountArrByAccount,
+    chartAccountMetaByAccount,
+  ]);
   const chartGroupingLabel = CHART_GROUP_OPTIONS.find((opt) => opt.key === chartGroupBy)?.label || "Overall";
   const chartGroupingEnabled = chartGroupBy !== "none" && groupedChartSeries.length > 0;
   const multiSelectChartGroupingEnabled =
@@ -2247,7 +2575,10 @@ export default function Home() {
               />
             )}
 
-            <GrowthBreakdownChart points={barChartPoints} />
+            <GrowthBreakdownChart
+              points={barChartPoints}
+              contributorRowsByPeriod={growthContributorRowsByPeriod}
+            />
 
             {chartGroupingEnabled ? (
               <MultiLineChartCard
