@@ -1374,15 +1374,18 @@ function buildStripeCurrentMonthProjection(params: {
   requestedEndDateIso: string;
   todayUtc?: Date;
 }): StripeBillingOverviewCurrentMonthProjection | null {
-  const today = params.todayUtc || new Date();
-  const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 0, 0, 0, 0));
-  const monthStartDate = startOfMonthUtc(todayUtc);
-  const monthEndDate = endOfMonthUtc(todayUtc);
+  const nowUtc = params.todayUtc || new Date();
+  const todayUtcDateOnly = new Date(
+    Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate(), 0, 0, 0, 0),
+  );
+  const monthStartDate = startOfMonthUtc(todayUtcDateOnly);
+  const monthEndDate = endOfMonthUtc(todayUtcDateOnly);
   const monthStartIso = isoDateFromUtcDate(monthStartDate);
   const monthEndIso = isoDateFromUtcDate(monthEndDate);
   if (params.requestedEndDateIso < monthStartIso) return null;
 
-  const observedThroughTargetIso = minIsoDate(isoDateFromUtcDate(todayUtc), params.requestedEndDateIso, monthEndIso);
+  const todayIso = isoDateFromUtcDate(todayUtcDateOnly);
+  const observedThroughTargetIso = minIsoDate(todayIso, params.requestedEndDateIso, monthEndIso);
   const dailyByDate = new Map<string, number>();
   for (const point of params.dailyPoints) {
     if (!point.date) continue;
@@ -1392,7 +1395,9 @@ function buildStripeCurrentMonthProjection(params: {
   const monthDates: string[] = [];
   const monthActualValues: Array<number | null> = [];
   for (let day = 1; day <= monthEndDate.getUTCDate(); day++) {
-    const dayIso = isoDateFromUtcDate(new Date(Date.UTC(todayUtc.getUTCFullYear(), todayUtc.getUTCMonth(), day, 0, 0, 0, 0)));
+    const dayIso = isoDateFromUtcDate(
+      new Date(Date.UTC(todayUtcDateOnly.getUTCFullYear(), todayUtcDateOnly.getUTCMonth(), day, 0, 0, 0, 0)),
+    );
     monthDates.push(dayIso);
     monthActualValues.push(dailyByDate.has(dayIso) ? (dailyByDate.get(dayIso) as number) : null);
   }
@@ -1409,6 +1414,19 @@ function buildStripeCurrentMonthProjection(params: {
   if (monthStartMrr == null) return null;
   const observedMrr = monthActualValues[observedIndex];
   if (observedMrr == null) return null;
+  const todayStartMs = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate(), 0, 0, 0, 0);
+  const tomorrowStartMs = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate() + 1, 0, 0, 0, 0);
+  const observedDayInProgress =
+    observedThroughIso === todayIso && nowUtc.getTime() > todayStartMs && nowUtc.getTime() < tomorrowStartMs;
+  const observedDayProgress = observedDayInProgress
+    ? Math.max(
+        0,
+        Math.min(
+          1,
+          (nowUtc.getTime() - todayStartMs) / 86_400_000,
+        ),
+      )
+    : 1;
 
   const historicalShapes: StripeMonthlyShape[] = [];
   const historicalPerDaySlopes: number[] = [];
@@ -1491,7 +1509,10 @@ function buildStripeCurrentMonthProjection(params: {
     const baseline = linearInterpolation(monthStartMrr, projectedLinearEnd, frac);
     const dipAdj = dipAdjustmentForFraction(frac, dipStartFrac, dipMidFrac, dipEndFrac, dipDepth, postDipLevel);
     const modeled = baseline + dipAdj + anchorOffset;
-    const projected = idx <= observedIndex && actual != null ? actual : modeled;
+    let projected = idx <= observedIndex && actual != null ? actual : modeled;
+    if (observedDayInProgress && idx === observedIndex && actual != null) {
+      projected = actual + (modeled - actual) * (1 - observedDayProgress);
+    }
     return {
       date,
       label: date,
