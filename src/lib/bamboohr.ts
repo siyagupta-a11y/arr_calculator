@@ -211,25 +211,22 @@ function isActiveOnDate(employee: BambooEmployeeRecord, snapshotDate: Date) {
 }
 
 function isFullTimeEmployee(employee: BambooEmployeeRecord) {
-  const statusText = `${employee.employmentStatus} ${employee.employmentType} ${employee.payType} ${employee.jobTitle} ${employee.department} ${employee.division} ${employee.location} ${employee.rawText}`
+  const employmentStatus = clean(employee.employmentStatus).toLowerCase();
+  const compactEmploymentStatus = employmentStatus.replace(/[^a-z0-9]/g, "");
+
+  // Canonical mapping requested: include Employee Perm/FT* and Contractor only.
+  if (employmentStatus.includes("contractor")) return true;
+  if (compactEmploymentStatus.includes("employeepermft")) return true;
+
+  // Keep narrowly-scoped fallback for tenants where "Employment Status" may not be present.
+  const fallbackText = `${employee.employmentType} ${employee.payType} ${employee.rawText}`
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
-  if (!statusText) return false;
-  if (/\bterminated\b|\binactive\b/.test(statusText)) return false;
-  if (/\bintern(ship)?\b/.test(statusText)) return false;
-  if (/\btemporary\b|\btemp\b|\bseasonal\b|\bco[- ]?op\b|\bstudent\b/.test(statusText)) return false;
-  if (/\bcasual\b/.test(statusText)) return false;
-  if (/\bcontract(or)?\b|\bcontingent\b/.test(statusText)) return true;
-  if (/part[- ]?time|pt\b/.test(statusText)) return false;
+  if (!employmentStatus && /\bcontract(or)?\b/.test(fallbackText)) return true;
+  if (!employmentStatus && /\bemployee\s*perm\s*\/?\s*ft\b/.test(fallbackText)) return true;
 
-  const isFullTime = /\bfull[- ]?time\b|\bfulltime\b|\bft\b|\bpermanent\b|\bregular\b/.test(statusText);
-  if (isFullTime) return true;
-
-  if (employee.fullTimeEquivalent != null && employee.fullTimeEquivalent >= 0.99) return true;
-  // Some BambooHR schemas expose only "Active" without an explicit type. Keep a fallback for those rows.
-  if (/\bactive\b/.test(statusText)) return true;
-  return clean(process.env.BAMBOOHR_COUNT_UNKNOWN_AS_FULL_TIME || "true").toLowerCase() !== "false";
+  return false;
 }
 
 function employeeDisplayName(employee: BambooEmployeeRecord) {
