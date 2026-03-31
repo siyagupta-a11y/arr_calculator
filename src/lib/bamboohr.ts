@@ -5,6 +5,11 @@ type BambooEmployeeRecord = {
   preferredName: string;
   displayName: string;
   fullName: string;
+  jobTitle: string;
+  department: string;
+  division: string;
+  location: string;
+  rawText: string;
   hireDate: string;
   terminationDate: string;
   employmentStatus: string;
@@ -123,6 +128,10 @@ function normalizeEmployeeRow(input: unknown): BambooEmployeeRecord | null {
   const preferredName = firstString(row, ["preferredName", "preferred name", "nickname", "nick name"]);
   const displayName = firstString(row, ["displayName", "display name"]);
   const fullName = firstString(row, ["fullName", "full name", "name"]);
+  const jobTitle = firstString(row, ["jobTitle", "job title", "title", "position", "job"]);
+  const department = firstString(row, ["department", "dept"]);
+  const division = firstString(row, ["division", "business unit", "team"]);
+  const location = firstString(row, ["location", "office", "work location"]);
   const hireDate = firstString(row, ["hireDate", "dateOfHire", "hiredDate", "employmentStartDate", "hire date"]);
   const terminationDate = firstString(row, ["terminationDate", "dateOfTermination", "employmentEndDate", "termination date"]);
   const employmentStatus = firstString(row, [
@@ -137,6 +146,10 @@ function normalizeEmployeeRow(input: unknown): BambooEmployeeRecord | null {
   const fullTimeEquivalent = parseNumber(
     firstValue(row, ["fullTimeEquivalent", "FTE", "fte", "full time equivalent"]),
   );
+  const rawText = Object.values(row)
+    .map((value) => clean(String(value)))
+    .filter(Boolean)
+    .join(" ");
   return {
     id,
     firstName,
@@ -144,6 +157,11 @@ function normalizeEmployeeRow(input: unknown): BambooEmployeeRecord | null {
     preferredName,
     displayName,
     fullName,
+    jobTitle,
+    department,
+    division,
+    location,
+    rawText,
     hireDate,
     terminationDate,
     employmentStatus,
@@ -181,11 +199,12 @@ function isActiveOnDate(employee: BambooEmployeeRecord, snapshotDate: Date) {
 }
 
 function isFullTimeEmployee(employee: BambooEmployeeRecord) {
-  const statusText = `${employee.employmentStatus} ${employee.employmentType} ${employee.payType}`
+  const statusText = `${employee.employmentStatus} ${employee.employmentType} ${employee.payType} ${employee.jobTitle} ${employee.department} ${employee.division} ${employee.location} ${employee.rawText}`
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
-  if (/contractor|contingent|intern|temporary|temp/.test(statusText)) return false;
+  if (/\bintern(ship)?\b/.test(statusText)) return false;
+  if (/\bcontract(or)?\b|\bcontingent\b|\btemporary\b|\btemp\b/.test(statusText)) return false;
   if (/part[- ]?time|pt\b/.test(statusText)) return false;
   if (/full[- ]?time|ft\b/.test(statusText)) return true;
 
@@ -234,6 +253,10 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
         "lastName",
         "preferredName",
         "displayName",
+        "jobTitle",
+        "department",
+        "division",
+        "location",
         "employmentStatus",
         "employmentType",
         "hireDate",
@@ -248,6 +271,10 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
         "firstName",
         "lastName",
         "displayName",
+        "jobTitle",
+        "department",
+        "division",
+        "location",
         "status",
         "type",
         "dateOfHire",
