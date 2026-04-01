@@ -233,6 +233,10 @@ function previousIsoMonth(isoMonth: string) {
   return d.toISOString().slice(0, 7);
 }
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 export default function StripeThroughMrrPage() {
   const defaults = useMemo(() => defaultDateRange(), []);
 
@@ -552,47 +556,53 @@ export default function StripeThroughMrrPage() {
       detailEndMonth: exportMonth,
       grain,
       groupBy: "email" as GroupBy,
-      pageSize: PAGE_SIZE,
+      pageSize: 5000,
     };
-    const readJson = async (res: Response) => {
-      const text = await res.text();
-      let json: unknown = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
-      }
-      if (!res.ok) {
-        if (json && typeof json === "object" && "error" in json) {
-          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
-        }
-        throw new Error(text || `HTTP ${res.status}`);
-      }
-      if (!json || typeof json !== "object") throw new Error("Invalid API response");
-      return json as ApiResponse;
-    };
-    const firstRes = await fetch("/api/stripe-through-mrr-report", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payloadBase, page: 1 }),
-    });
-    const first = await readJson(firstRes);
-    const extraPages = Math.max(0, (first.pagination.totalPages || 1) - 1);
-    if (!extraPages) {
-      return first.detailRows.filter(isGroupedRow);
-    }
-    const pageNumbers = Array.from({ length: extraPages }, (_, idx) => idx + 2);
-    const rest = await Promise.all(
-      pageNumbers.map(async (pageNum) => {
+    const fetchPageWithRetry = async (pageNum: number) => {
+      const maxAttempts = 4;
+      let attempt = 0;
+      while (attempt < maxAttempts) {
+        attempt += 1;
         const res = await fetch("/api/stripe-through-mrr-report", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ...payloadBase, page: pageNum }),
         });
-        return readJson(res);
-      }),
-    );
-    const allRows = [...first.detailRows, ...rest.flatMap((pageData) => pageData.detailRows)];
+        const text = await res.text();
+        let json: unknown = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch {
+          json = null;
+        }
+        if (res.ok) {
+          if (!json || typeof json !== "object") throw new Error("Invalid API response");
+          return json as ApiResponse;
+        }
+        const maybeError =
+          json && typeof json === "object" && "error" in json
+            ? String((json as { error?: unknown }).error || "")
+            : text || `HTTP ${res.status}`;
+        const isRateLimited =
+          res.status === 429 ||
+          /rate limit|too many requests/i.test(maybeError);
+        const canRetry = attempt < maxAttempts && (isRateLimited || res.status >= 500);
+        if (canRetry) {
+          const waitMs = 400 * Math.pow(2, attempt - 1);
+          await sleep(waitMs);
+          continue;
+        }
+        throw new Error(maybeError || `HTTP ${res.status}`);
+      }
+      throw new Error("Sales assist export failed after retries");
+    };
+    const first = await fetchPageWithRetry(1);
+    const extraPages = Math.max(0, (first.pagination.totalPages || 1) - 1);
+    const allRows = [...first.detailRows];
+    for (let pageNum = 2; pageNum <= extraPages + 1; pageNum += 1) {
+      const pageData = await fetchPageWithRetry(pageNum);
+      allRows.push(...pageData.detailRows);
+    }
     return allRows.filter(isGroupedRow);
   }
 
