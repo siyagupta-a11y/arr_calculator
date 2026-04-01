@@ -214,6 +214,25 @@ function parseCountryFilterRulesInput(raw: string) {
   ).slice(0, 50);
 }
 
+function isIsoMonth(value: string) {
+  return /^\d{4}-\d{2}$/.test(String(value || ""));
+}
+
+function isoMonthStart(isoMonth: string) {
+  return `${isoMonth}-01`;
+}
+
+function previousIsoMonth(isoMonth: string) {
+  if (!isIsoMonth(isoMonth)) return "";
+  const [yearRaw, monthRaw] = isoMonth.split("-");
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return "";
+  const d = new Date(Date.UTC(year, month - 1, 1));
+  d.setUTCMonth(d.getUTCMonth() - 1);
+  return d.toISOString().slice(0, 7);
+}
+
 export default function StripeThroughMrrPage() {
   const defaults = useMemo(() => defaultDateRange(), []);
 
@@ -521,6 +540,62 @@ export default function StripeThroughMrrPage() {
     return [...data.detailRows, ...results.flatMap((r) => r.detailRows)];
   }
 
+  async function fetchGroupedEmailRowsForSalesAssistExport(exportMonth: string): Promise<GroupedDetailRow[]> {
+    const prevMonth = previousIsoMonth(exportMonth);
+    if (!prevMonth) throw new Error(`Invalid detail month: ${exportMonth}`);
+    const forcedStartDate = isoMonthStart(prevMonth);
+    const exportStartDate = startDate && startDate < forcedStartDate ? startDate : forcedStartDate;
+    const payloadBase = {
+      startDate: exportStartDate,
+      endDate,
+      detailStartMonth: prevMonth,
+      detailEndMonth: exportMonth,
+      grain,
+      groupBy: "email" as GroupBy,
+      pageSize: PAGE_SIZE,
+    };
+    const readJson = async (res: Response) => {
+      const text = await res.text();
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+      if (!res.ok) {
+        if (json && typeof json === "object" && "error" in json) {
+          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+        }
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      if (!json || typeof json !== "object") throw new Error("Invalid API response");
+      return json as ApiResponse;
+    };
+    const firstRes = await fetch("/api/stripe-through-mrr-report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payloadBase, page: 1 }),
+    });
+    const first = await readJson(firstRes);
+    const extraPages = Math.max(0, (first.pagination.totalPages || 1) - 1);
+    if (!extraPages) {
+      return first.detailRows.filter(isGroupedRow);
+    }
+    const pageNumbers = Array.from({ length: extraPages }, (_, idx) => idx + 2);
+    const rest = await Promise.all(
+      pageNumbers.map(async (pageNum) => {
+        const res = await fetch("/api/stripe-through-mrr-report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payloadBase, page: pageNum }),
+        });
+        return readJson(res);
+      }),
+    );
+    const allRows = [...first.detailRows, ...rest.flatMap((pageData) => pageData.detailRows)];
+    return allRows.filter(isGroupedRow);
+  }
+
   async function exportRawDetailCsv() {
     setExportingCsv(true);
     try {
@@ -607,6 +682,60 @@ export default function StripeThroughMrrPage() {
       downloadCsv("stripe-through-mrr-detail-grouped.csv", baseHeaders, csvRows);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExportingCsv(false);
+    }
+  }
+
+  async function exportSalesAssistCsv() {
+    setExportingCsv(true);
+    try {
+      const exportMonth = effectiveDetailEndMonth;
+      const previousMonth = previousIsoMonth(exportMonth);
+      if (!isIsoMonth(exportMonth) || !previousMonth) {
+        throw new Error("Invalid detail month selected for sales-assist export");
+      }
+      const groupedRows = await fetchGroupedEmailRowsForSalesAssistExport(exportMonth);
+      const matrix = buildGroupMatrix(groupedRows);
+      const EPS = 1e-9;
+      const csvRows: string[][] = [];
+      for (const group of matrix) {
+        if (group.salesAssist !== "yes") continue;
+        const previousMonthMrr = group.byMonth.get(previousMonth)?.monthEndMrr ?? 0;
+        const currentMonthMrr = group.byMonth.get(exportMonth)?.monthEndMrr ?? 0;
+        if (Math.abs(previousMonthMrr) > EPS) continue;
+        if (!(currentMonthMrr > EPS)) continue;
+        const customerIds = group.associatedCustomerIds.length ? group.associatedCustomerIds : ["(blank)"];
+        for (const customerId of customerIds) {
+          csvRows.push([
+            exportMonth,
+            previousMonth,
+            customerId,
+            group.groupLabel || group.groupKey || "(blank)",
+            group.associatedWorkspaceIds.join(" | "),
+            "yes",
+            String(previousMonthMrr),
+            String(currentMonthMrr),
+          ]);
+        }
+      }
+      csvRows.sort((a, b) => a[2].localeCompare(b[2]));
+      downloadCsv(
+        `stripe-through-mrr-sales-assist-new-customers-${exportMonth}.csv`,
+        [
+          "Detail month",
+          "Previous month",
+          "Customer ID",
+          "Email group",
+          "Workspace IDs",
+          "Sales assist",
+          "Previous month-end MRR",
+          "Current month-end MRR",
+        ],
+        csvRows,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Sales assist export failed");
     } finally {
       setExportingCsv(false);
     }
@@ -896,6 +1025,14 @@ export default function StripeThroughMrrPage() {
                 disabled={!detailRows.length || exportingCsv}
               >
                 {exportingCsv ? "Exporting..." : "Export CSV (all rows)"}
+              </button>
+              <button
+                className="stripe-ui__btn stripe-ui__btn--ghost"
+                onClick={() => void exportSalesAssistCsv()}
+                disabled={!detailRows.length || exportingCsv}
+                title={`Uses detail month ${effectiveDetailEndMonth} and compares against ${previousIsoMonth(effectiveDetailEndMonth) || "previous month"}.`}
+              >
+                {exportingCsv ? "Exporting..." : "Download Sales Assist CSV"}
               </button>
             </div>
 
