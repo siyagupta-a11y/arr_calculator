@@ -480,14 +480,13 @@ export default function CombinedAllSubsPage() {
 
           <div className="stripe-ui__field">
             <label className="stripe-ui__field-label" htmlFor="combined-all-subs-plan-grain">
-              Plan grain
+              Time grain
             </label>
             <select
               id="combined-all-subs-plan-grain"
               className="stripe-ui__control"
               value={planGrain}
               onChange={(e) => setPlanGrain(e.target.value as PlanGrain)}
-              disabled={displayMode !== "plan"}
             >
               <option value="monthly">Monthly</option>
               <option value="daily">Daily</option>
@@ -516,7 +515,7 @@ export default function CombinedAllSubsPage() {
           <p className="stripe-ui__panel-subtitle">
             {displayMode === "plan"
               ? `Combining HubSpot accounts with Stripe customer plans (${planGrain}).`
-              : "Combining HubSpot accounts with Stripe customer ARR."}
+              : `Combining HubSpot accounts with Stripe customer ARR (${planGrain}).`}
           </p>
           <div className="stripe-ui__skeleton-grid">
             <div className="stripe-ui__skeleton-row" />
@@ -594,7 +593,7 @@ export default function CombinedAllSubsPage() {
                 </h2>
                 <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
                   Includes all HubSpot cloud accounts plus Stripe customers not matched to any HubSpot account contact.
-                  {effectiveDisplayMode === "plan" ? ` Plan grain: ${effectivePlanGrain}.` : ""}
+                  {` Time grain: ${effectivePlanGrain}.`}
                 </p>
               </div>
               <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>

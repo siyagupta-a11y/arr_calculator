@@ -182,12 +182,14 @@ export type StripeThroughMrrCustomerArrRequest = {
   startDate: string;
   endDate: string;
   targetCurrency: string;
+  grain?: "daily" | "monthly";
 };
 
 export type StripeThroughMrrCustomerArrResult = {
   startDate: string;
   endDate: string;
   targetCurrency: string;
+  grain: "daily" | "monthly";
   rows: StripeThroughMrrCustomerArrRow[];
 };
 
@@ -3603,6 +3605,7 @@ export async function queryStripeThroughMrrCustomerArrFromBigQuery(
   const startDateIso = startDate.toISOString().slice(0, 10);
   const endDateIso = endDate.toISOString().slice(0, 10);
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const grain = normalizeStripeThroughMrrCustomerPlanGrain(request.grain);
 
   const profile = normalizeProfile(options?.profile);
   const sa = getServiceAccount(profile);
@@ -3619,17 +3622,39 @@ WITH bounds AS (
   SELECT
     DATE(@start_date) AS requested_start_date,
     DATE(@end_date) AS requested_end_date,
-    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS requested_end_exclusive_date,
-    DATE_TRUNC(DATE(@start_date), MONTH) AS first_bucket_start,
-    DATE_TRUNC(DATE(@end_date), MONTH) AS last_bucket_start
+    DATE_ADD(DATE(@end_date), INTERVAL 1 DAY) AS requested_end_exclusive_date
+),
+bucket_candidates AS (
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 DAY) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.requested_start_date, b.requested_end_date, INTERVAL 1 DAY)) AS d
+  WHERE @grain = 'daily'
+
+  UNION ALL
+
+  SELECT
+    d AS bucket_start,
+    DATE_ADD(d, INTERVAL 1 MONTH) AS bucket_end_exclusive_raw
+  FROM bounds b
+  CROSS JOIN UNNEST(
+    GENERATE_DATE_ARRAY(
+      DATE_TRUNC(b.requested_start_date, MONTH),
+      DATE_TRUNC(b.requested_end_date, MONTH),
+      INTERVAL 1 MONTH
+    )
+  ) AS d
+  WHERE @grain = 'monthly'
 ),
 buckets AS (
   SELECT
-    month_start AS bucket_start,
-    GREATEST(month_start, b.requested_start_date) AS effective_start,
-    LEAST(DATE_ADD(month_start, INTERVAL 1 MONTH), b.requested_end_exclusive_date) AS effective_end_exclusive
+    bc.bucket_start,
+    GREATEST(bc.bucket_start, b.requested_start_date) AS effective_start,
+    LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date) AS effective_end_exclusive
   FROM bounds b
-  CROSS JOIN UNNEST(GENERATE_DATE_ARRAY(b.first_bucket_start, b.last_bucket_start, INTERVAL 1 MONTH)) AS month_start
+  JOIN bucket_candidates bc
+    ON TRUE
 ),
 customers_workspace_lookup AS (
   SELECT
@@ -3764,8 +3789,14 @@ SELECT
   sr.customer_key,
   COALESCE(cik.customer_ids, ARRAY<STRING>[]) AS customer_ids,
   COALESCE(cik.workspace_ids, ARRAY<STRING>[]) AS workspace_ids,
-  FORMAT_DATE('%Y-%m', sr.bucket_start) AS period_key,
-  FORMAT_DATE('%b %Y', sr.bucket_start) AS period_label,
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', sr.effective_start)
+    ELSE FORMAT_DATE('%Y-%m', sr.bucket_start)
+  END AS period_key,
+  CASE
+    WHEN @grain = 'daily' THEN FORMAT_DATE('%Y-%m-%d', sr.effective_start)
+    ELSE FORMAT_DATE('%b %Y', sr.bucket_start)
+  END AS period_label,
   FORMAT_DATE('%Y-%m-%d', sr.effective_start) AS period_start,
   FORMAT_DATE('%Y-%m-%d', DATE_SUB(sr.effective_end_exclusive, INTERVAL 1 DAY)) AS period_end,
   ROUND(sr.mrr_end * 12.0, 2) AS arr
@@ -3779,6 +3810,7 @@ ORDER BY sr.customer_key ASC, sr.bucket_start ASC
   const params: BigQueryNamedParameter[] = [
     { name: "start_date", type: "STRING", value: startDateIso },
     { name: "end_date", type: "STRING", value: endDateIso },
+    { name: "grain", type: "STRING", value: grain },
     { name: "target_currency", type: "STRING", value: targetCurrency },
   ];
   const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
@@ -3787,6 +3819,7 @@ ORDER BY sr.customer_key ASC, sr.bucket_start ASC
     startDate: startDateIso,
     endDate: endDateIso,
     targetCurrency: targetCurrency.toUpperCase(),
+    grain,
     rows: rows.map((row) => ({
       customerKey: asString(row.customer_key),
       customerIds: asStringArray(row.customer_ids),
@@ -5512,18 +5545,31 @@ ORDER BY local_date ASC
       })
     : null;
 
-  const historyPoints = allPoints.filter((point) => point.periodStart < startDateIso);
-  const points = allPoints.filter((point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso);
-  const stripeExactHistoryPoints = allStripeExactPoints.filter((point) => point.periodStart < startDateIso);
-  const stripeExactPoints = allStripeExactPoints.filter(
-    (point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso,
-  );
+  const periodBounds = (point: StripeBillingOverviewPoint) => {
+    const start = String(point.periodStart || "").slice(0, 10);
+    const end = String(point.periodEnd || point.periodStart || "").slice(0, 10);
+    return { start, end };
+  };
+  const pointIsBeforeRequestedRange = (point: StripeBillingOverviewPoint) => {
+    const { end } = periodBounds(point);
+    return !!end && end < startDateIso;
+  };
+  const pointIntersectsRequestedRange = (point: StripeBillingOverviewPoint) => {
+    const { start, end } = periodBounds(point);
+    if (!start || !end) return false;
+    return start <= endDateIso && end >= startDateIso;
+  };
+
+  const historyPoints = allPoints.filter(pointIsBeforeRequestedRange);
+  const points = allPoints.filter(pointIntersectsRequestedRange);
+  const stripeExactHistoryPoints = allStripeExactPoints.filter(pointIsBeforeRequestedRange);
+  const stripeExactPoints = allStripeExactPoints.filter(pointIntersectsRequestedRange);
   const groupedSeries: StripeBillingOverviewGroupedSeries[] = Array.from(groupedSeriesByKey.values())
     .map((series) => ({
       groupKey: series.groupKey,
       groupLabel: series.groupLabel,
-      historyPoints: series.allPoints.filter((point) => point.periodStart < startDateIso),
-      points: series.allPoints.filter((point) => point.periodStart >= startDateIso && point.periodStart <= endDateIso),
+      historyPoints: series.allPoints.filter(pointIsBeforeRequestedRange),
+      points: series.allPoints.filter(pointIntersectsRequestedRange),
     }))
     .filter((series) => series.points.length > 0)
     .sort((a, b) => {

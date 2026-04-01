@@ -531,7 +531,7 @@ export async function generateCombinedAllSubsReport(
       startDate,
       endDate,
       mode: "contracted",
-      grain: displayMode === "plan" ? planGrain : "monthly",
+      grain: planGrain,
     }),
     displayMode === "arr"
       ? queryStripeThroughMrrCustomerArrFromBigQuery(
@@ -539,6 +539,7 @@ export async function generateCombinedAllSubsReport(
             startDate,
             endDate,
             targetCurrency: target,
+            grain: planGrain,
           },
           STRIPE_QUERY_OPTIONS,
         )
