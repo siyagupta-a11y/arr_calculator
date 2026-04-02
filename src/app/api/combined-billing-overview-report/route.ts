@@ -1094,7 +1094,9 @@ async function buildCombinedBillingOverview(
           endDate,
           targetCurrency,
           productDescriptionIncludes: AI_SPEND_UPCOMING_PRODUCT_TERMS,
-          excludeCustomerMonthPairs: exclusions.customerMonthPairs || [],
+          // Keep daily exclusions aligned with AI Spend page behavior:
+          // apply prepaid offsets, but do not hard-exclude customer-month pairs.
+          excludeCustomerMonthPairs: [],
           prepaidOffsetByCustomerMonthPairs: (exclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
             pairKey: entry.pairKey,
             prepaidAppliedMajor: entry.prepaidAppliedMajor,
