@@ -10,6 +10,7 @@ import {
   type StripeBillingOverviewCustomerArrRow,
 } from "@/lib/stripeBigquery";
 import {
+  type EnterprisePrepaidAiSpendExclusionRow,
   resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOffsets,
   resolveEnterprisePrepaidAiSpendExclusions,
 } from "@/lib/aiSpendEnterprisePrepaidExclusions";
@@ -1062,6 +1063,7 @@ async function buildCombinedBillingOverview(
     endDateObj.getTime() >= currentMonthStartObj.getTime() &&
     startDateObj.getTime() < nextMonthStartObj.getTime();
   const shouldComputeLtv = grain === "monthly";
+  let aiSpendExcludedEnterprisePrepaidCustomers: EnterprisePrepaidAiSpendExclusionRow[] = [];
   const ltvCombinedUsersPromise: Promise<CombinedLtvUserCounts> = shouldComputeLtv
     ? generateCombinedAllSubsReport({
         startDate: previousRange.startDate,
@@ -1089,7 +1091,8 @@ async function buildCombinedBillingOverview(
             endDate,
             targetCurrency,
           }),
-      ).catch(() => ({ customerMonthPairs: [], customerMonthPrepaidOffsets: [] }));
+      ).catch(() => ({ customerMonthPairs: [], customerMonthPrepaidOffsets: [], rows: [] }));
+      aiSpendExcludedEnterprisePrepaidCustomers = exclusions.rows || [];
 
       const dailySnapshotSeries = await queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFromBigQuery(
         {
@@ -1140,7 +1143,8 @@ async function buildCombinedBillingOverview(
       startDate,
       endDate,
       targetCurrency,
-    }).catch(() => ({ customerMonthPrepaidOffsets: [] }));
+    }).catch(() => ({ customerMonthPrepaidOffsets: [], rows: [] }));
+    aiSpendExcludedEnterprisePrepaidCustomers = exclusions.rows || [];
     const historical = await queryStripeAiSpendFromBigQuery(
       {
         startDate: previousRange.startDate,
@@ -1832,6 +1836,7 @@ async function buildCombinedBillingOverview(
     cacCurrencyLayerNotice,
     cacCadNotice,
     cacCadCurrency,
+    aiSpendExcludedEnterprisePrepaidCustomers,
   };
 }
 

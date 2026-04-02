@@ -32,6 +32,22 @@ type LineSourcePoints = {
   aiSpend: CombinedPoint[];
 };
 
+type AiSpendExcludedEnterprisePrepaidCustomer = {
+  monthKey: string;
+  monthLabel: string;
+  asOfDate: string;
+  customerId: string;
+  customerEmail: string;
+  customerName: string;
+  currency: string;
+  prepaidAppliedMinor: number;
+  prepaidAppliedMajor: number;
+  availableCreditMinor: number;
+  availableCreditMajor: number;
+  accountIds: string[];
+  accountNames: string[];
+};
+
 type QuickBooksExpenseAccount = {
   id: string;
   name: string;
@@ -125,6 +141,7 @@ type CombinedBillingOverviewReportResponse = {
   cacCurrencyLayerNotice: string | null;
   cacCadNotice: string | null;
   cacCadCurrency: string;
+  aiSpendExcludedEnterprisePrepaidCustomers?: AiSpendExcludedEnterprisePrepaidCustomer[];
 };
 
 type RetentionSource = "combined" | "salesled" | "selfserve";
@@ -170,6 +187,7 @@ type CombinedOverviewData = {
   cacCurrencyLayerPoints: CacPoint[];
   cacCadPoints: CacPoint[];
   cacCadCurrency: string;
+  aiSpendExcludedEnterprisePrepaidCustomers: AiSpendExcludedEnterprisePrepaidCustomer[];
 };
 
 function round2(n: number) {
@@ -470,6 +488,13 @@ type GroupedSourceSeries = {
   points: CombinedPoint[];
 };
 
+type GroupedSourcePointClickPayload = {
+  seriesId: GroupedSourceSeries["id"];
+  seriesLabel: string;
+  pointIndex: number;
+  point: CombinedPoint;
+};
+
 type GroupedSourceLineChartCardProps = {
   title: string;
   subtitle: string;
@@ -477,6 +502,7 @@ type GroupedSourceLineChartCardProps = {
   valueAccessor: (point: CombinedPoint) => number;
   valueFormatter: (value: number) => string;
   includeZero?: boolean;
+  onPointClick?: (payload: GroupedSourcePointClickPayload) => void;
 };
 
 function GroupedSourceLineChartCard({
@@ -486,6 +512,7 @@ function GroupedSourceLineChartCard({
   valueAccessor,
   valueFormatter,
   includeZero = false,
+  onPointClick,
 }: GroupedSourceLineChartCardProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const chartRef = useRef<SVGSVGElement | null>(null);
@@ -672,6 +699,15 @@ function GroupedSourceLineChartCard({
                   r={hoverIndex === idx ? 4 : 2.8}
                   fill={item.color}
                   onMouseEnter={() => setHoverIndex(idx)}
+                  onClick={() => {
+                    onPointClick?.({
+                      seriesId: item.id,
+                      seriesLabel: item.label,
+                      pointIndex: idx,
+                      point,
+                    });
+                  }}
+                  style={{ cursor: onPointClick ? "pointer" : "default" }}
                 />
               )),
             )}
@@ -2467,6 +2503,12 @@ export default function CombinedBillingOverviewPage() {
   const [savingCacDefaultSelection, setSavingCacDefaultSelection] = useState(false);
   const [cacDefaultSaveStatus, setCacDefaultSaveStatus] = useState("");
   const [showProjectedArrBreakdown, setShowProjectedArrBreakdown] = useState(false);
+  const [selectedAiSpendExclusionPoint, setSelectedAiSpendExclusionPoint] = useState<{
+    chartTitle: string;
+    pointLabel: string;
+    periodStart: string;
+    monthKey: string;
+  } | null>(null);
   const runRequestRef = useRef(0);
 
   const fetchApiGetJson = useCallback(async <T,>(url: string): Promise<T> => {
@@ -2619,6 +2661,7 @@ export default function CombinedBillingOverviewPage() {
     setArrPerEmployeeNotice(null);
     setCacNotice(null);
     setShowProjectedArrBreakdown(false);
+    setSelectedAiSpendExclusionPoint(null);
 
     try {
       const fetchJson = async <T,>(url: string, payload: unknown): Promise<T> => {
@@ -2713,6 +2756,7 @@ export default function CombinedBillingOverviewPage() {
         cacCurrencyLayerPoints: overview.cacCurrencyLayerPoints || [],
         cacCadPoints: overview.cacCadPoints || [],
         cacCadCurrency: String(overview.cacCadCurrency || "CAD").toUpperCase(),
+        aiSpendExcludedEnterprisePrepaidCustomers: overview.aiSpendExcludedEnterprisePrepaidCustomers || [],
       }));
 
       setLoading(false);
@@ -2779,6 +2823,10 @@ export default function CombinedBillingOverviewPage() {
               cacCurrencyLayerPoints: overviewWithCac.cacCurrencyLayerPoints || [],
               cacCadPoints: overviewWithCac.cacCadPoints || [],
               cacCadCurrency: String(overviewWithCac.cacCadCurrency || prev.cacCadCurrency || "CAD").toUpperCase(),
+              aiSpendExcludedEnterprisePrepaidCustomers:
+                overviewWithCac.aiSpendExcludedEnterprisePrepaidCustomers ||
+                prev.aiSpendExcludedEnterprisePrepaidCustomers ||
+                [],
             };
           });
         } catch (e: unknown) {
@@ -2815,6 +2863,40 @@ export default function CombinedBillingOverviewPage() {
   const ltvPoints = useMemo(() => data?.ltvPoints ?? [], [data]);
   const cacPoints = useMemo(() => data?.cacPoints ?? [], [data]);
   const currency = useMemo(() => data?.targetCurrency || "USD", [data]);
+  const aiSpendExcludedEnterprisePrepaidCustomers = useMemo(
+    () => data?.aiSpendExcludedEnterprisePrepaidCustomers ?? [],
+    [data],
+  );
+  const aiSpendExcludedByMonth = useMemo(() => {
+    const out = new Map<string, AiSpendExcludedEnterprisePrepaidCustomer[]>();
+    for (const row of aiSpendExcludedEnterprisePrepaidCustomers) {
+      const monthKey = String(row.monthKey || "").trim();
+      if (!monthKey) continue;
+      if (!out.has(monthKey)) out.set(monthKey, []);
+      out.get(monthKey)!.push(row);
+    }
+    return out;
+  }, [aiSpendExcludedEnterprisePrepaidCustomers]);
+  const selectedAiSpendExclusions = useMemo(() => {
+    if (!selectedAiSpendExclusionPoint) return [];
+    return aiSpendExcludedByMonth.get(selectedAiSpendExclusionPoint.monthKey) || [];
+  }, [aiSpendExcludedByMonth, selectedAiSpendExclusionPoint]);
+  const handleGroupedSourcePointClick = useCallback(
+    (payload: GroupedSourcePointClickPayload, chartTitle: string) => {
+      if (lineChartMode !== "source" || grain !== "daily") return;
+      if (payload.seriesId !== "ai") return;
+      const periodStart = String(payload.point.periodStart || "").slice(0, 10);
+      const monthKey = periodStart.length >= 7 ? periodStart.slice(0, 7) : "";
+      if (!monthKey) return;
+      setSelectedAiSpendExclusionPoint({
+        chartTitle,
+        pointLabel: String(payload.point.label || ""),
+        periodStart,
+        monthKey,
+      });
+    },
+    [grain, lineChartMode],
+  );
 
   return (
     <div className="stripe-ui">
@@ -3083,7 +3165,74 @@ export default function CombinedBillingOverviewPage() {
                 ]}
                 valueAccessor={(p) => p.mrrEnd}
                 valueFormatter={(v) => formatMoney(v, currency)}
+                onPointClick={(payload) => handleGroupedSourcePointClick(payload, "MRR Over Time")}
               />
+            )}
+
+            {lineChartMode === "source" && grain === "daily" && (
+              <section className="stripe-ui__panel ui-reveal ui-reveal-2" style={{ gridColumn: "1 / -1" }}>
+                <div className="stripe-ui__section-head">
+                  <div>
+                    <h2 className="stripe-ui__panel-title">AI Spend Exclusions For Selected Point</h2>
+                    <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                      Click an AI spend point to view exclusions used for that day&apos;s month.
+                    </p>
+                  </div>
+                  {selectedAiSpendExclusionPoint && (
+                    <button
+                      className="stripe-ui__btn stripe-ui__btn--ghost"
+                      onClick={() => setSelectedAiSpendExclusionPoint(null)}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {!selectedAiSpendExclusionPoint ? (
+                  <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>
+                    No AI point selected.
+                  </p>
+                ) : selectedAiSpendExclusions.length === 0 ? (
+                  <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>
+                    No exclusions for {selectedAiSpendExclusionPoint.pointLabel} ({selectedAiSpendExclusionPoint.monthKey}).
+                  </p>
+                ) : (
+                  <>
+                    <p className="stripe-ui__hint" style={{ marginTop: "0.7rem", marginBottom: "0.5rem" }}>
+                      Selected from {selectedAiSpendExclusionPoint.chartTitle}: {selectedAiSpendExclusionPoint.pointLabel} (
+                      {selectedAiSpendExclusionPoint.periodStart}), month key {selectedAiSpendExclusionPoint.monthKey}.
+                    </p>
+                    <div className="stripe-ui__table-wrap" style={{ maxHeight: "20rem", overflow: "auto" }}>
+                      <table className="stripe-ui__table" aria-label="AI spend exclusions for selected daily point">
+                        <thead>
+                          <tr>
+                            <th>Customer ID</th>
+                            <th>Customer Name</th>
+                            <th>Email</th>
+                            <th className="stripe-ui__num">Prepaid Applied</th>
+                            <th className="stripe-ui__num">Available Credit</th>
+                            <th>As Of Date</th>
+                            <th>Accounts</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedAiSpendExclusions.map((row, idx) => (
+                            <tr key={`${selectedAiSpendExclusionPoint.monthKey}-${row.customerId}-${row.asOfDate}-${idx}`}>
+                              <td>{row.customerId || "(blank)"}</td>
+                              <td>{row.customerName || "(blank)"}</td>
+                              <td>{row.customerEmail || "(blank)"}</td>
+                              <td className="stripe-ui__num">{formatMoney(row.prepaidAppliedMajor || 0, currency)}</td>
+                              <td className="stripe-ui__num">{formatMoney(row.availableCreditMajor || 0, currency)}</td>
+                              <td>{row.asOfDate || "(blank)"}</td>
+                              <td>{(row.accountNames || []).length ? row.accountNames.join(", ") : "(none)"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </section>
             )}
 
             <GrowthBreakdownChart points={points} currency={currency} />
@@ -3110,6 +3259,7 @@ export default function CombinedBillingOverviewPage() {
                 valueAccessor={(p) => p.mrrGrowthRatePct}
                 valueFormatter={(v) => formatPercent(v)}
                 includeZero
+                onPointClick={(payload) => handleGroupedSourcePointClick(payload, "MRR Growth Rate Over Time")}
               />
             )}
 
@@ -3133,6 +3283,7 @@ export default function CombinedBillingOverviewPage() {
                 ]}
                 valueAccessor={(p) => p.arr}
                 valueFormatter={(v) => formatMoney(v, currency)}
+                onPointClick={(payload) => handleGroupedSourcePointClick(payload, "ARR Over Time")}
               />
             )}
 
