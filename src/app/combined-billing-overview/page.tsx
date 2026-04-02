@@ -208,6 +208,22 @@ type CombinedOverviewData = {
   }>;
 };
 
+type AiSpendDailyBreakdownResponse = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+  rows: Array<{
+    snapshotDate: string;
+    snapshotTimestampUtc: string;
+    customerId: string;
+    customerName: string;
+    annualizedArrWithoutExclusions: number;
+    annualizedArr: number;
+    annualizedArrExcluded: number;
+    lineCount: number;
+  }>;
+};
+
 function round2(n: number) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -2527,6 +2543,8 @@ export default function CombinedBillingOverviewPage() {
     periodStart: string;
     monthKey: string;
   } | null>(null);
+  const [downloadingAiSpendBreakdownCsv, setDownloadingAiSpendBreakdownCsv] = useState(false);
+  const [aiSpendBreakdownCsvError, setAiSpendBreakdownCsvError] = useState("");
   const runRequestRef = useRef(0);
 
   const fetchApiGetJson = useCallback(async <T,>(url: string): Promise<T> => {
@@ -2680,6 +2698,7 @@ export default function CombinedBillingOverviewPage() {
     setCacNotice(null);
     setShowProjectedArrBreakdown(false);
     setSelectedAiSpendExclusionPoint(null);
+    setAiSpendBreakdownCsvError("");
 
     try {
       const fetchJson = async <T,>(url: string, payload: unknown): Promise<T> => {
@@ -2941,6 +2960,7 @@ export default function CombinedBillingOverviewPage() {
       const periodStart = String(payload.point.periodStart || "").slice(0, 10);
       const monthKey = periodStart.length >= 7 ? periodStart.slice(0, 7) : "";
       if (!monthKey) return;
+      setAiSpendBreakdownCsvError("");
       setSelectedAiSpendExclusionPoint({
         chartTitle,
         pointLabel: String(payload.point.label || ""),
@@ -2950,6 +2970,78 @@ export default function CombinedBillingOverviewPage() {
     },
     [grain, lineChartMode],
   );
+  const downloadAiSpendBreakdownCsv = useCallback(async () => {
+    if (!selectedAiSpendExclusionPoint) return;
+    setDownloadingAiSpendBreakdownCsv(true);
+    setAiSpendBreakdownCsvError("");
+    try {
+      const res = await fetch("/api/combined-billing-overview-ai-spend-daily-breakdown", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startDate,
+          endDate,
+          selectedDate: selectedAiSpendExclusionPoint.periodStart,
+          targetCurrency: currency,
+        }),
+      });
+      const text = await res.text();
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+      if (!res.ok) {
+        if (json && typeof json === "object" && "error" in json) {
+          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+        }
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      if (!json || typeof json !== "object") throw new Error("Invalid API response");
+      const payload = json as AiSpendDailyBreakdownResponse;
+      const csvRows: Array<Array<string | number>> = [
+        [
+          "snapshot_date",
+          "snapshot_timestamp_utc",
+          "customer_id",
+          "customer_name",
+          "ai_spend_after_exclusions_annualized_arr",
+          "ai_spend_after_exclusions_mrr",
+          "ai_spend_before_exclusions_annualized_arr",
+          "total_excluded_annualized_arr",
+          "line_count",
+          "target_currency",
+          "report_start_date",
+          "report_end_date",
+          "selected_date",
+        ],
+        ...(payload.rows || []).map((row) => [
+          row.snapshotDate || selectedAiSpendExclusionPoint.periodStart,
+          row.snapshotTimestampUtc || "",
+          row.customerId || "(blank)",
+          row.customerName || "(blank)",
+          round2(row.annualizedArr || 0),
+          round2((row.annualizedArr || 0) / 12),
+          round2(row.annualizedArrWithoutExclusions || 0),
+          round2(row.annualizedArrExcluded || 0),
+          Math.max(0, Math.round(row.lineCount || 0)),
+          payload.targetCurrency || currency,
+          startDate,
+          endDate,
+          selectedAiSpendExclusionPoint.periodStart,
+        ]),
+      ];
+      downloadCsv(
+        `combined-billing-overview-ai-spend-after-exclusions-${selectedAiSpendExclusionPoint.periodStart}.csv`,
+        csvRows,
+      );
+    } catch (e: unknown) {
+      setAiSpendBreakdownCsvError(conciseErrorMessage(e, "Failed to download AI spend breakdown CSV."));
+    } finally {
+      setDownloadingAiSpendBreakdownCsv(false);
+    }
+  }, [currency, endDate, selectedAiSpendExclusionPoint, startDate]);
 
   return (
     <div className="stripe-ui">
@@ -3232,14 +3324,31 @@ export default function CombinedBillingOverviewPage() {
                     </p>
                   </div>
                   {selectedAiSpendExclusionPoint && (
-                    <button
-                      className="stripe-ui__btn stripe-ui__btn--ghost"
-                      onClick={() => setSelectedAiSpendExclusionPoint(null)}
-                    >
-                      Clear
-                    </button>
+                    <div style={{ display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
+                      <button
+                        className="stripe-ui__btn stripe-ui__btn--secondary"
+                        onClick={() => void downloadAiSpendBreakdownCsv()}
+                        disabled={downloadingAiSpendBreakdownCsv}
+                      >
+                        {downloadingAiSpendBreakdownCsv ? "Preparing CSV..." : "Download CSV"}
+                      </button>
+                      <button
+                        className="stripe-ui__btn stripe-ui__btn--ghost"
+                        onClick={() => {
+                          setSelectedAiSpendExclusionPoint(null);
+                          setAiSpendBreakdownCsvError("");
+                        }}
+                      >
+                        Clear
+                      </button>
+                    </div>
                   )}
                 </div>
+                {aiSpendBreakdownCsvError ? (
+                  <p className="stripe-ui__hint" style={{ marginTop: "0.45rem", color: "#fca5a5" }}>
+                    {aiSpendBreakdownCsvError}
+                  </p>
+                ) : null}
 
                 {!selectedAiSpendExclusionPoint ? (
                   <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>

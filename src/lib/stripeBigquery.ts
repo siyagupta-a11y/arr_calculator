@@ -582,6 +582,36 @@ export type StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsResult = {
   points: StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsPoint[];
 };
 
+export type StripeAiSpendDailyAnnualizedCustomerBreakdownRequest = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+  productDescriptionIncludes: string[];
+  excludeCustomerMonthPairs?: string[];
+  prepaidOffsetByCustomerMonthPairs?: Array<{
+    pairKey: string;
+    prepaidAppliedMajor: number;
+  }>;
+};
+
+export type StripeAiSpendDailyAnnualizedCustomerBreakdownRow = {
+  snapshotDate: string;
+  snapshotTimestampUtc: string;
+  customerId: string;
+  customerName: string;
+  annualizedArrWithoutExclusions: number;
+  annualizedArr: number;
+  annualizedArrExcluded: number;
+  lineCount: number;
+};
+
+export type StripeAiSpendDailyAnnualizedCustomerBreakdownResult = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+  rows: StripeAiSpendDailyAnnualizedCustomerBreakdownRow[];
+};
+
 export type StripeUpcomingProjectedArrRequest = {
   monthStartDate: string;
   nextMonthStartDate: string;
@@ -8294,6 +8324,291 @@ ORDER BY snapshot_date ASC
     endDate: endDateIso,
     targetCurrency: targetCurrency.toUpperCase(),
     points,
+  };
+}
+
+export async function queryStripeAiSpendDailyAnnualizedCustomerBreakdownFromUpcomingSnapshotsFromBigQuery(
+  request: StripeAiSpendDailyAnnualizedCustomerBreakdownRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeAiSpendDailyAnnualizedCustomerBreakdownResult> {
+  const startDate = parseIsoDateUtc(request.startDate);
+  const endDate = parseIsoDateUtc(request.endDate);
+  if (!startDate || !endDate) {
+    throw new Error("Invalid startDate/endDate");
+  }
+  if (endDate.getTime() < startDate.getTime()) {
+    throw new Error("endDate must be >= startDate");
+  }
+
+  const startDateIso = startDate.toISOString().slice(0, 10);
+  const endDateIso = endDate.toISOString().slice(0, 10);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const includes = Array.from(
+    new Set(
+      (request.productDescriptionIncludes || [])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+  const excludedCustomerMonthPairs = Array.from(
+    new Set(
+      (request.excludeCustomerMonthPairs || [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const prepaidOffsetByCustomerMonthPairs = Array.from(
+    (request.prepaidOffsetByCustomerMonthPairs || [])
+      .map((entry) => {
+        const pairKey = String(entry?.pairKey || "").trim();
+        const prepaidAppliedMajor = Number(entry?.prepaidAppliedMajor || 0);
+        if (!pairKey) return null;
+        if (!Number.isFinite(prepaidAppliedMajor) || prepaidAppliedMajor <= 0) return null;
+        return { pairKey, prepaidAppliedMajor };
+      })
+      .filter((entry): entry is { pairKey: string; prepaidAppliedMajor: number } => !!entry)
+      .reduce((acc, entry) => {
+        acc.set(entry.pairKey, (acc.get(entry.pairKey) || 0) + entry.prepaidAppliedMajor);
+        return acc;
+      }, new Map<string, number>()),
+  ).map(([pairKey, prepaidAppliedMajor]) => ({
+    pairKey,
+    prepaidAppliedMajor: round2(prepaidAppliedMajor),
+  }));
+
+  if (!includes.length) {
+    return {
+      startDate: startDateIso,
+      endDate: endDateIso,
+      targetCurrency: targetCurrency.toUpperCase(),
+      rows: [],
+    };
+  }
+
+  const profile = normalizeProfile(options?.profile);
+  const table = getStripeUpcomingSnapshotsTable(profile);
+  const productsTable = getStripeProductsTable(profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const descriptionTermsSql = includes.map(
+    (_, idx) => `STRPOS(line_description_norm, @desc_${idx}) > 0`,
+  );
+  const productTermsSql = includes.map(
+    (_, idx) => `STRPOS(LOWER(COALESCE(CAST(description AS STRING), CAST(name AS STRING), '')), @desc_${idx}) > 0`,
+  );
+  const excludedPairsCteSql = excludedCustomerMonthPairs.length
+    ? `excluded_pairs AS (
+  SELECT pair_key
+  FROM UNNEST([${excludedCustomerMonthPairs.map((_, idx) => `@excluded_pair_${idx}`).join(", ")}]) AS pair_key
+),`
+    : `excluded_pairs AS (
+  SELECT pair_key
+  FROM UNNEST(CAST([] AS ARRAY<STRING>)) AS pair_key
+),`;
+  const excludedPairsWhereSql = excludedCustomerMonthPairs.length
+    ? `    AND ml.pair_key NOT IN (SELECT pair_key FROM excluded_pairs)`
+    : "";
+  const prepaidOffsetsCteSql = prepaidOffsetByCustomerMonthPairs.length
+    ? `prepaid_offsets AS (
+  SELECT
+    pair_key,
+    CAST(prepaid_applied_major AS FLOAT64) AS prepaid_applied_major
+  FROM UNNEST([${prepaidOffsetByCustomerMonthPairs
+    .map(
+      (_, idx) =>
+        `STRUCT(@prepaid_pair_${idx} AS pair_key, CAST(@prepaid_pair_amount_${idx} AS FLOAT64) AS prepaid_applied_major)`,
+    )
+    .join(", ")}])
+),`
+    : `prepaid_offsets AS (
+  SELECT pair_key, prepaid_applied_major
+  FROM UNNEST(CAST([] AS ARRAY<STRUCT<pair_key STRING, prepaid_applied_major FLOAT64>>))
+),`;
+
+  const query = `
+WITH table_rows AS (
+  SELECT
+    t.snapshot_date,
+    TIMESTAMP_TRUNC(
+      COALESCE(
+        CAST(t.snapshot_ts AS TIMESTAMP),
+        TIMESTAMP(CAST(t.snapshot_date AS DATE))
+      ),
+      MINUTE
+    ) AS snapshot_batch_ts,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_name')), ''),
+      COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)')
+    ) AS customer_name,
+    LOWER(COALESCE(CAST(t.description AS STRING), '')) AS line_description_norm,
+    COALESCE(NULLIF(TRIM(CAST(t.product_id AS STRING)), ''), '(blank)') AS product_id,
+    CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) / 100.0 AS amount_major,
+    CAST(t.period_start AS TIMESTAMP) AS period_start,
+    CAST(t.period_end AS TIMESTAMP) AS period_end
+  FROM \`${table}\` AS t
+  WHERE
+    t.snapshot_date BETWEEN DATE(@start_date) AND DATE(@end_date)
+    AND LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+    AND CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) > 0
+    AND t.period_start IS NOT NULL
+    AND t.period_end IS NOT NULL
+),
+latest_snapshot_by_day AS (
+  SELECT
+    CAST(snapshot_date AS STRING) AS snapshot_date,
+    MAX(snapshot_batch_ts) AS snapshot_batch_ts
+  FROM table_rows
+  GROUP BY snapshot_date
+),
+ai_products AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id
+  FROM \`${productsTable}\`
+  WHERE ${productTermsSql.join(" OR ")}
+),
+${excludedPairsCteSql}
+${prepaidOffsetsCteSql}
+matched_lines_raw AS (
+  SELECT
+    ls.snapshot_date,
+    ls.snapshot_batch_ts,
+    t.customer_id,
+    t.customer_name,
+    t.amount_major,
+    t.line_description_norm,
+    t.period_start,
+    t.period_end,
+    CONCAT(t.customer_id, '|', SUBSTR(ls.snapshot_date, 1, 7)) AS pair_key
+  FROM latest_snapshot_by_day ls
+  JOIN table_rows t
+    ON CAST(t.snapshot_date AS STRING) = ls.snapshot_date
+    AND t.snapshot_batch_ts = ls.snapshot_batch_ts
+  LEFT JOIN ai_products ap
+    ON ap.product_id = t.product_id
+  WHERE ((${descriptionTermsSql.join(" OR ")}) OR ap.product_id IS NOT NULL)
+),
+matched_lines_with_offsets AS (
+  SELECT
+    ml.*,
+    COALESCE(po.prepaid_applied_major, 0.0) AS prepaid_applied_major,
+    SUM(ml.amount_major) OVER (
+      PARTITION BY ml.snapshot_date, ml.customer_id
+      ORDER BY ml.period_start, ml.period_end, ml.amount_major DESC, ml.line_description_norm
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_amount_major,
+    COALESCE(
+      SUM(ml.amount_major) OVER (
+        PARTITION BY ml.snapshot_date, ml.customer_id
+        ORDER BY ml.period_start, ml.period_end, ml.amount_major DESC, ml.line_description_norm
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+      ),
+      0.0
+    ) AS prev_running_amount_major
+  FROM matched_lines_raw ml
+  LEFT JOIN prepaid_offsets po
+    ON po.pair_key = ml.pair_key
+  WHERE TRUE
+${excludedPairsWhereSql}
+),
+line_with_multiplier AS (
+  SELECT
+    snapshot_date,
+    snapshot_batch_ts,
+    customer_id,
+    customer_name,
+    amount_major AS amount_major_without_exclusions,
+    GREATEST(
+      amount_major - GREATEST(LEAST(running_amount_major, prepaid_applied_major) - prev_running_amount_major, 0.0),
+      0.0
+    ) AS amount_major_with_exclusions,
+    CASE
+      WHEN period_end <= period_start THEN 0.0
+      WHEN TIMESTAMP(DATETIME_ADD(DATETIME(period_start, 'UTC'), INTERVAL 1 YEAR), 'UTC') = period_end THEN 1.0
+      WHEN REGEXP_CONTAINS(
+        TRIM(REGEXP_REPLACE(line_description_norm, r'\\s+', ' ')),
+        r'ai tokens'
+      )
+      OR TRIM(REGEXP_REPLACE(line_description_norm, r'\\s+', ' ')) = 'web search and crawl' THEN 12.0
+      WHEN TIMESTAMP(DATETIME_ADD(DATETIME(period_start, 'UTC'), INTERVAL 1 MONTH), 'UTC') = period_end THEN 12.0
+      ELSE 12.0 * SAFE_DIVIDE(
+        CAST(
+          TIMESTAMP_DIFF(
+            TIMESTAMP(DATE_ADD(DATE_TRUNC(DATE(period_start, 'UTC'), MONTH), INTERVAL 1 MONTH), 'UTC'),
+            TIMESTAMP(DATE_TRUNC(DATE(period_start, 'UTC'), MONTH), 'UTC'),
+            MILLISECOND
+          ) AS FLOAT64
+        ),
+        NULLIF(CAST(TIMESTAMP_DIFF(period_end, period_start, MILLISECOND) AS FLOAT64), 0.0)
+      )
+    END AS annualization_multiplier
+  FROM matched_lines_with_offsets
+  WHERE amount_major > 0
+)
+SELECT
+  snapshot_date,
+  CAST(snapshot_batch_ts AS STRING) AS snapshot_timestamp_utc,
+  customer_id,
+  customer_name,
+  ROUND(COALESCE(SUM(amount_major_without_exclusions * annualization_multiplier), 0.0), 2) AS annualized_arr_without_exclusions,
+  ROUND(COALESCE(SUM(amount_major_with_exclusions * annualization_multiplier), 0.0), 2) AS annualized_arr,
+  ROUND(
+    GREATEST(
+      COALESCE(SUM(amount_major_without_exclusions * annualization_multiplier), 0.0)
+      - COALESCE(SUM(amount_major_with_exclusions * annualization_multiplier), 0.0),
+      0.0
+    ),
+    2
+  ) AS annualized_arr_excluded,
+  COUNT(*) AS line_count
+FROM line_with_multiplier
+GROUP BY snapshot_date, snapshot_batch_ts, customer_id, customer_name
+ORDER BY snapshot_date ASC, annualized_arr DESC, customer_id ASC
+`;
+
+  const params: BigQueryNamedParameter[] = [
+    { name: "start_date", type: "STRING", value: startDateIso },
+    { name: "end_date", type: "STRING", value: endDateIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+    ...includes.map((term, idx) => ({ name: `desc_${idx}`, type: "STRING" as const, value: term })),
+    ...excludedCustomerMonthPairs.map((pairKey, idx) => ({
+      name: `excluded_pair_${idx}`,
+      type: "STRING" as const,
+      value: pairKey,
+    })),
+    ...prepaidOffsetByCustomerMonthPairs.flatMap((entry, idx) => [
+      {
+        name: `prepaid_pair_${idx}`,
+        type: "STRING" as const,
+        value: entry.pairKey,
+      },
+      {
+        name: `prepaid_pair_amount_${idx}`,
+        type: "STRING" as const,
+        value: String(entry.prepaidAppliedMajor),
+      },
+    ]),
+  ];
+  const rowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+  const rows: StripeAiSpendDailyAnnualizedCustomerBreakdownRow[] = rowsRaw.map((row) => ({
+    snapshotDate: asString(row.snapshot_date),
+    snapshotTimestampUtc: asString(row.snapshot_timestamp_utc),
+    customerId: asString(row.customer_id) || "(blank)",
+    customerName: asString(row.customer_name) || "(blank)",
+    annualizedArrWithoutExclusions: Math.max(0, asNumber(row.annualized_arr_without_exclusions)),
+    annualizedArr: Math.max(0, asNumber(row.annualized_arr)),
+    annualizedArrExcluded: Math.max(0, asNumber(row.annualized_arr_excluded)),
+    lineCount: asInt(row.line_count),
+  }));
+
+  return {
+    startDate: startDateIso,
+    endDate: endDateIso,
+    targetCurrency: targetCurrency.toUpperCase(),
+    rows,
   };
 }
 
