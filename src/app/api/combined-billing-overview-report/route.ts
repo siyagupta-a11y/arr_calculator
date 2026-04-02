@@ -251,6 +251,70 @@ function previousPeriodRangeForGrain(startDate: string, grain: CombinedGrain) {
   return { startDate: toIsoDateOnly(prevQuarterStart), endDate: toIsoDateOnly(prevQuarterEnd) };
 }
 
+function buildPeriodKeySetForRange(startDate: string, endDate: string, grain: CombinedGrain) {
+  const start = parseIsoDateOnly(startDate);
+  const end = parseIsoDateOnly(endDate);
+  const out = new Set<string>();
+  if (!start || !end || end.getTime() < start.getTime()) return out;
+
+  if (grain === "daily") {
+    for (
+      let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+      cursor.getTime() <= end.getTime();
+      cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), cursor.getUTCDate() + 1))
+    ) {
+      out.add(toIsoDateOnly(cursor));
+    }
+    return out;
+  }
+
+  if (grain === "monthly") {
+    for (
+      let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+      cursor.getTime() <= end.getTime();
+      cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))
+    ) {
+      out.add(`${cursor.getUTCFullYear()}-${String(cursor.getUTCMonth() + 1).padStart(2, "0")}`);
+    }
+    return out;
+  }
+
+  for (
+    let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+    cursor.getTime() <= end.getTime();
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))
+  ) {
+    const quarter = Math.floor(cursor.getUTCMonth() / 3) + 1;
+    out.add(`${cursor.getUTCFullYear()}-Q${quarter}`);
+  }
+  return out;
+}
+
+function sliceReportByPeriodKeys(report: ReportResponse, keepKeys: Set<string>): ReportResponse {
+  const periods = (report.periods || []).filter((period) => keepKeys.has(String(period.key || "")));
+  const rows = (report.rows || []).map((row) => {
+    const nextValuesByPeriod: Record<string, number> = {};
+    for (const period of periods) {
+      const key = String(period.key || "");
+      nextValuesByPeriod[key] = Number(row.valuesByPeriod?.[key] || 0);
+    }
+    return {
+      ...row,
+      valuesByPeriod: nextValuesByPeriod,
+    };
+  });
+  const totalsByPeriod = periods.map((period) => {
+    const key = String(period.key || "");
+    const total = round2(rows.reduce((sum, row) => sum + Number(row.valuesByPeriod?.[key] || 0), 0));
+    return {
+      key,
+      label: String(period.label || key),
+      total,
+    };
+  });
+  return { periods, rows, totalsByPeriod };
+}
+
 function isCloudDeploymentType(value: string) {
   return String(value || "").trim().toLowerCase() === "cloud";
 }
@@ -1173,10 +1237,9 @@ async function buildCombinedBillingOverview(
     },
     { profile: "stripe_arr_correct" },
   );
-  const hubspotMainPromise = generateReport({ startDate, endDate, mode: "contracted", grain });
-  const hubspotBaselinePromise = generateReport({
+  const hubspotExpandedPromise = generateReport({
     startDate: previousRange.startDate,
-    endDate: previousRange.endDate,
+    endDate,
     mode: "contracted",
     grain,
   });
@@ -1194,12 +1257,16 @@ async function buildCombinedBillingOverview(
         { profile: "stripe_arr_correct" },
       ).catch(() => null)
     : Promise.resolve(null);
-  const [hubspotMain, hubspotBaseline, stripeMain, stripeBaseline] = await Promise.all([
-    hubspotMainPromise,
-    hubspotBaselinePromise,
+  const [hubspotExpanded, stripeMain, stripeBaseline] = await Promise.all([
+    hubspotExpandedPromise,
     stripeMainPromise,
     stripeBaselinePromise,
   ]);
+
+  const hubspotMainKeys = buildPeriodKeySetForRange(startDate, endDate, grain);
+  const hubspotBaselineKeys = buildPeriodKeySetForRange(previousRange.startDate, previousRange.endDate, grain);
+  const hubspotMain = sliceReportByPeriodKeys(hubspotExpanded, hubspotMainKeys);
+  const hubspotBaseline = sliceReportByPeriodKeys(hubspotExpanded, hubspotBaselineKeys);
 
   const periodOrder: PeriodRef[] = (hubspotMain.periods || []).map((period) => ({
     key: String(period.key || ""),

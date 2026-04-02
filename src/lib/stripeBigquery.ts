@@ -8054,72 +8054,67 @@ export async function queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFrom
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
-  const snapshotKeyExpr = "CAST(t.snapshot_date AS STRING)";
-  const snapshotTsExpr = buildUpcomingSnapshotTimestampSql("t.snapshot_ts", "t.snapshot_date");
   const descriptionTermsSql = includes.map(
-    (_, idx) => `STRPOS(LOWER(COALESCE(CAST(pl.product_description AS STRING), '')), @desc_${idx}) > 0`,
+    (_, idx) => `STRPOS(line_description_norm, @desc_${idx}) > 0`,
+  );
+  const productTermsSql = includes.map(
+    (_, idx) => `STRPOS(LOWER(COALESCE(CAST(description AS STRING), CAST(name AS STRING), '')), @desc_${idx}) > 0`,
   );
 
   const query = `
 WITH table_rows AS (
   SELECT
-    t.*,
-    ${snapshotKeyExpr} AS snapshot_key,
-    ${snapshotTsExpr} AS snapshot_ts_norm
+    t.snapshot_date,
+    TIMESTAMP_TRUNC(
+      COALESCE(
+        CAST(t.snapshot_ts AS TIMESTAMP),
+        TIMESTAMP(CAST(t.snapshot_date AS DATE))
+      ),
+      MINUTE
+    ) AS snapshot_batch_ts,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    LOWER(COALESCE(CAST(t.description AS STRING), '')) AS line_description_norm,
+    COALESCE(NULLIF(TRIM(CAST(t.product_id AS STRING)), ''), '(blank)') AS product_id,
+    CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) / 100.0 AS amount_major,
+    CAST(t.period_start AS TIMESTAMP) AS period_start,
+    CAST(t.period_end AS TIMESTAMP) AS period_end
   FROM \`${table}\` AS t
   WHERE
-    ${snapshotKeyExpr} BETWEEN @start_date AND @end_date
+    t.snapshot_date BETWEEN DATE(@start_date) AND DATE(@end_date)
     AND LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+    AND CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) > 0
+    AND t.period_start IS NOT NULL
+    AND t.period_end IS NOT NULL
 ),
 latest_snapshot_by_day AS (
   SELECT
-    snapshot_key AS snapshot_date,
+    CAST(snapshot_date AS STRING) AS snapshot_date,
     MAX(snapshot_batch_ts) AS snapshot_batch_ts
-  FROM (
-    SELECT DISTINCT
-      snapshot_key,
-      TIMESTAMP_TRUNC(snapshot_ts_norm, MINUTE) AS snapshot_batch_ts
-    FROM table_rows
-  )
-  GROUP BY snapshot_key
+  FROM table_rows
+  GROUP BY snapshot_date
 ),
-products_lookup AS (
+ai_products AS (
   SELECT
-    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id,
-    COALESCE(
-      NULLIF(TRIM(CAST(description AS STRING)), ''),
-      NULLIF(TRIM(CAST(name AS STRING)), ''),
-      '(blank)'
-    ) AS product_description
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id
   FROM \`${productsTable}\`
+  WHERE ${productTermsSql.join(" OR ")}
 ),
 matched_lines AS (
   SELECT
     ls.snapshot_date,
     ls.snapshot_batch_ts,
-    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
-    CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) / 100.0 AS amount_major,
-    CAST(COALESCE(t.description, '') AS STRING) AS line_description,
-    CAST(t.period_start AS TIMESTAMP) AS period_start,
-    CAST(t.period_end AS TIMESTAMP) AS period_end
+    t.customer_id,
+    t.amount_major,
+    t.line_description_norm,
+    t.period_start,
+    t.period_end
   FROM latest_snapshot_by_day ls
   JOIN table_rows t
-    ON t.snapshot_key = ls.snapshot_date
-    AND (
-      TIMESTAMP_TRUNC(t.snapshot_ts_norm, MINUTE) = ls.snapshot_batch_ts
-      OR (t.snapshot_ts_norm IS NULL AND ls.snapshot_batch_ts IS NULL)
-    )
-  JOIN products_lookup pl
-    ON pl.product_id = COALESCE(
-      NULLIF(TRIM(CAST(t.product_id AS STRING)), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_id')), ''),
-      '(blank)'
-    )
-    AND (${descriptionTermsSql.join(" OR ")})
-  WHERE
-    t.period_start IS NOT NULL
-    AND t.period_end IS NOT NULL
-    AND CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) > 0
+    ON CAST(t.snapshot_date AS STRING) = ls.snapshot_date
+    AND t.snapshot_batch_ts = ls.snapshot_batch_ts
+  LEFT JOIN ai_products ap
+    ON ap.product_id = t.product_id
+  WHERE ((${descriptionTermsSql.join(" OR ")}) OR ap.product_id IS NOT NULL)
 ),
 line_with_multiplier AS (
   SELECT
@@ -8131,10 +8126,10 @@ line_with_multiplier AS (
       WHEN period_end <= period_start THEN 0.0
       WHEN TIMESTAMP(DATETIME_ADD(DATETIME(period_start, 'UTC'), INTERVAL 1 YEAR), 'UTC') = period_end THEN 1.0
       WHEN REGEXP_CONTAINS(
-        TRIM(REGEXP_REPLACE(LOWER(COALESCE(line_description, '')), r'\\s+', ' ')),
+        TRIM(REGEXP_REPLACE(line_description_norm, r'\\s+', ' ')),
         r'ai tokens'
       )
-      OR TRIM(REGEXP_REPLACE(LOWER(COALESCE(line_description, '')), r'\\s+', ' ')) = 'web search and crawl' THEN 12.0
+      OR TRIM(REGEXP_REPLACE(line_description_norm, r'\\s+', ' ')) = 'web search and crawl' THEN 12.0
       WHEN TIMESTAMP(DATETIME_ADD(DATETIME(period_start, 'UTC'), INTERVAL 1 MONTH), 'UTC') = period_end THEN 12.0
       ELSE 12.0 * SAFE_DIVIDE(
         CAST(
