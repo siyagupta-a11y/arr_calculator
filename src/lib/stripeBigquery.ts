@@ -553,6 +553,28 @@ export type StripeAiSpendCurrentMonthFromUpcomingResult = StripeAiSpendResult & 
   snapshotDate: string;
 };
 
+export type StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsRequest = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+  productDescriptionIncludes: string[];
+};
+
+export type StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsPoint = {
+  snapshotDate: string;
+  snapshotTimestampUtc: string;
+  annualizedArr: number;
+  lineCount: number;
+  customerCount: number;
+};
+
+export type StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsResult = {
+  startDate: string;
+  endDate: string;
+  targetCurrency: string;
+  points: StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsPoint[];
+};
+
 export type StripeUpcomingProjectedArrRequest = {
   monthStartDate: string;
   nextMonthStartDate: string;
@@ -7988,6 +8010,176 @@ LIMIT @detail_limit
     topProducts,
     topPrices,
     detailRows,
+  };
+}
+
+export async function queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFromBigQuery(
+  request: StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsResult> {
+  const startDate = parseIsoDateUtc(request.startDate);
+  const endDate = parseIsoDateUtc(request.endDate);
+  if (!startDate || !endDate) {
+    throw new Error("Invalid startDate/endDate");
+  }
+  if (endDate.getTime() < startDate.getTime()) {
+    throw new Error("endDate must be >= startDate");
+  }
+
+  const startDateIso = startDate.toISOString().slice(0, 10);
+  const endDateIso = endDate.toISOString().slice(0, 10);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const includes = Array.from(
+    new Set(
+      (request.productDescriptionIncludes || [])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+
+  if (!includes.length) {
+    return {
+      startDate: startDateIso,
+      endDate: endDateIso,
+      targetCurrency: targetCurrency.toUpperCase(),
+      points: [],
+    };
+  }
+
+  const profile = normalizeProfile(options?.profile);
+  const table = getStripeUpcomingSnapshotsTable(profile);
+  const productsTable = getStripeProductsTable(profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const snapshotKeyExpr = "CAST(t.snapshot_date AS STRING)";
+  const snapshotTsExpr = buildUpcomingSnapshotTimestampSql("t.snapshot_ts", "t.snapshot_date");
+  const descriptionTermsSql = includes.map(
+    (_, idx) => `STRPOS(LOWER(COALESCE(CAST(pl.product_description AS STRING), '')), @desc_${idx}) > 0`,
+  );
+
+  const query = `
+WITH table_rows AS (
+  SELECT
+    t.*,
+    ${snapshotKeyExpr} AS snapshot_key,
+    ${snapshotTsExpr} AS snapshot_ts_norm
+  FROM \`${table}\` AS t
+  WHERE
+    ${snapshotKeyExpr} BETWEEN @start_date AND @end_date
+    AND LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+),
+latest_snapshot_by_day AS (
+  SELECT
+    snapshot_key AS snapshot_date,
+    MAX(snapshot_batch_ts) AS snapshot_batch_ts
+  FROM (
+    SELECT DISTINCT
+      snapshot_key,
+      TIMESTAMP_TRUNC(snapshot_ts_norm, MINUTE) AS snapshot_batch_ts
+    FROM table_rows
+  )
+  GROUP BY snapshot_key
+),
+products_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id,
+    COALESCE(
+      NULLIF(TRIM(CAST(description AS STRING)), ''),
+      NULLIF(TRIM(CAST(name AS STRING)), ''),
+      '(blank)'
+    ) AS product_description
+  FROM \`${productsTable}\`
+),
+matched_lines AS (
+  SELECT
+    ls.snapshot_date,
+    ls.snapshot_batch_ts,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) / 100.0 AS amount_major,
+    CAST(COALESCE(t.description, '') AS STRING) AS line_description,
+    CAST(t.period_start AS TIMESTAMP) AS period_start,
+    CAST(t.period_end AS TIMESTAMP) AS period_end
+  FROM latest_snapshot_by_day ls
+  JOIN table_rows t
+    ON t.snapshot_key = ls.snapshot_date
+    AND (
+      TIMESTAMP_TRUNC(t.snapshot_ts_norm, MINUTE) = ls.snapshot_batch_ts
+      OR (t.snapshot_ts_norm IS NULL AND ls.snapshot_batch_ts IS NULL)
+    )
+  JOIN products_lookup pl
+    ON pl.product_id = COALESCE(
+      NULLIF(TRIM(CAST(t.product_id AS STRING)), ''),
+      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_id')), ''),
+      '(blank)'
+    )
+    AND (${descriptionTermsSql.join(" OR ")})
+  WHERE
+    t.period_start IS NOT NULL
+    AND t.period_end IS NOT NULL
+    AND CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) > 0
+),
+line_with_multiplier AS (
+  SELECT
+    snapshot_date,
+    snapshot_batch_ts,
+    customer_id,
+    amount_major,
+    CASE
+      WHEN period_end <= period_start THEN 0.0
+      WHEN TIMESTAMP(DATETIME_ADD(DATETIME(period_start, 'UTC'), INTERVAL 1 YEAR), 'UTC') = period_end THEN 1.0
+      WHEN REGEXP_CONTAINS(
+        TRIM(REGEXP_REPLACE(LOWER(COALESCE(line_description, '')), r'\\s+', ' ')),
+        r'ai tokens'
+      )
+      OR TRIM(REGEXP_REPLACE(LOWER(COALESCE(line_description, '')), r'\\s+', ' ')) = 'web search and crawl' THEN 12.0
+      WHEN TIMESTAMP(DATETIME_ADD(DATETIME(period_start, 'UTC'), INTERVAL 1 MONTH), 'UTC') = period_end THEN 12.0
+      ELSE 12.0 * SAFE_DIVIDE(
+        CAST(
+          TIMESTAMP_DIFF(
+            TIMESTAMP(DATE_ADD(DATE_TRUNC(DATE(period_start, 'UTC'), MONTH), INTERVAL 1 MONTH), 'UTC'),
+            TIMESTAMP(DATE_TRUNC(DATE(period_start, 'UTC'), MONTH), 'UTC'),
+            MILLISECOND
+          ) AS FLOAT64
+        ),
+        NULLIF(CAST(TIMESTAMP_DIFF(period_end, period_start, MILLISECOND) AS FLOAT64), 0.0)
+      )
+    END AS annualization_multiplier
+  FROM matched_lines
+)
+SELECT
+  snapshot_date,
+  CAST(snapshot_batch_ts AS STRING) AS snapshot_timestamp_utc,
+  ROUND(COALESCE(SUM(amount_major * annualization_multiplier), 0.0), 2) AS annualized_arr,
+  COUNT(*) AS line_count,
+  COUNT(DISTINCT customer_id) AS customer_count
+FROM line_with_multiplier
+GROUP BY snapshot_date, snapshot_batch_ts
+ORDER BY snapshot_date ASC
+`;
+
+  const params: BigQueryNamedParameter[] = [
+    { name: "start_date", type: "STRING", value: startDateIso },
+    { name: "end_date", type: "STRING", value: endDateIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+    ...includes.map((term, idx) => ({ name: `desc_${idx}`, type: "STRING" as const, value: term })),
+  ];
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
+  const points: StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsPoint[] = rows.map((row) => ({
+    snapshotDate: asString(row.snapshot_date),
+    snapshotTimestampUtc: asString(row.snapshot_timestamp_utc),
+    annualizedArr: Math.max(0, asNumber(row.annualized_arr)),
+    lineCount: asInt(row.line_count),
+    customerCount: asInt(row.customer_count),
+  }));
+
+  return {
+    startDate: startDateIso,
+    endDate: endDateIso,
+    targetCurrency: targetCurrency.toUpperCase(),
+    points,
   };
 }
 

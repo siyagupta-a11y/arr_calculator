@@ -4,6 +4,7 @@ import type { ReportResponse, ReportRow } from "@/lib/types";
 import {
   queryStripeAiSpendFromBigQuery,
   queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery,
+  queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFromBigQuery,
   queryStripeBillingOverviewFromBigQuery,
   type StripeBillingOverviewPoint,
   type StripeBillingOverviewCustomerArrRow,
@@ -1007,6 +1008,45 @@ async function buildCombinedBillingOverview(
       }).then((report) => buildCombinedLtvUserCounts(report.periods || [], report.rows || [], "monthly"))
     : Promise.resolve({ activeByPeriod: new Map<string, number>(), logoChurnByPeriod: new Map<string, LogoChurnCounts>() });
   const aiSpendSeriesPromise = (async () => {
+    if (grain === "daily") {
+      const dailySnapshotSeries = await queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFromBigQuery(
+        {
+          startDate: previousRange.startDate,
+          endDate,
+          targetCurrency,
+          productDescriptionIncludes: AI_SPEND_UPCOMING_PRODUCT_TERMS,
+        },
+        { profile: "stripe_arr_correct" },
+      );
+
+      const points = (dailySnapshotSeries.points || []).map((point) => {
+        const annualizedArr = Number(point.annualizedArr || 0);
+        const dailyRevenueEquivalent = round2(annualizedArr / 365);
+        return {
+          key: String(point.snapshotDate || ""),
+          label: String(point.snapshotDate || ""),
+          periodStart: String(point.snapshotDate || ""),
+          periodEnd: String(point.snapshotDate || ""),
+          revenue: dailyRevenueEquivalent,
+          lineCount: Math.max(0, Math.round(Number(point.lineCount || 0))),
+          customerCount: Math.max(0, Math.round(Number(point.customerCount || 0))),
+        };
+      });
+
+      return {
+        startDate: previousRange.startDate,
+        endDate,
+        grain,
+        targetCurrency: dailySnapshotSeries.targetCurrency || String(targetCurrency || "USD").toUpperCase(),
+        totalRevenue: round2(points.reduce((sum, point) => sum + Number(point.revenue || 0), 0)),
+        points,
+        topCustomers: [],
+        topProducts: [],
+        topPrices: [],
+        detailRows: [],
+      };
+    }
+
     const exclusions = await resolveEnterprisePrepaidAiSpendExclusions({
       startDate,
       endDate,
