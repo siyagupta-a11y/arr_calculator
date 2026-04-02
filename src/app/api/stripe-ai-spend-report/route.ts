@@ -6,6 +6,7 @@ import {
 import {
   queryStripeAiSpendFromBigQuery,
   queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery,
+  queryStripeLatestUpcomingSnapshotDateFromBigQuery,
   type StripeAiSpendGrain,
   type StripeAiSpendRequest,
 } from "@/lib/stripeBigquery";
@@ -121,8 +122,15 @@ async function validateAndRun(body: Partial<ApiBody>) {
   if (useUpcomingCurrentMonthSource) {
     const now = new Date();
     const monthStartDate = toIsoDateOnlyUtc(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0)));
+    const latestSnapshotDate = await getOrSetCache(
+      "api:stripe-ai-spend:latest-upcoming-snapshot-date",
+      CACHE_TTL_MS,
+      () => queryStripeLatestUpcomingSnapshotDateFromBigQuery({ profile: "stripe_arr_correct" }),
+    ).catch(() => "");
+    const carryForwardAsOfDate = isIsoDate(latestSnapshotDate) ? latestSnapshotDate : toIsoDateOnlyUtc(now);
     const carryForwardKey = `api:stripe-ai-spend:carry-forward:${stableStringify({
       monthStartDate,
+      asOfDate: carryForwardAsOfDate,
       targetCurrency: payload.targetCurrency,
     })}`;
     const carryForward = await getOrSetCache(
@@ -131,7 +139,7 @@ async function validateAndRun(body: Partial<ApiBody>) {
       () =>
         resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOffsets({
           currentMonthStartDate: monthStartDate,
-          asOfDate: toIsoDateOnlyUtc(now),
+          asOfDate: carryForwardAsOfDate,
           targetCurrency: payload.targetCurrency,
         }),
     ).catch(() => ({

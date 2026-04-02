@@ -6,6 +6,7 @@ import {
   queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery,
   queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFromBigQuery,
   queryStripeBillingOverviewFromBigQuery,
+  queryStripeLatestUpcomingSnapshotDateFromBigQuery,
   type StripeBillingOverviewPoint,
   type StripeBillingOverviewCustomerArrRow,
 } from "@/lib/stripeBigquery";
@@ -1193,17 +1194,26 @@ async function buildCombinedBillingOverview(
     const effectiveCurrentMonthEndIso =
       endDateObj && endDateObj.getTime() < nowUtc.getTime() ? endDate : todayIso;
     if (effectiveCurrentMonthEndIso < currentMonthStartIso) return historical;
+    const latestSnapshotDateForCarryForward = await getOrSetCache(
+      "api:combined-billing-overview:latest-upcoming-snapshot-date",
+      CACHE_TTL_MS,
+      () => queryStripeLatestUpcomingSnapshotDateFromBigQuery({ profile: "stripe_arr_correct" }),
+    ).catch(() => "");
+    const carryForwardAsOfDate = isIsoDate(latestSnapshotDateForCarryForward)
+      ? latestSnapshotDateForCarryForward
+      : todayIso;
 
     const carryForward = await getOrSetCache(
       `api:combined-billing-overview:ai-spend-carry-forward:${stableStringify({
         monthStartDate: currentMonthStartIso,
+        asOfDate: carryForwardAsOfDate,
         targetCurrency,
       })}`,
       CACHE_TTL_MS,
       () =>
         resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOffsets({
           currentMonthStartDate: currentMonthStartIso,
-          asOfDate: todayIso,
+          asOfDate: carryForwardAsOfDate,
           targetCurrency,
         }),
     ).catch(() => ({

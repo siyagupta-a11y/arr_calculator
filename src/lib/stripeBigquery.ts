@@ -7549,6 +7549,50 @@ LEFT JOIN net_customer_totals nct
   };
 }
 
+export async function queryStripeLatestUpcomingSnapshotDateFromBigQuery(
+  options?: StripeBigQueryOptions,
+): Promise<string> {
+  const profile = normalizeProfile(options?.profile);
+  const table = getStripeUpcomingSnapshotsTable(profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const snapshotKeyExpr = "CAST(t.snapshot_date AS STRING)";
+  const snapshotTsExpr = buildUpcomingSnapshotTimestampSql("t.snapshot_ts", "t.snapshot_date");
+
+  const rows = await runBigQueryQueryRows(
+    accessToken,
+    projectId,
+    location,
+    `
+WITH table_rows AS (
+  SELECT
+    ${snapshotKeyExpr} AS snapshot_key,
+    ${snapshotTsExpr} AS snapshot_ts
+  FROM \`${table}\` AS t
+),
+latest_snapshot AS (
+  SELECT snapshot_key, snapshot_batch_ts
+  FROM (
+    SELECT DISTINCT
+      snapshot_key,
+      TIMESTAMP_TRUNC(snapshot_ts, MINUTE) AS snapshot_batch_ts
+    FROM table_rows
+  )
+  ORDER BY snapshot_batch_ts DESC, snapshot_key DESC
+  LIMIT 1
+)
+SELECT snapshot_key AS snapshot_date
+FROM latest_snapshot
+`,
+    [],
+  );
+
+  return asString(rows[0]?.snapshot_date);
+}
+
 export async function queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery(
   request: StripeAiSpendCurrentMonthFromUpcomingRequest,
   options?: StripeBigQueryOptions,
