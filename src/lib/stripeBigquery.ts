@@ -568,7 +568,9 @@ export type StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsRequest = {
 export type StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsPoint = {
   snapshotDate: string;
   snapshotTimestampUtc: string;
+  annualizedArrWithoutExclusions: number;
   annualizedArr: number;
+  annualizedArrExcluded: number;
   lineCount: number;
   customerCount: number;
 };
@@ -8200,30 +8202,16 @@ matched_lines_with_offsets AS (
   WHERE TRUE
 ${excludedPairsWhereSql}
 ),
-matched_lines AS (
-  SELECT
-    snapshot_date,
-    snapshot_batch_ts,
-    customer_id,
-    line_description_norm,
-    period_start,
-    period_end,
-    GREATEST(
-      amount_major - GREATEST(LEAST(running_amount_major, prepaid_applied_major) - prev_running_amount_major, 0.0),
-      0.0
-    ) AS amount_major
-  FROM matched_lines_with_offsets
-  WHERE GREATEST(
-    amount_major - GREATEST(LEAST(running_amount_major, prepaid_applied_major) - prev_running_amount_major, 0.0),
-    0.0
-  ) > 0
-),
 line_with_multiplier AS (
   SELECT
     snapshot_date,
     snapshot_batch_ts,
     customer_id,
-    amount_major,
+    amount_major AS amount_major_without_exclusions,
+    GREATEST(
+      amount_major - GREATEST(LEAST(running_amount_major, prepaid_applied_major) - prev_running_amount_major, 0.0),
+      0.0
+    ) AS amount_major_with_exclusions,
     CASE
       WHEN period_end <= period_start THEN 0.0
       WHEN TIMESTAMP(DATETIME_ADD(DATETIME(period_start, 'UTC'), INTERVAL 1 YEAR), 'UTC') = period_end THEN 1.0
@@ -8244,12 +8232,22 @@ line_with_multiplier AS (
         NULLIF(CAST(TIMESTAMP_DIFF(period_end, period_start, MILLISECOND) AS FLOAT64), 0.0)
       )
     END AS annualization_multiplier
-  FROM matched_lines
+  FROM matched_lines_with_offsets
+  WHERE amount_major > 0
 )
 SELECT
   snapshot_date,
   CAST(snapshot_batch_ts AS STRING) AS snapshot_timestamp_utc,
-  ROUND(COALESCE(SUM(amount_major * annualization_multiplier), 0.0), 2) AS annualized_arr,
+  ROUND(COALESCE(SUM(amount_major_without_exclusions * annualization_multiplier), 0.0), 2) AS annualized_arr_without_exclusions,
+  ROUND(COALESCE(SUM(amount_major_with_exclusions * annualization_multiplier), 0.0), 2) AS annualized_arr,
+  ROUND(
+    GREATEST(
+      COALESCE(SUM(amount_major_without_exclusions * annualization_multiplier), 0.0)
+      - COALESCE(SUM(amount_major_with_exclusions * annualization_multiplier), 0.0),
+      0.0
+    ),
+    2
+  ) AS annualized_arr_excluded,
   COUNT(*) AS line_count,
   COUNT(DISTINCT customer_id) AS customer_count
 FROM line_with_multiplier
@@ -8284,7 +8282,9 @@ ORDER BY snapshot_date ASC
   const points: StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsPoint[] = rows.map((row) => ({
     snapshotDate: asString(row.snapshot_date),
     snapshotTimestampUtc: asString(row.snapshot_timestamp_utc),
+    annualizedArrWithoutExclusions: Math.max(0, asNumber(row.annualized_arr_without_exclusions)),
     annualizedArr: Math.max(0, asNumber(row.annualized_arr)),
+    annualizedArrExcluded: Math.max(0, asNumber(row.annualized_arr_excluded)),
     lineCount: asInt(row.line_count),
     customerCount: asInt(row.customer_count),
   }));

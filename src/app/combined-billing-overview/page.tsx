@@ -142,6 +142,15 @@ type CombinedBillingOverviewReportResponse = {
   cacCadNotice: string | null;
   cacCadCurrency: string;
   aiSpendExcludedEnterprisePrepaidCustomers?: AiSpendExcludedEnterprisePrepaidCustomer[];
+  aiSpendDailyPointBreakdown?: Array<{
+    key: string;
+    label: string;
+    periodStart: string;
+    periodEnd: string;
+    aiSpendWithoutExclusions: number;
+    aiSpendWithExclusions: number;
+    aiSpendExcluded: number;
+  }>;
 };
 
 type RetentionSource = "combined" | "salesled" | "selfserve";
@@ -188,6 +197,15 @@ type CombinedOverviewData = {
   cacCadPoints: CacPoint[];
   cacCadCurrency: string;
   aiSpendExcludedEnterprisePrepaidCustomers: AiSpendExcludedEnterprisePrepaidCustomer[];
+  aiSpendDailyPointBreakdown: Array<{
+    key: string;
+    label: string;
+    periodStart: string;
+    periodEnd: string;
+    aiSpendWithoutExclusions: number;
+    aiSpendWithExclusions: number;
+    aiSpendExcluded: number;
+  }>;
 };
 
 function round2(n: number) {
@@ -2757,6 +2775,7 @@ export default function CombinedBillingOverviewPage() {
         cacCadPoints: overview.cacCadPoints || [],
         cacCadCurrency: String(overview.cacCadCurrency || "CAD").toUpperCase(),
         aiSpendExcludedEnterprisePrepaidCustomers: overview.aiSpendExcludedEnterprisePrepaidCustomers || [],
+        aiSpendDailyPointBreakdown: overview.aiSpendDailyPointBreakdown || [],
       }));
 
       setLoading(false);
@@ -2827,6 +2846,8 @@ export default function CombinedBillingOverviewPage() {
                 overviewWithCac.aiSpendExcludedEnterprisePrepaidCustomers ||
                 prev.aiSpendExcludedEnterprisePrepaidCustomers ||
                 [],
+              aiSpendDailyPointBreakdown:
+                overviewWithCac.aiSpendDailyPointBreakdown || prev.aiSpendDailyPointBreakdown || [],
             };
           });
         } catch (e: unknown) {
@@ -2867,6 +2888,34 @@ export default function CombinedBillingOverviewPage() {
     () => data?.aiSpendExcludedEnterprisePrepaidCustomers ?? [],
     [data],
   );
+  const aiSpendDailyPointBreakdownByKey = useMemo(() => {
+    const out = new Map<
+      string,
+      {
+        key: string;
+        label: string;
+        periodStart: string;
+        periodEnd: string;
+        aiSpendWithoutExclusions: number;
+        aiSpendWithExclusions: number;
+        aiSpendExcluded: number;
+      }
+    >();
+    for (const row of data?.aiSpendDailyPointBreakdown || []) {
+      const key = String(row.key || row.periodStart || "").trim();
+      if (!key) continue;
+      out.set(key, {
+        key,
+        label: String(row.label || key),
+        periodStart: String(row.periodStart || key),
+        periodEnd: String(row.periodEnd || key),
+        aiSpendWithoutExclusions: round2(Number(row.aiSpendWithoutExclusions || 0)),
+        aiSpendWithExclusions: round2(Number(row.aiSpendWithExclusions || 0)),
+        aiSpendExcluded: round2(Number(row.aiSpendExcluded || 0)),
+      });
+    }
+    return out;
+  }, [data]);
   const aiSpendExcludedByMonth = useMemo(() => {
     const out = new Map<string, AiSpendExcludedEnterprisePrepaidCustomer[]>();
     for (const row of aiSpendExcludedEnterprisePrepaidCustomers) {
@@ -2881,6 +2930,10 @@ export default function CombinedBillingOverviewPage() {
     if (!selectedAiSpendExclusionPoint) return [];
     return aiSpendExcludedByMonth.get(selectedAiSpendExclusionPoint.monthKey) || [];
   }, [aiSpendExcludedByMonth, selectedAiSpendExclusionPoint]);
+  const selectedAiSpendPointBreakdown = useMemo(() => {
+    if (!selectedAiSpendExclusionPoint) return null;
+    return aiSpendDailyPointBreakdownByKey.get(selectedAiSpendExclusionPoint.periodStart) || null;
+  }, [aiSpendDailyPointBreakdownByKey, selectedAiSpendExclusionPoint]);
   const handleGroupedSourcePointClick = useCallback(
     (payload: GroupedSourcePointClickPayload, chartTitle: string) => {
       if (lineChartMode !== "source" || grain !== "daily") return;
@@ -3192,44 +3245,67 @@ export default function CombinedBillingOverviewPage() {
                   <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>
                     No AI point selected.
                   </p>
-                ) : selectedAiSpendExclusions.length === 0 ? (
-                  <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.7rem", marginBottom: 0 }}>
-                    No exclusions for {selectedAiSpendExclusionPoint.pointLabel} ({selectedAiSpendExclusionPoint.monthKey}).
-                  </p>
                 ) : (
                   <>
+                    <div className="stripe-ui__stats" style={{ marginTop: "0.75rem" }}>
+                      <div className="stripe-ui__stat">
+                        <p className="stripe-ui__stat-label">AI spend without exclusions</p>
+                        <p className="stripe-ui__stat-value">
+                          {formatMoney(selectedAiSpendPointBreakdown?.aiSpendWithoutExclusions || 0, currency)}
+                        </p>
+                      </div>
+                      <div className="stripe-ui__stat">
+                        <p className="stripe-ui__stat-label">AI spend with exclusions</p>
+                        <p className="stripe-ui__stat-value">
+                          {formatMoney(selectedAiSpendPointBreakdown?.aiSpendWithExclusions || 0, currency)}
+                        </p>
+                      </div>
+                      <div className="stripe-ui__stat">
+                        <p className="stripe-ui__stat-label">Total excluded</p>
+                        <p className="stripe-ui__stat-value">
+                          {formatMoney(selectedAiSpendPointBreakdown?.aiSpendExcluded || 0, currency)}
+                        </p>
+                      </div>
+                    </div>
                     <p className="stripe-ui__hint" style={{ marginTop: "0.7rem", marginBottom: "0.5rem" }}>
                       Selected from {selectedAiSpendExclusionPoint.chartTitle}: {selectedAiSpendExclusionPoint.pointLabel} (
                       {selectedAiSpendExclusionPoint.periodStart}), month key {selectedAiSpendExclusionPoint.monthKey}.
                     </p>
-                    <div className="stripe-ui__table-wrap" style={{ maxHeight: "20rem", overflow: "auto" }}>
-                      <table className="stripe-ui__table" aria-label="AI spend exclusions for selected daily point">
-                        <thead>
-                          <tr>
-                            <th>Customer ID</th>
-                            <th>Customer Name</th>
-                            <th>Email</th>
-                            <th className="stripe-ui__num">Prepaid Applied</th>
-                            <th className="stripe-ui__num">Available Credit</th>
-                            <th>As Of Date</th>
-                            <th>Accounts</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedAiSpendExclusions.map((row, idx) => (
-                            <tr key={`${selectedAiSpendExclusionPoint.monthKey}-${row.customerId}-${row.asOfDate}-${idx}`}>
-                              <td>{row.customerId || "(blank)"}</td>
-                              <td>{row.customerName || "(blank)"}</td>
-                              <td>{row.customerEmail || "(blank)"}</td>
-                              <td className="stripe-ui__num">{formatMoney(row.prepaidAppliedMajor || 0, currency)}</td>
-                              <td className="stripe-ui__num">{formatMoney(row.availableCreditMajor || 0, currency)}</td>
-                              <td>{row.asOfDate || "(blank)"}</td>
-                              <td>{(row.accountNames || []).length ? row.accountNames.join(", ") : "(none)"}</td>
+                    {selectedAiSpendExclusions.length === 0 ? (
+                      <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.2rem", marginBottom: 0 }}>
+                        No exclusions for {selectedAiSpendExclusionPoint.pointLabel} (
+                        {selectedAiSpendExclusionPoint.monthKey}).
+                      </p>
+                    ) : (
+                      <div className="stripe-ui__table-wrap" style={{ maxHeight: "20rem", overflow: "auto" }}>
+                        <table className="stripe-ui__table" aria-label="AI spend exclusions for selected daily point">
+                          <thead>
+                            <tr>
+                              <th>Customer ID</th>
+                              <th>Customer Name</th>
+                              <th>Email</th>
+                              <th className="stripe-ui__num">Prepaid Applied</th>
+                              <th className="stripe-ui__num">Available Credit</th>
+                              <th>As Of Date</th>
+                              <th>Accounts</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                          </thead>
+                          <tbody>
+                            {selectedAiSpendExclusions.map((row, idx) => (
+                              <tr key={`${selectedAiSpendExclusionPoint.monthKey}-${row.customerId}-${row.asOfDate}-${idx}`}>
+                                <td>{row.customerId || "(blank)"}</td>
+                                <td>{row.customerName || "(blank)"}</td>
+                                <td>{row.customerEmail || "(blank)"}</td>
+                                <td className="stripe-ui__num">{formatMoney(row.prepaidAppliedMajor || 0, currency)}</td>
+                                <td className="stripe-ui__num">{formatMoney(row.availableCreditMajor || 0, currency)}</td>
+                                <td>{row.asOfDate || "(blank)"}</td>
+                                <td>{(row.accountNames || []).length ? row.accountNames.join(", ") : "(none)"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </>
                 )}
               </section>

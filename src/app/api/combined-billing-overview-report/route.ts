@@ -124,6 +124,16 @@ type AiSpendSeriesBuildResult = {
   initialPrevMrr: number;
 };
 
+type AiSpendDailyPointBreakdown = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  aiSpendWithoutExclusions: number;
+  aiSpendWithExclusions: number;
+  aiSpendExcluded: number;
+};
+
 type QuickBooksSalesMarketingCostPoint = {
   key: string;
   label: string;
@@ -1064,6 +1074,7 @@ async function buildCombinedBillingOverview(
     startDateObj.getTime() < nextMonthStartObj.getTime();
   const shouldComputeLtv = grain === "monthly";
   let aiSpendExcludedEnterprisePrepaidCustomers: EnterprisePrepaidAiSpendExclusionRow[] = [];
+  let aiSpendDailyPointBreakdown: AiSpendDailyPointBreakdown[] = [];
   const ltvCombinedUsersPromise: Promise<CombinedLtvUserCounts> = shouldComputeLtv
     ? generateCombinedAllSubsReport({
         startDate: previousRange.startDate,
@@ -1122,6 +1133,21 @@ async function buildCombinedBillingOverview(
           revenue: dailyRevenueEquivalent,
           lineCount: Math.max(0, Math.round(Number(point.lineCount || 0))),
           customerCount: Math.max(0, Math.round(Number(point.customerCount || 0))),
+        };
+      });
+      aiSpendDailyPointBreakdown = (dailySnapshotSeries.points || []).map((point) => {
+        const key = String(point.snapshotDate || "");
+        const withExclusions = round2(Number(point.annualizedArr || 0));
+        const withoutExclusions = round2(Number(point.annualizedArrWithoutExclusions || 0));
+        const excluded = round2(Number(point.annualizedArrExcluded || Math.max(withoutExclusions - withExclusions, 0)));
+        return {
+          key,
+          label: key,
+          periodStart: key,
+          periodEnd: key,
+          aiSpendWithoutExclusions: withoutExclusions,
+          aiSpendWithExclusions: withExclusions,
+          aiSpendExcluded: excluded,
         };
       });
 
@@ -1837,6 +1863,7 @@ async function buildCombinedBillingOverview(
     cacCadNotice,
     cacCadCurrency,
     aiSpendExcludedEnterprisePrepaidCustomers,
+    aiSpendDailyPointBreakdown,
   };
 }
 
