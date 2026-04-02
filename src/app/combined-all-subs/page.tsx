@@ -412,6 +412,9 @@ export default function CombinedAllSubsPage() {
             <Link href="/tofu" className="stripe-ui__hero-link">
               Open TOFU
             </Link>
+            <Link href="/ndr-gdr" className="stripe-ui__hero-link">
+              Open NDR/GDR
+            </Link>
           </div>
         </div>
       </section>
