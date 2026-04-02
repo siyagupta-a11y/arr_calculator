@@ -1479,41 +1479,52 @@ async function buildCombinedBillingOverview(
     arrPerEmployee: 0,
     employeeNames: [],
   }));
-  try {
-    const snapshotDateByKey = new Map<string, string>();
-    for (const point of linePoints) {
-      const key = canonicalHubPeriodKey(point.key, grain) || point.key;
-      const snapshotDate = periodEndIsoFromKey(key, grain);
-      if (snapshotDate) snapshotDateByKey.set(key, snapshotDate);
+  if (grain !== "monthly") {
+    arrPerEmployeeNotice =
+      "ARR per employee currently supports monthly grain only. Switch Time grain to Monthly to load ARR/FTE.";
+    arrPerEmployeePoints = [];
+  } else {
+    try {
+      const snapshotDateByKey = new Map<string, string>();
+      for (const point of linePoints) {
+        const key = canonicalHubPeriodKey(point.key, grain) || point.key;
+        const snapshotDate = periodEndIsoFromKey(key, grain);
+        if (snapshotDate) snapshotDateByKey.set(key, snapshotDate);
+      }
+      const snapshotDates = Array.from(new Set(Array.from(snapshotDateByKey.values()).filter(Boolean))).sort();
+      const rosterByDate = await getOrSetCache(
+        `api:combined-billing-overview:bamboo-roster:${stableStringify(snapshotDates)}`,
+        Math.max(CACHE_TTL_MS, 5 * 60 * 1000),
+        () => queryBambooHrFullTimeRosterByDate(snapshotDates),
+      );
+      arrPerEmployeePoints = linePoints.map((point) => {
+        const key = canonicalHubPeriodKey(point.key, grain) || point.key;
+        const snapshotDate = snapshotDateByKey.get(key) || "";
+        const rosterSnapshot = rosterByDate.get(snapshotDate);
+        const fullTimeEmployees = Math.max(0, Math.round(Number(rosterSnapshot?.count || 0)));
+        const employeeNames = rosterSnapshot?.employeeNames || [];
+        const arr = round2(point.arr || 0);
+        const arrPerEmployee = fullTimeEmployees > 0 ? round2(arr / fullTimeEmployees) : 0;
+        return {
+          key: point.key,
+          label: point.label,
+          periodStart: point.periodStart,
+          periodEnd: point.periodEnd,
+          arr,
+          fullTimeEmployees,
+          arrPerEmployee,
+          employeeNames,
+        };
+      });
+      if (!arrPerEmployeePoints.some((point) => point.fullTimeEmployees > 0)) {
+        arrPerEmployeeNotice = "BambooHR returned no full-time employee counts for this range.";
+      }
+    } catch (error: unknown) {
+      arrPerEmployeeNotice = `ARR per employee unavailable: ${conciseErrorMessage(
+        error,
+        "BambooHR query failed.",
+      )}`;
     }
-    const rosterByDate = await queryBambooHrFullTimeRosterByDate(Array.from(snapshotDateByKey.values()));
-    arrPerEmployeePoints = linePoints.map((point) => {
-      const key = canonicalHubPeriodKey(point.key, grain) || point.key;
-      const snapshotDate = snapshotDateByKey.get(key) || "";
-      const rosterSnapshot = rosterByDate.get(snapshotDate);
-      const fullTimeEmployees = Math.max(0, Math.round(Number(rosterSnapshot?.count || 0)));
-      const employeeNames = rosterSnapshot?.employeeNames || [];
-      const arr = round2(point.arr || 0);
-      const arrPerEmployee = fullTimeEmployees > 0 ? round2(arr / fullTimeEmployees) : 0;
-      return {
-        key: point.key,
-        label: point.label,
-        periodStart: point.periodStart,
-        periodEnd: point.periodEnd,
-        arr,
-        fullTimeEmployees,
-        arrPerEmployee,
-        employeeNames,
-      };
-    });
-    if (!arrPerEmployeePoints.some((point) => point.fullTimeEmployees > 0)) {
-      arrPerEmployeeNotice = "BambooHR returned no full-time employee counts for this range.";
-    }
-  } catch (error: unknown) {
-    arrPerEmployeeNotice = `ARR per employee unavailable: ${conciseErrorMessage(
-      error,
-      "BambooHR query failed.",
-    )}`;
   }
 
   const currentMrr = points.length ? points[points.length - 1].mrrEnd : 0;
