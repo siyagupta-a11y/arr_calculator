@@ -504,6 +504,21 @@ function ensurePlanDefaults(
   }
 }
 
+function applyNonZeroPaygoFallback(
+  periods: Array<{ key: string; label: string }>,
+  valuesByPeriod: Record<string, number>,
+  plansByPeriod: Record<string, CombinedAllSubsPlan>,
+) {
+  for (const period of periods) {
+    const key = period.key;
+    const value = round2(Number(valuesByPeriod[key] || 0));
+    const plan = normalizeCombinedPlan(plansByPeriod[key] || "free");
+    if (value > 0 && plan === "free") {
+      plansByPeriod[key] = "pay_as_you_go";
+    }
+  }
+}
+
 export async function generateCombinedAllSubsReport(
   request: CombinedAllSubsRequest,
 ): Promise<CombinedAllSubsResponse> {
@@ -684,6 +699,9 @@ export async function generateCombinedAllSubsReport(
     row.hubspotPlansByPeriod = row.hubspotPlansByPeriod || {};
     row.stripePlansByPeriod = row.stripePlansByPeriod || {};
     row.plansByPeriod = row.plansByPeriod || {};
+    applyNonZeroPaygoFallback(periods, row.hubspotValuesByPeriod, row.hubspotPlansByPeriod);
+    applyNonZeroPaygoFallback(periods, row.stripeValuesByPeriod, row.stripePlansByPeriod);
+    applyNonZeroPaygoFallback(periods, row.valuesByPeriod, row.plansByPeriod);
     ensurePlanDefaults(periods, row.hubspotPlansByPeriod);
     ensurePlanDefaults(periods, row.stripePlansByPeriod);
     ensurePlanDefaults(periods, row.plansByPeriod);
