@@ -558,6 +558,11 @@ export type StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsRequest = {
   endDate: string;
   targetCurrency: string;
   productDescriptionIncludes: string[];
+  excludeCustomerMonthPairs?: string[];
+  prepaidOffsetByCustomerMonthPairs?: Array<{
+    pairKey: string;
+    prepaidAppliedMajor: number;
+  }>;
 };
 
 export type StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsPoint = {
@@ -8036,6 +8041,31 @@ export async function queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFrom
         .filter(Boolean),
     ),
   );
+  const excludedCustomerMonthPairs = Array.from(
+    new Set(
+      (request.excludeCustomerMonthPairs || [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const prepaidOffsetByCustomerMonthPairs = Array.from(
+    (request.prepaidOffsetByCustomerMonthPairs || [])
+      .map((entry) => {
+        const pairKey = String(entry?.pairKey || "").trim();
+        const prepaidAppliedMajor = Number(entry?.prepaidAppliedMajor || 0);
+        if (!pairKey) return null;
+        if (!Number.isFinite(prepaidAppliedMajor) || prepaidAppliedMajor <= 0) return null;
+        return { pairKey, prepaidAppliedMajor };
+      })
+      .filter((entry): entry is { pairKey: string; prepaidAppliedMajor: number } => !!entry)
+      .reduce((acc, entry) => {
+        acc.set(entry.pairKey, (acc.get(entry.pairKey) || 0) + entry.prepaidAppliedMajor);
+        return acc;
+      }, new Map<string, number>()),
+  ).map(([pairKey, prepaidAppliedMajor]) => ({
+    pairKey,
+    prepaidAppliedMajor: round2(prepaidAppliedMajor),
+  }));
 
   if (!includes.length) {
     return {
@@ -8060,6 +8090,34 @@ export async function queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFrom
   const productTermsSql = includes.map(
     (_, idx) => `STRPOS(LOWER(COALESCE(CAST(description AS STRING), CAST(name AS STRING), '')), @desc_${idx}) > 0`,
   );
+  const excludedPairsCteSql = excludedCustomerMonthPairs.length
+    ? `excluded_pairs AS (
+  SELECT pair_key
+  FROM UNNEST([${excludedCustomerMonthPairs.map((_, idx) => `@excluded_pair_${idx}`).join(", ")}]) AS pair_key
+),`
+    : `excluded_pairs AS (
+  SELECT pair_key
+  FROM UNNEST(CAST([] AS ARRAY<STRING>)) AS pair_key
+),`;
+  const excludedPairsWhereSql = excludedCustomerMonthPairs.length
+    ? `    AND ml.pair_key NOT IN (SELECT pair_key FROM excluded_pairs)`
+    : "";
+  const prepaidOffsetsCteSql = prepaidOffsetByCustomerMonthPairs.length
+    ? `prepaid_offsets AS (
+  SELECT
+    pair_key,
+    CAST(prepaid_applied_major AS FLOAT64) AS prepaid_applied_major
+  FROM UNNEST([${prepaidOffsetByCustomerMonthPairs
+    .map(
+      (_, idx) =>
+        `STRUCT(@prepaid_pair_${idx} AS pair_key, CAST(@prepaid_pair_amount_${idx} AS FLOAT64) AS prepaid_applied_major)`,
+    )
+    .join(", ")}])
+),`
+    : `prepaid_offsets AS (
+  SELECT pair_key, prepaid_applied_major
+  FROM UNNEST(CAST([] AS ARRAY<STRUCT<pair_key STRING, prepaid_applied_major FLOAT64>>))
+),`;
 
   const query = `
 WITH table_rows AS (
@@ -8099,7 +8157,9 @@ ai_products AS (
   FROM \`${productsTable}\`
   WHERE ${productTermsSql.join(" OR ")}
 ),
-matched_lines AS (
+${excludedPairsCteSql}
+${prepaidOffsetsCteSql}
+matched_lines_raw AS (
   SELECT
     ls.snapshot_date,
     ls.snapshot_batch_ts,
@@ -8107,7 +8167,8 @@ matched_lines AS (
     t.amount_major,
     t.line_description_norm,
     t.period_start,
-    t.period_end
+    t.period_end,
+    CONCAT(t.customer_id, '|', SUBSTR(ls.snapshot_date, 1, 7)) AS pair_key
   FROM latest_snapshot_by_day ls
   JOIN table_rows t
     ON CAST(t.snapshot_date AS STRING) = ls.snapshot_date
@@ -8115,6 +8176,47 @@ matched_lines AS (
   LEFT JOIN ai_products ap
     ON ap.product_id = t.product_id
   WHERE ((${descriptionTermsSql.join(" OR ")}) OR ap.product_id IS NOT NULL)
+),
+matched_lines_with_offsets AS (
+  SELECT
+    ml.*,
+    COALESCE(po.prepaid_applied_major, 0.0) AS prepaid_applied_major,
+    SUM(ml.amount_major) OVER (
+      PARTITION BY ml.snapshot_date, ml.customer_id
+      ORDER BY ml.period_start, ml.period_end, ml.amount_major DESC, ml.line_description_norm
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_amount_major,
+    COALESCE(
+      SUM(ml.amount_major) OVER (
+        PARTITION BY ml.snapshot_date, ml.customer_id
+        ORDER BY ml.period_start, ml.period_end, ml.amount_major DESC, ml.line_description_norm
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+      ),
+      0.0
+    ) AS prev_running_amount_major
+  FROM matched_lines_raw ml
+  LEFT JOIN prepaid_offsets po
+    ON po.pair_key = ml.pair_key
+  WHERE TRUE
+${excludedPairsWhereSql}
+),
+matched_lines AS (
+  SELECT
+    snapshot_date,
+    snapshot_batch_ts,
+    customer_id,
+    line_description_norm,
+    period_start,
+    period_end,
+    GREATEST(
+      amount_major - GREATEST(LEAST(running_amount_major, prepaid_applied_major) - prev_running_amount_major, 0.0),
+      0.0
+    ) AS amount_major
+  FROM matched_lines_with_offsets
+  WHERE GREATEST(
+    amount_major - GREATEST(LEAST(running_amount_major, prepaid_applied_major) - prev_running_amount_major, 0.0),
+    0.0
+  ) > 0
 ),
 line_with_multiplier AS (
   SELECT
@@ -8160,6 +8262,23 @@ ORDER BY snapshot_date ASC
     { name: "end_date", type: "STRING", value: endDateIso },
     { name: "target_currency", type: "STRING", value: targetCurrency },
     ...includes.map((term, idx) => ({ name: `desc_${idx}`, type: "STRING" as const, value: term })),
+    ...excludedCustomerMonthPairs.map((pairKey, idx) => ({
+      name: `excluded_pair_${idx}`,
+      type: "STRING" as const,
+      value: pairKey,
+    })),
+    ...prepaidOffsetByCustomerMonthPairs.flatMap((entry, idx) => [
+      {
+        name: `prepaid_pair_${idx}`,
+        type: "STRING" as const,
+        value: entry.pairKey,
+      },
+      {
+        name: `prepaid_pair_amount_${idx}`,
+        type: "STRING" as const,
+        value: String(entry.prepaidAppliedMajor),
+      },
+    ]),
   ];
   const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
   const points: StripeAiSpendDailyAnnualizedFromUpcomingSnapshotsPoint[] = rows.map((row) => ({

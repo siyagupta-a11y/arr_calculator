@@ -1073,12 +1073,32 @@ async function buildCombinedBillingOverview(
     : Promise.resolve({ activeByPeriod: new Map<string, number>(), logoChurnByPeriod: new Map<string, LogoChurnCounts>() });
   const aiSpendSeriesPromise = (async () => {
     if (grain === "daily") {
+      const exclusions = await getOrSetCache(
+        `api:combined-billing-overview:ai-spend-exclusions-daily:${stableStringify({
+          startDate: previousRange.startDate,
+          endDate,
+          targetCurrency,
+        })}`,
+        CACHE_TTL_MS,
+        () =>
+          resolveEnterprisePrepaidAiSpendExclusions({
+            startDate: previousRange.startDate,
+            endDate,
+            targetCurrency,
+          }),
+      ).catch(() => ({ customerMonthPairs: [], customerMonthPrepaidOffsets: [] }));
+
       const dailySnapshotSeries = await queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFromBigQuery(
         {
           startDate: previousRange.startDate,
           endDate,
           targetCurrency,
           productDescriptionIncludes: AI_SPEND_UPCOMING_PRODUCT_TERMS,
+          excludeCustomerMonthPairs: exclusions.customerMonthPairs || [],
+          prepaidOffsetByCustomerMonthPairs: (exclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
+            pairKey: entry.pairKey,
+            prepaidAppliedMajor: entry.prepaidAppliedMajor,
+          })),
         },
         { profile: "stripe_arr_correct" },
       );
