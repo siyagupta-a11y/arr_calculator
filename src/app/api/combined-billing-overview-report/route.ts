@@ -26,6 +26,7 @@ import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseC
 export const runtime = "nodejs";
 export const maxDuration = 300;
 const CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_CACHE_TTL_MS", 60_000);
+const AI_SPEND_EXCLUSIONS_CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_EXCLUSIONS_CACHE_TTL_MS", 300_000);
 const AI_SPEND_UPCOMING_PRODUCT_TERMS = ["ai tokens", "web search and crawl"];
 
 type CombinedGrain = "daily" | "monthly" | "quarterly";
@@ -1073,16 +1074,18 @@ async function buildCombinedBillingOverview(
     : Promise.resolve({ activeByPeriod: new Map<string, number>(), logoChurnByPeriod: new Map<string, LogoChurnCounts>() });
   const aiSpendSeriesPromise = (async () => {
     if (grain === "daily") {
+      const aiDailyBaselineDate = previousRange.endDate;
       const exclusions = await getOrSetCache(
-        `api:combined-billing-overview:ai-spend-exclusions-daily:${stableStringify({
-          startDate: previousRange.startDate,
+        `api:stripe-ai-spend:enterprise-prepaid-exclusions:${stableStringify({
+          startDate,
           endDate,
+          invoiceMonthOffset: 1,
           targetCurrency,
         })}`,
-        CACHE_TTL_MS,
+        AI_SPEND_EXCLUSIONS_CACHE_TTL_MS,
         () =>
           resolveEnterprisePrepaidAiSpendExclusions({
-            startDate: previousRange.startDate,
+            startDate,
             endDate,
             targetCurrency,
           }),
@@ -1090,7 +1093,7 @@ async function buildCombinedBillingOverview(
 
       const dailySnapshotSeries = await queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFromBigQuery(
         {
-          startDate: previousRange.startDate,
+          startDate: aiDailyBaselineDate,
           endDate,
           targetCurrency,
           productDescriptionIncludes: AI_SPEND_UPCOMING_PRODUCT_TERMS,
@@ -1120,7 +1123,7 @@ async function buildCombinedBillingOverview(
       });
 
       return {
-        startDate: previousRange.startDate,
+        startDate: aiDailyBaselineDate,
         endDate,
         grain,
         targetCurrency: dailySnapshotSeries.targetCurrency || String(targetCurrency || "USD").toUpperCase(),
@@ -1468,6 +1471,7 @@ async function buildCombinedBillingOverview(
   let linePoints: CombinedPoint[] = points;
   try {
     const aiSpendSeries = await aiSpendSeriesPromise;
+    const aiPreviousReferenceDate = grain === "daily" ? previousRange.endDate : previousRange.startDate;
     const aiBuild = buildAiSpendSourceSeries(
       periodOrder,
       grain,
@@ -1476,7 +1480,7 @@ async function buildCombinedBillingOverview(
         periodEnd: String(point.periodEnd || ""),
         revenue: Number(point.revenue || 0),
       })),
-      previousRange.startDate,
+      aiPreviousReferenceDate,
     );
     aiSpendSourcePoints = aiBuild.points;
     linePoints = mergeCombinedAndAiSeries(points, aiSpendSourcePoints, initialPrevCombinedMrr, aiBuild.initialPrevMrr);
