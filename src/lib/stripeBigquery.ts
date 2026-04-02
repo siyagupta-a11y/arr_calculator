@@ -7767,7 +7767,23 @@ matched_lines_raw AS (
       '(blank)'
     ) AS product_id,
     COALESCE(NULLIF(TRIM(CAST(pl.product_description AS STRING)), ''), '(blank)') AS product_label,
-    CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) / 100.0 AS revenue_major,
+    GREATEST(
+      CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) -
+      COALESCE(
+        (
+          SELECT
+            SUM(COALESCE(SAFE_CAST(JSON_VALUE(discount_item, '$.amount') AS FLOAT64), 0.0))
+          FROM UNNEST(
+            COALESCE(
+              JSON_QUERY_ARRAY(t.raw_json, '$.discount_amounts'),
+              CAST([] AS ARRAY<STRING>)
+            )
+          ) AS discount_item
+        ),
+        0.0
+      ),
+      0.0
+    ) / 100.0 AS revenue_major,
     CAST(
       COALESCE(
         SAFE_CAST(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.quantity')), '') AS FLOAT64),
@@ -8165,7 +8181,23 @@ WITH table_rows AS (
     COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
     LOWER(COALESCE(CAST(t.description AS STRING), '')) AS line_description_norm,
     COALESCE(NULLIF(TRIM(CAST(t.product_id AS STRING)), ''), '(blank)') AS product_id,
-    CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) / 100.0 AS amount_major,
+    GREATEST(
+      CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) -
+      COALESCE(
+        (
+          SELECT
+            SUM(COALESCE(SAFE_CAST(JSON_VALUE(discount_item, '$.amount') AS FLOAT64), 0.0))
+          FROM UNNEST(
+            COALESCE(
+              JSON_QUERY_ARRAY(t.raw_json, '$.discount_amounts'),
+              CAST([] AS ARRAY<STRING>)
+            )
+          ) AS discount_item
+        ),
+        0.0
+      ),
+      0.0
+    ) / 100.0 AS amount_major,
     CAST(t.period_start AS TIMESTAMP) AS period_start,
     CAST(t.period_end AS TIMESTAMP) AS period_end
   FROM \`${table}\` AS t
@@ -8446,7 +8478,23 @@ WITH table_rows AS (
     ) AS customer_name,
     LOWER(COALESCE(CAST(t.description AS STRING), '')) AS line_description_norm,
     COALESCE(NULLIF(TRIM(CAST(t.product_id AS STRING)), ''), '(blank)') AS product_id,
-    CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) / 100.0 AS amount_major,
+    GREATEST(
+      CAST(COALESCE(t.amount_minor, 0) AS FLOAT64) -
+      COALESCE(
+        (
+          SELECT
+            SUM(COALESCE(SAFE_CAST(JSON_VALUE(discount_item, '$.amount') AS FLOAT64), 0.0))
+          FROM UNNEST(
+            COALESCE(
+              JSON_QUERY_ARRAY(t.raw_json, '$.discount_amounts'),
+              CAST([] AS ARRAY<STRING>)
+            )
+          ) AS discount_item
+        ),
+        0.0
+      ),
+      0.0
+    ) / 100.0 AS amount_major,
     CAST(t.period_start AS TIMESTAMP) AS period_start,
     CAST(t.period_end AS TIMESTAMP) AS period_end
   FROM \`${table}\` AS t
