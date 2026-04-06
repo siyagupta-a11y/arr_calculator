@@ -169,6 +169,90 @@ function buildCohorts(
   });
 }
 
+function buildPlanSegmentsFast(
+  periods: Array<{ key: string; label: string }>,
+  rows: CombinedAllSubsRow[],
+): MatrixSegment[] {
+  const periodKeys = periods.map((period) => period.key);
+  const periodCount = periodKeys.length;
+  const emptyAggregates = () =>
+    periods.map((period, idx) => ({
+      cohortKey: period.key,
+      cohortLabel: period.label,
+      cohortIndex: idx,
+      cohortCustomerCount: 0,
+      cohortArr: 0,
+      ndrNumerators: Array<number>(periodCount).fill(0),
+      gdrNumerators: Array<number>(periodCount).fill(0),
+    }));
+
+  const planAggregates = new Map<CombinedAllSubsPlan, ReturnType<typeof emptyAggregates>>();
+  for (const plan of PLAN_ORDER) {
+    planAggregates.set(plan, emptyAggregates());
+  }
+
+  for (const row of rows) {
+    const valuesByPeriod = row.valuesByPeriod || {};
+    const values = periodKeys.map((periodKey) => Math.max(0, Number(valuesByPeriod[periodKey] || 0)));
+    const plans = periodKeys.map((periodKey) => planForPeriod(row, periodKey));
+
+    for (let cohortIdx = 0; cohortIdx < periodCount; cohortIdx += 1) {
+      const cohortArr = values[cohortIdx];
+      if (cohortArr <= 0) continue;
+
+      const cohortPlan = plans[cohortIdx];
+      const cohortAgg = planAggregates.get(cohortPlan)?.[cohortIdx];
+      if (!cohortAgg) continue;
+      cohortAgg.cohortCustomerCount += 1;
+      cohortAgg.cohortArr += cohortArr;
+
+      for (let observedIdx = cohortIdx; observedIdx < periodCount; observedIdx += 1) {
+        const observedArr = values[observedIdx];
+        cohortAgg.ndrNumerators[observedIdx] += observedArr;
+        cohortAgg.gdrNumerators[observedIdx] += Math.min(observedArr, cohortArr);
+      }
+    }
+  }
+
+  return PLAN_ORDER.map((plan) => {
+    const aggregates = planAggregates.get(plan) || [];
+    const cohorts: CohortRow[] = aggregates.map((agg) => {
+      const ndrByPeriod: Record<string, number | null> = {};
+      const gdrByPeriod: Record<string, number | null> = {};
+      for (let observedIdx = 0; observedIdx < periodCount; observedIdx += 1) {
+        const observedKey = periodKeys[observedIdx];
+        if (observedIdx < agg.cohortIndex) {
+          ndrByPeriod[observedKey] = null;
+          gdrByPeriod[observedKey] = null;
+          continue;
+        }
+        if (agg.cohortArr <= 0) {
+          ndrByPeriod[observedKey] = 0;
+          gdrByPeriod[observedKey] = 0;
+          continue;
+        }
+        ndrByPeriod[observedKey] = round2((agg.ndrNumerators[observedIdx] / agg.cohortArr) * 100);
+        gdrByPeriod[observedKey] = round2((agg.gdrNumerators[observedIdx] / agg.cohortArr) * 100);
+      }
+
+      return {
+        cohortKey: agg.cohortKey,
+        cohortLabel: agg.cohortLabel,
+        cohortCustomerCount: agg.cohortCustomerCount,
+        cohortArr: round2(agg.cohortArr),
+        ndrByPeriod,
+        gdrByPeriod,
+      };
+    });
+
+    return {
+      segmentKey: plan,
+      segmentLabel: PLAN_LABELS[plan],
+      cohorts,
+    };
+  });
+}
+
 async function buildNdrGdrReport(payload: {
   startDate: string;
   endDate: string;
@@ -202,11 +286,7 @@ async function buildNdrGdrReport(payload: {
           ),
         }))
       : payload.groupBy === "plan"
-        ? PLAN_ORDER.map((plan) => ({
-            segmentKey: plan,
-            segmentLabel: PLAN_LABELS[plan],
-            cohorts: buildCohorts(periods, rows, (row, cohortPeriodKey) => planForPeriod(row, cohortPeriodKey) === plan),
-          }))
+        ? buildPlanSegmentsFast(periods, rows)
         : [
             {
               segmentKey: "overall",
