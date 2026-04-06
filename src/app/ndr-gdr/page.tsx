@@ -5,11 +5,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 type CombineMode = "grouped" | "simple";
 type MetricMode = "ndr" | "gdr";
+type MatrixGroupBy = "overall" | "source" | "plan";
 
 type NdrGdrResponse = {
   startDate: string;
   endDate: string;
   combineMode: CombineMode;
+  groupBy?: MatrixGroupBy;
   targetCurrency: string;
   warnings?: string[];
   periods: Array<{ key: string; label: string }>;
@@ -20,6 +22,18 @@ type NdrGdrResponse = {
     cohortArr: number;
     ndrByPeriod: Record<string, number | null>;
     gdrByPeriod: Record<string, number | null>;
+  }>;
+  segments?: Array<{
+    segmentKey: string;
+    segmentLabel: string;
+    cohorts: Array<{
+      cohortKey: string;
+      cohortLabel: string;
+      cohortCustomerCount: number;
+      cohortArr: number;
+      ndrByPeriod: Record<string, number | null>;
+      gdrByPeriod: Record<string, number | null>;
+    }>;
   }>;
 };
 
@@ -59,6 +73,7 @@ export default function NdrGdrPage() {
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
   const [combineMode, setCombineMode] = useState<CombineMode>("grouped");
+  const [groupBy, setGroupBy] = useState<MatrixGroupBy>("overall");
   const [metricMode, setMetricMode] = useState<MetricMode>("ndr");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -72,7 +87,7 @@ export default function NdrGdrPage() {
       const res = await fetch("/api/ndr-gdr-report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startDate, endDate, combineMode }),
+        body: JSON.stringify({ startDate, endDate, combineMode, groupBy }),
       });
       const text = await res.text();
       let json: unknown = null;
@@ -95,7 +110,7 @@ export default function NdrGdrPage() {
     } finally {
       setLoading(false);
     }
-  }, [combineMode, endDate, startDate]);
+  }, [combineMode, endDate, groupBy, startDate]);
 
   useEffect(() => {
     if (autoRunDone.current) return;
@@ -104,7 +119,16 @@ export default function NdrGdrPage() {
   }, [run]);
 
   const periods = data?.periods || [];
-  const cohorts = data?.cohorts || [];
+  const segments =
+    data?.segments && data.segments.length
+      ? data.segments
+      : [
+          {
+            segmentKey: "overall",
+            segmentLabel: "Overall",
+            cohorts: data?.cohorts || [],
+          },
+        ];
   const currency = data?.targetCurrency || "USD";
 
   return (
@@ -191,6 +215,21 @@ export default function NdrGdrPage() {
               <option value="gdr">GDR</option>
             </select>
           </div>
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="ndr-gdr-group-by">
+              Group by
+            </label>
+            <select
+              id="ndr-gdr-group-by"
+              className="stripe-ui__control"
+              value={groupBy}
+              onChange={(e) => setGroupBy((["source", "plan"].includes(e.target.value) ? e.target.value : "overall") as MatrixGroupBy)}
+            >
+              <option value="overall">Overall</option>
+              <option value="source">Source (Sales-led vs Self-serve)</option>
+              <option value="plan">Plan</option>
+            </select>
+          </div>
           <div className="stripe-ui__field" style={{ alignSelf: "end" }}>
             <button id="ndr-gdr-run" className="stripe-ui__btn stripe-ui__btn--primary" onClick={() => void run()} disabled={loading}>
               {loading ? "Loading..." : "Load Matrix"}
@@ -229,44 +268,64 @@ export default function NdrGdrPage() {
             </div>
           ) : null}
 
-          {periods.length === 0 || cohorts.length === 0 ? (
+          {periods.length === 0 || segments.every((segment) => (segment.cohorts || []).length === 0) ? (
             <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.75rem", marginBottom: 0 }}>
               No monthly data found for this range.
             </p>
           ) : (
-            <div className="stripe-ui__table-wrap" style={{ marginTop: "0.85rem" }}>
-              <table className="stripe-ui__table">
-                <thead>
-                  <tr>
-                    <th>Cohort Month</th>
-                    <th className="stripe-ui__num">Customers</th>
-                    <th className="stripe-ui__num">Cohort ARR</th>
-                    {periods.map((period) => (
-                      <th key={`col-${period.key}`} className="stripe-ui__num">
-                        {period.label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {cohorts.map((cohort) => (
-                    <tr key={`row-${cohort.cohortKey}`}>
-                      <td>{cohort.cohortLabel}</td>
-                      <td className="stripe-ui__num">{cohort.cohortCustomerCount}</td>
-                      <td className="stripe-ui__num">{formatMoney(cohort.cohortArr, currency)}</td>
-                      {periods.map((period) => {
-                        const value =
-                          metricMode === "ndr" ? cohort.ndrByPeriod?.[period.key] ?? null : cohort.gdrByPeriod?.[period.key] ?? null;
-                        return (
-                          <td key={`cell-${cohort.cohortKey}-${period.key}`} className="stripe-ui__num">
-                            {formatPct(value)}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div style={{ marginTop: "0.85rem", display: "grid", gap: "1rem" }}>
+              {segments.map((segment) => {
+                const cohorts = segment.cohorts || [];
+                return (
+                  <div key={`segment-${segment.segmentKey}`}>
+                    {segments.length > 1 ? (
+                      <h3 className="stripe-ui__panel-title" style={{ fontSize: "1rem", marginBottom: "0.55rem" }}>
+                        {segment.segmentLabel}
+                      </h3>
+                    ) : null}
+                    <div className="stripe-ui__table-wrap">
+                      <table className="stripe-ui__table">
+                        <thead>
+                          <tr>
+                            <th>Cohort Month</th>
+                            <th className="stripe-ui__num">Customers</th>
+                            <th className="stripe-ui__num">Cohort ARR</th>
+                            {periods.map((period) => (
+                              <th key={`col-${segment.segmentKey}-${period.key}`} className="stripe-ui__num">
+                                {period.label}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {cohorts.length ? (
+                            cohorts.map((cohort) => (
+                              <tr key={`row-${segment.segmentKey}-${cohort.cohortKey}`}>
+                                <td>{cohort.cohortLabel}</td>
+                                <td className="stripe-ui__num">{cohort.cohortCustomerCount}</td>
+                                <td className="stripe-ui__num">{formatMoney(cohort.cohortArr, currency)}</td>
+                                {periods.map((period) => {
+                                  const value =
+                                    metricMode === "ndr" ? cohort.ndrByPeriod?.[period.key] ?? null : cohort.gdrByPeriod?.[period.key] ?? null;
+                                  return (
+                                    <td key={`cell-${segment.segmentKey}-${cohort.cohortKey}-${period.key}`} className="stripe-ui__num">
+                                      {formatPct(value)}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={3 + periods.length}>No cohort data for this segment.</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </section>
