@@ -3999,8 +3999,9 @@ customers_lookup AS (
 events_source AS (
   SELECT
     t.event_timestamp,
-    TO_JSON_STRING(t) AS raw_json,
     COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    COALESCE(NULLIF(TRIM(CAST(t.product_id AS STRING)), ''), '(blank)') AS product_id_norm,
+    COALESCE(NULLIF(TRIM(CAST(t.price_id AS STRING)), ''), '') AS price_id_norm,
     CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
   FROM \`${table}\` t
   CROSS JOIN bounds b
@@ -4013,15 +4014,7 @@ events_base AS (
     es.event_timestamp,
     es.customer_id,
     LOWER(COALESCE(NULLIF(TRIM(cl.customer_email), ''), NULLIF(TRIM(es.customer_id), ''), '(blank)')) AS customer_key,
-    COALESCE(
-      NULLIF(TRIM(cl.customer_workspace_id), ''),
-      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.workspace_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.workspaceId')), ''),
-      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.workspace.id')), ''),
-      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.metadata.workspace_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.metadata.workspaceId')), ''),
-      ''
-    ) AS workspace_id,
+    COALESCE(NULLIF(TRIM(cl.customer_workspace_id), ''), '') AS workspace_id,
     es.mrr_change_major,
     CASE
       -- Explicit overrides for known Stripe products.
@@ -4037,32 +4030,12 @@ events_base AS (
   FROM (
     SELECT
       es.*,
-      COALESCE(
-        NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product_id')), ''),
-        NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product.id')), ''),
-        NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product')), ''),
-        '(blank)'
-      ) AS product_id_norm,
       LOWER(
         CONCAT(
           ' ',
-          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.plan_id')), ''), ''),
+          COALESCE(NULLIF(TRIM(es.price_id_norm), ''), ''),
           ' ',
-          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.plan.id')), ''), ''),
-          ' ',
-          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.plan')), ''), ''),
-          ' ',
-          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price_id')), ''), ''),
-          ' ',
-          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price.id')), ''), ''),
-          ' ',
-          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price')), ''), ''),
-          ' ',
-          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product_id')), ''), ''),
-          ' ',
-          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product.id')), ''), ''),
-          ' ',
-          COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product')), ''), ''),
+          COALESCE(NULLIF(TRIM(es.product_id_norm), ''), ''),
           ' '
         )
       ) AS raw_plan_hints
