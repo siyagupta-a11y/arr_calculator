@@ -6,6 +6,8 @@ import {
   type StripeBigQueryProfile,
   type StripeThroughMrrCustomerArrRow,
   type StripeThroughMrrCustomerPlanRow,
+  type StripeThroughMrrCustomerArrResult,
+  type StripeThroughMrrCustomerPlanResult,
 } from "@/lib/stripeBigquery";
 import type { ReportResponse, ReportRow } from "@/lib/types";
 
@@ -361,6 +363,19 @@ function buildStripeCustomerMap(
   return { customers, aliasesToCustomerKey };
 }
 
+function arrRowsFromPlanRows(planRows: StripeThroughMrrCustomerPlanRow[]): StripeThroughMrrCustomerArrRow[] {
+  return (planRows || []).map((row) => ({
+    customerKey: row.customerKey,
+    customerIds: row.customerIds || [],
+    workspaceIds: row.workspaceIds || [],
+    periodKey: row.periodKey,
+    periodLabel: row.periodLabel,
+    periodStart: row.periodStart,
+    periodEnd: row.periodEnd,
+    arr: round2(Number(row.arr || 0)),
+  }));
+}
+
 function mergeStripeIntoHubspotAccounts(
   periods: Array<{ key: string; label: string }>,
   accounts: Map<string, HubspotAccountAggregate>,
@@ -540,15 +555,28 @@ export async function generateCombinedAllSubsReport(
   const groupedMatchStrategy = normalizeGroupedMatchStrategy(request.groupedMatchStrategy);
   const includeSalesAssist = request.includeSalesAssist !== false;
   const target = targetCurrency();
+  const needsPlanRows = displayMode === "plan" || includePlanData;
+  const canReusePlanQueryForArr = displayMode === "arr" && includePlanData;
 
-  const [hubspotReport, stripeCustomerArr, stripeCustomerPlan] = await Promise.all([
-    generateReport({
-      startDate,
-      endDate,
-      mode: "contracted",
-      grain: planGrain,
-    }),
-    displayMode === "arr"
+  const hubspotPromise = generateReport({
+    startDate,
+    endDate,
+    mode: "contracted",
+    grain: planGrain,
+  });
+  const stripePlanPromise: Promise<StripeThroughMrrCustomerPlanResult | null> = needsPlanRows
+    ? queryStripeThroughMrrCustomerPlanFromBigQuery(
+        {
+          startDate,
+          endDate,
+          targetCurrency: target,
+          grain: planGrain,
+        },
+        STRIPE_QUERY_OPTIONS,
+      )
+    : Promise.resolve(null);
+  const stripeArrPromise: Promise<StripeThroughMrrCustomerArrResult | null> =
+    displayMode === "arr" && !canReusePlanQueryForArr
       ? queryStripeThroughMrrCustomerArrFromBigQuery(
           {
             startDate,
@@ -558,34 +586,22 @@ export async function generateCombinedAllSubsReport(
           },
           STRIPE_QUERY_OPTIONS,
         )
-      : Promise.resolve(null),
-    displayMode === "plan"
-      ? queryStripeThroughMrrCustomerPlanFromBigQuery(
-          {
-            startDate,
-            endDate,
-            targetCurrency: target,
-            grain: planGrain,
-          },
-          STRIPE_QUERY_OPTIONS,
-        )
-      : includePlanData
-        ? queryStripeThroughMrrCustomerPlanFromBigQuery(
-            {
-              startDate,
-              endDate,
-              targetCurrency: target,
-              grain: planGrain,
-            },
-            STRIPE_QUERY_OPTIONS,
-          )
-        : Promise.resolve(null),
+      : Promise.resolve(null);
+
+  const [hubspotReport, stripeCustomerPlan, stripeCustomerArr] = await Promise.all([
+    hubspotPromise,
+    stripePlanPromise,
+    stripeArrPromise,
   ]);
+
+  const stripeArrRows: StripeThroughMrrCustomerArrRow[] =
+    stripeCustomerArr?.rows || (canReusePlanQueryForArr ? arrRowsFromPlanRows(stripeCustomerPlan?.rows || []) : []);
+  const stripePlanRows: StripeThroughMrrCustomerPlanRow[] = stripeCustomerPlan?.rows || [];
 
   const { periods, accounts, companyIdToAccountKey } = buildHubspotAccountMap(hubspotReport);
   const { customers: stripeCustomers, aliasesToCustomerKey } = buildStripeCustomerMap(
-    stripeCustomerArr?.rows || [],
-    stripeCustomerPlan?.rows || [],
+    stripeArrRows,
+    stripePlanRows,
   );
   const warnings: string[] = [];
   let transactionalWorkspaceIds = new Set<string>();

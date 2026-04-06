@@ -204,6 +204,7 @@ export type StripeThroughMrrCustomerPlanRow = {
   periodStart: string;
   periodEnd: string;
   plan: StripeThroughMrrCustomerPlan;
+  arr: number;
 };
 
 export type StripeThroughMrrCustomerPlanRequest = {
@@ -4132,16 +4133,17 @@ customer_plan_snapshots AS (
     AND bd.plan_rank = cpb.plan_rank
     AND bd.bucket_start = cpb.bucket_start
 ),
-customer_bucket_plan_rank AS (
+customer_bucket_snapshot AS (
   SELECT
     cps.customer_key,
     cps.bucket_start,
-    COALESCE(MAX(IF(cps.mrr_end > 1e-9, cps.plan_rank, 0)), 0) AS plan_rank
+    COALESCE(MAX(IF(cps.mrr_end > 1e-9, cps.plan_rank, 0)), 0) AS plan_rank,
+    COALESCE(SUM(cps.mrr_end), 0.0) AS mrr_end_total
   FROM customer_plan_snapshots cps
   GROUP BY cps.customer_key, cps.bucket_start
 )
 SELECT
-  cbpr.customer_key,
+  cbs.customer_key,
   COALESCE(cik.customer_ids, ARRAY<STRING>[]) AS customer_ids,
   COALESCE(cik.workspace_ids, ARRAY<STRING>[]) AS workspace_ids,
   CASE
@@ -4154,20 +4156,22 @@ SELECT
   END AS period_label,
   FORMAT_DATE('%Y-%m-%d', b.effective_start) AS period_start,
   FORMAT_DATE('%Y-%m-%d', DATE_SUB(b.effective_end_exclusive, INTERVAL 1 DAY)) AS period_end,
-  CASE cbpr.plan_rank
+  CASE cbs.plan_rank
     WHEN 5 THEN 'enterprise'
     WHEN 4 THEN 'managed'
     WHEN 3 THEN 'team'
     WHEN 2 THEN 'plus'
     WHEN 1 THEN 'pay_as_you_go'
     ELSE 'free'
-  END AS plan
-FROM customer_bucket_plan_rank cbpr
+  END AS plan,
+  ROUND(cbs.mrr_end_total * 12.0, 2) AS arr
+FROM customer_bucket_snapshot cbs
 JOIN buckets b
-  ON b.bucket_start = cbpr.bucket_start
+  ON b.bucket_start = cbs.bucket_start
 LEFT JOIN customer_ids_by_key cik
-  ON cik.customer_key = cbpr.customer_key
-ORDER BY cbpr.customer_key ASC, b.bucket_start ASC
+  ON cik.customer_key = cbs.customer_key
+WHERE ABS(cbs.mrr_end_total) > 1e-9
+ORDER BY cbs.customer_key ASC, b.bucket_start ASC
 `;
 
   const params: BigQueryNamedParameter[] = [
@@ -4192,6 +4196,7 @@ ORDER BY cbpr.customer_key ASC, b.bucket_start ASC
       periodStart: asString(row.period_start),
       periodEnd: asString(row.period_end),
       plan: (asString(row.plan) || "free") as StripeThroughMrrCustomerPlan,
+      arr: asNumber(row.arr),
     })),
   };
 }
