@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { generateReport } from "@/lib/report";
 import type { ReportResponse, ReportRow } from "@/lib/types";
-import { fetchDealsInStage } from "@/lib/hubspot";
+import { fetchDealsInStageClosedBetween } from "@/lib/hubspot";
 import {
   queryStripeAiSpendFromBigQuery,
   queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery,
@@ -30,6 +30,7 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 const CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_CACHE_TTL_MS", 60_000);
 const AI_SPEND_EXCLUSIONS_CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_EXCLUSIONS_CACHE_TTL_MS", 300_000);
+const SALES_CYCLE_CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_SALES_CYCLE_CACHE_TTL_MS", 300_000);
 const AI_SPEND_UPCOMING_PRODUCT_TERMS = ["ai tokens", "web search and crawl"];
 
 type CombinedGrain = "daily" | "monthly" | "quarterly";
@@ -570,7 +571,19 @@ async function buildMonthlySalesCycleSeries(periodOrder: PeriodRef[], includedDe
     }));
   }
 
-  const deals = await fetchDealsInStage(["createdate", "closedate"], stage);
+  if (!monthlyPeriods.length) return [];
+  const rangeStartIso = monthlyPeriods[0].periodStart;
+  const rangeEndIso = monthlyPeriods[monthlyPeriods.length - 1].periodEnd;
+
+  const deals = await getOrSetCache(
+    `api:combined-billing-overview:sales-cycle:deals:${stableStringify({
+      stage,
+      rangeStartIso,
+      rangeEndIso,
+    })}`,
+    SALES_CYCLE_CACHE_TTL_MS,
+    () => fetchDealsInStageClosedBetween(["createdate", "closedate"], stage, rangeStartIso, rangeEndIso),
+  );
   const millisPerDay = 24 * 60 * 60 * 1000;
   const totalsByMonth = new Map<string, { sumDays: number; count: number }>();
   for (const deal of deals) {
@@ -1407,6 +1420,30 @@ async function buildCombinedBillingOverview(
     key: String(period.key || ""),
     label: String(period.label || period.key || ""),
   }));
+  const salesCyclePromise: Promise<{ points: SalesCyclePoint[]; notice: string | null }> =
+    grain !== "monthly"
+      ? Promise.resolve({
+          points: [],
+          notice:
+            "Sales cycle currently supports monthly grain. Switch Time grain to Monthly to load average sales-cycle days.",
+        })
+      : (async () => {
+          try {
+            const points = await buildMonthlySalesCycleSeries(periodOrder, process.env.INCLUDED_DEALSTAGE || "");
+            if (!points.some((point) => point.closedWonDealCount > 0)) {
+              return {
+                points,
+                notice: "No closed-won HubSpot deals were found in this range.",
+              };
+            }
+            return { points, notice: null };
+          } catch (error: unknown) {
+            return {
+              points: [],
+              notice: `Sales cycle unavailable: ${conciseErrorMessage(error, "HubSpot deal query failed.")}`,
+            };
+          }
+        })();
 
   const mapHubRows = (report: ReportResponse): Array<{ accountId: string; deploymentType: string; valuesByPeriod: Record<string, number> }> =>
     (report.rows || []).map((row: ReportRow) => ({
@@ -1722,19 +1759,7 @@ async function buildCombinedBillingOverview(
   let salesCycleNotice: string | null = null;
   if (grain !== "monthly") {
     ltvNotice = "LTV currently supports monthly grain. Switch Time grain to Monthly to load LTV over time.";
-    salesCycleNotice =
-      "Sales cycle currently supports monthly grain. Switch Time grain to Monthly to load average sales-cycle days.";
   } else {
-    try {
-      salesCyclePoints = await buildMonthlySalesCycleSeries(periodOrder, process.env.INCLUDED_DEALSTAGE || "");
-      if (!salesCyclePoints.some((point) => point.closedWonDealCount > 0)) {
-        salesCycleNotice = "No closed-won HubSpot deals were found in this range.";
-      }
-    } catch (error: unknown) {
-      salesCyclePoints = [];
-      salesCycleNotice = `Sales cycle unavailable: ${conciseErrorMessage(error, "HubSpot deal query failed.")}`;
-    }
-
     const buildFallbackLtv = () =>
       buildLtvSeries(
         periodOrder,
@@ -1766,6 +1791,9 @@ async function buildCombinedBillingOverview(
       ltvPoints = buildFallbackLtv();
     }
   }
+  const salesCycleResult = await salesCyclePromise;
+  salesCyclePoints = salesCycleResult.points;
+  salesCycleNotice = salesCycleResult.notice;
 
   const combinedNewCustomerCountByPeriod = new Map<string, number>();
   if (includeCac) {
