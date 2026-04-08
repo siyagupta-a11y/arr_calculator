@@ -32,6 +32,7 @@ export default function QuickBooksPage() {
   const [oauthFlowStatus, setOauthFlowStatus] = useState("");
   const [oauthFlowReason, setOauthFlowReason] = useState("");
   const [oauthFlowRealmId, setOauthFlowRealmId] = useState("");
+  const [oauthFlowExpectedRealmId, setOauthFlowExpectedRealmId] = useState("");
 
   const oauthBanner = useMemo(() => {
     if (oauthFlowStatus === "connected") {
@@ -53,6 +54,7 @@ export default function QuickBooksPage() {
     setOauthFlowStatus(String(params.get("status") || ""));
     setOauthFlowReason(String(params.get("reason") || ""));
     setOauthFlowRealmId(String(params.get("realmId") || ""));
+    setOauthFlowExpectedRealmId(String(params.get("expectedRealmId") || ""));
   }, []);
 
   const refreshStatus = useCallback(async () => {
@@ -173,6 +175,18 @@ export default function QuickBooksPage() {
           <p className="stripe-ui__panel-subtitle" style={{ margin: 0, color: "#dbe8ff" }}>
             {oauthBanner.text}
           </p>
+          {oauthBanner.kind === "error" && oauthFlowExpectedRealmId ? (
+            <div className="stripe-ui__actions" style={{ marginTop: "0.7rem" }}>
+              <a
+                href={`/api/quickbooks/connect?mode=ensure_required&targetRealmId=${encodeURIComponent(
+                  oauthFlowExpectedRealmId,
+                )}`}
+                className="stripe-ui__btn stripe-ui__btn--secondary"
+              >
+                Connect missing realm {oauthFlowExpectedRealmId}
+              </a>
+            </div>
+          ) : null}
         </section>
       ) : null}
 
