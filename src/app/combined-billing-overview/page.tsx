@@ -103,6 +103,15 @@ type ArrPerEmployeePoint = {
   employeeNames?: string[];
 };
 
+type SalesCyclePoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  avgSalesCycleDays: number;
+  closedWonDealCount: number;
+};
+
 type CombinedLiveArrResponse = {
   generatedAtUtc: string;
   liveArr: number;
@@ -130,10 +139,12 @@ type CombinedBillingOverviewReportResponse = {
   linePoints: CombinedPoint[];
   lineSourcePoints: LineSourcePoints;
   arrPerEmployeePoints: ArrPerEmployeePoint[];
+  salesCyclePoints: SalesCyclePoint[];
   retentionPoints: RetentionSeriesPoint[];
   ltvPoints: LtvPoint[];
   ltvNotice: string | null;
   arrPerEmployeeNotice: string | null;
+  salesCycleNotice: string | null;
   cacPoints: CacPoint[];
   cacCurrencyLayerPoints: CacPoint[];
   cacCadPoints: CacPoint[];
@@ -190,6 +201,7 @@ type CombinedOverviewData = {
   linePoints: CombinedPoint[];
   lineSourcePoints: LineSourcePoints;
   arrPerEmployeePoints: ArrPerEmployeePoint[];
+  salesCyclePoints: SalesCyclePoint[];
   retentionPoints: RetentionSeriesPoint[];
   ltvPoints: LtvPoint[];
   cacPoints: CacPoint[];
@@ -272,6 +284,13 @@ function formatPercent(value: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value || 0)}%`;
+}
+
+function formatDays(value: number) {
+  return `${new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value || 0)} days`;
 }
 
 function csvEscape(value: string | number) {
@@ -2527,6 +2546,7 @@ export default function CombinedBillingOverviewPage() {
   const [lineChartMode, setLineChartMode] = useState<"combined" | "source">("combined");
   const [ltvNotice, setLtvNotice] = useState<string | null>(null);
   const [arrPerEmployeeNotice, setArrPerEmployeeNotice] = useState<string | null>(null);
+  const [salesCycleNotice, setSalesCycleNotice] = useState<string | null>(null);
   const [cacNotice, setCacNotice] = useState<string | null>(null);
   const [selectedCacAccountIds, setSelectedCacAccountIds] = useState<string[]>([]);
   const [cacAccountMenuTarget, setCacAccountMenuTarget] = useState<CacMenuTarget>(null);
@@ -2695,6 +2715,7 @@ export default function CombinedBillingOverviewPage() {
     setError(null);
     setLtvNotice(null);
     setArrPerEmployeeNotice(null);
+    setSalesCycleNotice(null);
     setCacNotice(null);
     setShowProjectedArrBreakdown(false);
     setSelectedAiSpendExclusionPoint(null);
@@ -2753,6 +2774,7 @@ export default function CombinedBillingOverviewPage() {
 
       setLtvNotice(overview.ltvNotice);
       setArrPerEmployeeNotice(overview.arrPerEmployeeNotice);
+      setSalesCycleNotice(overview.salesCycleNotice);
       setCacNotice(overview.cacNotice);
 
       setData((prev) => ({
@@ -2787,6 +2809,7 @@ export default function CombinedBillingOverviewPage() {
           aiSpend: overview.lineSourcePoints?.aiSpend || [],
         },
         arrPerEmployeePoints: overview.arrPerEmployeePoints || [],
+        salesCyclePoints: overview.salesCyclePoints || [],
         retentionPoints: overview.retentionPoints || [],
         ltvPoints: overview.ltvPoints || [],
         cacPoints: overview.cacPoints || [],
@@ -2899,6 +2922,7 @@ export default function CombinedBillingOverviewPage() {
     [data],
   );
   const arrPerEmployeePoints = useMemo(() => data?.arrPerEmployeePoints ?? [], [data]);
+  const salesCyclePoints = useMemo(() => data?.salesCyclePoints ?? [], [data]);
   const retentionPoints = useMemo(() => data?.retentionPoints ?? [], [data]);
   const ltvPoints = useMemo(() => data?.ltvPoints ?? [], [data]);
   const cacPoints = useMemo(() => data?.cacPoints ?? [], [data]);
@@ -3185,6 +3209,14 @@ export default function CombinedBillingOverviewPage() {
         <section className="stripe-ui__panel ui-reveal ui-reveal-2">
           <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
             {arrPerEmployeeNotice}
+          </p>
+        </section>
+      )}
+
+      {!loading && !error && salesCycleNotice && (
+        <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+          <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+            {salesCycleNotice}
           </p>
         </section>
       )}
@@ -3483,6 +3515,16 @@ export default function CombinedBillingOverviewPage() {
               points={linePoints}
               valueAccessor={(p) => p.arrGrowth}
               valueFormatter={(v) => formatMoney(v, currency)}
+            />
+
+            <LineChartCard
+              title="Sales Cycle Over Time (Days)"
+              subtitle="Average days between deal creation and close date for HubSpot closed-won deals in each month."
+              points={salesCyclePoints}
+              valueAccessor={(p) => p.avgSalesCycleDays}
+              valueFormatter={(v) => formatDays(v)}
+              stroke="#60a5fa"
+              includeZero
             />
 
             <LtvChartCard points={ltvPoints} currency={currency} />

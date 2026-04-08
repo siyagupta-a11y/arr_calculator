@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { generateReport } from "@/lib/report";
 import type { ReportResponse, ReportRow } from "@/lib/types";
+import { fetchDealsInStage } from "@/lib/hubspot";
 import {
   queryStripeAiSpendFromBigQuery,
   queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery,
@@ -22,7 +23,7 @@ import {
   getMonthlyAverageCurrencyLayerFxRateForCloseMonth,
   getMonthlyAverageFxRateForCloseMonth,
 } from "@/lib/fx";
-import { FX_TARGET_CURRENCY } from "@/lib/logic";
+import { FX_TARGET_CURRENCY, parseDate } from "@/lib/logic";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
@@ -107,6 +108,15 @@ type ArrPerEmployeePoint = {
   fullTimeEmployees: number;
   arrPerEmployee: number;
   employeeNames: string[];
+};
+
+type SalesCyclePoint = {
+  key: string;
+  label: string;
+  periodStart: string;
+  periodEnd: string;
+  avgSalesCycleDays: number;
+  closedWonDealCount: number;
 };
 
 type LogoChurnCounts = {
@@ -536,6 +546,66 @@ function periodEndIsoFromKey(periodKey: string, grain: CombinedGrain) {
   const endMonth = quarter * 3;
   const last = new Date(Date.UTC(year, endMonth, 0));
   return toIsoDateOnly(last);
+}
+
+async function buildMonthlySalesCycleSeries(periodOrder: PeriodRef[], includedDealstage: string): Promise<SalesCyclePoint[]> {
+  const monthlyPeriods = periodOrder.map((period) => {
+    const key = canonicalHubPeriodKey(period.key, "monthly") || period.key;
+    const periodStart = `${key}-01`;
+    const periodEnd = periodEndIsoFromKey(key, "monthly") || periodStart;
+    return {
+      key,
+      label: period.label,
+      periodStart,
+      periodEnd,
+    };
+  });
+
+  const stage = String(includedDealstage || "").trim();
+  if (!stage) {
+    return monthlyPeriods.map((period) => ({
+      ...period,
+      avgSalesCycleDays: 0,
+      closedWonDealCount: 0,
+    }));
+  }
+
+  const deals = await fetchDealsInStage(["createdate", "closedate"], stage);
+  const millisPerDay = 24 * 60 * 60 * 1000;
+  const totalsByMonth = new Map<string, { sumDays: number; count: number }>();
+  for (const deal of deals) {
+    const properties = deal.properties || {};
+    const createdDate = parseDate(properties.createdate);
+    const closeDate = parseDate(properties.closedate);
+    if (!createdDate || !closeDate) continue;
+
+    const closeIso = [
+      String(closeDate.getFullYear()).padStart(4, "0"),
+      String(closeDate.getMonth() + 1).padStart(2, "0"),
+      String(closeDate.getDate()).padStart(2, "0"),
+    ].join("-");
+    const monthKey = periodKeyFromIsoDateForGrain(closeIso, "monthly");
+    if (!monthKey) continue;
+
+    const cycleDays = (closeDate.getTime() - createdDate.getTime()) / millisPerDay;
+    if (!Number.isFinite(cycleDays) || cycleDays < 0) continue;
+
+    const current = totalsByMonth.get(monthKey) || { sumDays: 0, count: 0 };
+    current.sumDays += cycleDays;
+    current.count += 1;
+    totalsByMonth.set(monthKey, current);
+  }
+
+  return monthlyPeriods.map((period) => {
+    const totals = totalsByMonth.get(period.key);
+    const count = totals?.count || 0;
+    const avgSalesCycleDays = count > 0 ? round2((totals?.sumDays || 0) / count) : 0;
+    return {
+      ...period,
+      avgSalesCycleDays,
+      closedWonDealCount: count,
+    };
+  });
 }
 
 function annualizedArrFromRevenueForPeriod(revenue: number, periodStart: string, periodEnd: string) {
@@ -1648,9 +1718,23 @@ async function buildCombinedBillingOverview(
 
   let ltvPoints: LtvPoint[] = [];
   let ltvNotice: string | null = null;
+  let salesCyclePoints: SalesCyclePoint[] = [];
+  let salesCycleNotice: string | null = null;
   if (grain !== "monthly") {
     ltvNotice = "LTV currently supports monthly grain. Switch Time grain to Monthly to load LTV over time.";
+    salesCycleNotice =
+      "Sales cycle currently supports monthly grain. Switch Time grain to Monthly to load average sales-cycle days.";
   } else {
+    try {
+      salesCyclePoints = await buildMonthlySalesCycleSeries(periodOrder, process.env.INCLUDED_DEALSTAGE || "");
+      if (!salesCyclePoints.some((point) => point.closedWonDealCount > 0)) {
+        salesCycleNotice = "No closed-won HubSpot deals were found in this range.";
+      }
+    } catch (error: unknown) {
+      salesCyclePoints = [];
+      salesCycleNotice = `Sales cycle unavailable: ${conciseErrorMessage(error, "HubSpot deal query failed.")}`;
+    }
+
     const buildFallbackLtv = () =>
       buildLtvSeries(
         periodOrder,
@@ -1861,6 +1945,7 @@ async function buildCombinedBillingOverview(
     linePoints,
     lineSourcePoints,
     arrPerEmployeePoints,
+    salesCyclePoints,
     retentionPoints,
     ltvPoints,
     cacPoints,
@@ -1868,6 +1953,7 @@ async function buildCombinedBillingOverview(
     cacCadPoints,
     ltvNotice,
     arrPerEmployeeNotice,
+    salesCycleNotice,
     cacNotice,
     cacCurrencyLayerNotice,
     cacCadNotice,
