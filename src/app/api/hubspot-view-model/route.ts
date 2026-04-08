@@ -7,6 +7,7 @@ import type { Grain, HubspotPlan, ReportMode, ReportResponse, ReportRow } from "
 export const runtime = "nodejs";
 export const maxDuration = 300;
 const CACHE_TTL_MS = readTtlMs("API_HUBSPOT_VIEW_MODEL_CACHE_TTL_MS", 60_000);
+const REPORT_SUBQUERY_CACHE_TTL_MS = readTtlMs("API_HUBSPOT_VIEW_MODEL_REPORT_SUBQUERY_CACHE_TTL_MS", 300_000);
 
 type ArrDisplayScope = "all" | "cloud";
 type GroupField =
@@ -1090,10 +1091,17 @@ async function buildViewModel(payload: ParsedPayload) {
     endDate: previousRange.endDate,
   };
 
+  const cachedReport = (request: Parameters<typeof generateReport>[0]) =>
+    getOrSetCache(
+      `api:hubspot-view-model:report:${stableStringify(request)}`,
+      REPORT_SUBQUERY_CACHE_TTL_MS,
+      () => generateReport(request),
+    );
+
   const [mainReport, chartMainReport, baselineReport] = await Promise.all([
-    generateReport(reportPayload),
-    generateReport(chartPayload),
-    generateReport(chartBaselinePayload),
+    cachedReport(reportPayload),
+    cachedReport(chartPayload),
+    cachedReport(chartBaselinePayload),
   ]);
 
   return computeForPayload(payload, mainReport, chartMainReport, baselineReport);

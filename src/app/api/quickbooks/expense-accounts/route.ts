@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { fetchQuickBooksExpenseAccounts } from "@/lib/quickbooks";
+import { getOrSetCache, readTtlMs } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
+const CACHE_TTL_MS = readTtlMs("API_QUICKBOOKS_EXPENSE_ACCOUNTS_CACHE_TTL_MS", 30_000);
 
 function statusCodeFromMessage(message: string) {
   const lower = message.toLowerCase();
@@ -12,7 +14,9 @@ function statusCodeFromMessage(message: string) {
 
 export async function GET() {
   try {
-    const payload = await fetchQuickBooksExpenseAccounts();
+    const payload = await getOrSetCache("api:quickbooks:expense-accounts", CACHE_TTL_MS, () =>
+      fetchQuickBooksExpenseAccounts(),
+    );
     return NextResponse.json(payload);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";

@@ -31,6 +31,7 @@ export const maxDuration = 300;
 const CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_CACHE_TTL_MS", 60_000);
 const AI_SPEND_EXCLUSIONS_CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_EXCLUSIONS_CACHE_TTL_MS", 300_000);
 const SALES_CYCLE_CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_SALES_CYCLE_CACHE_TTL_MS", 300_000);
+const SUBQUERY_CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_SUBQUERY_CACHE_TTL_MS", 300_000);
 const AI_SPEND_UPCOMING_PRODUCT_TERMS = ["ai tokens", "web search and crawl"];
 
 type CombinedGrain = "daily" | "monthly" | "quarterly";
@@ -1133,6 +1134,18 @@ function parsePayload(raw: Partial<RequestBody>) {
   };
 }
 
+async function cachedGenerateHubspotReport(request: Parameters<typeof generateReport>[0]) {
+  const key = `api:combined-billing-overview:hubspot-report:${stableStringify(request)}`;
+  return getOrSetCache(key, SUBQUERY_CACHE_TTL_MS, () => generateReport(request));
+}
+
+async function cachedQueryStripeBillingOverview(request: Parameters<typeof queryStripeBillingOverviewFromBigQuery>[0]) {
+  const key = `api:combined-billing-overview:stripe-overview:${stableStringify(request)}`;
+  return getOrSetCache(key, SUBQUERY_CACHE_TTL_MS, () =>
+    queryStripeBillingOverviewFromBigQuery(request, { profile: "stripe_arr_correct" }),
+  );
+}
+
 async function buildCombinedBillingOverview(
   startDate: string,
   endDate: string,
@@ -1249,28 +1262,54 @@ async function buildCombinedBillingOverview(
       };
     }
 
-    const exclusions = await resolveEnterprisePrepaidAiSpendExclusions({
-      startDate,
-      endDate,
-      targetCurrency,
-    }).catch(() => ({ customerMonthPrepaidOffsets: [], rows: [] }));
+    const exclusions = await getOrSetCache(
+      `api:stripe-ai-spend:enterprise-prepaid-exclusions:${stableStringify({
+        startDate,
+        endDate,
+        invoiceMonthOffset: 1,
+        targetCurrency,
+      })}`,
+      AI_SPEND_EXCLUSIONS_CACHE_TTL_MS,
+      () =>
+        resolveEnterprisePrepaidAiSpendExclusions({
+          startDate,
+          endDate,
+          targetCurrency,
+        }),
+    ).catch(() => ({ customerMonthPrepaidOffsets: [], rows: [] }));
     aiSpendExcludedEnterprisePrepaidCustomers = exclusions.rows || [];
-    const historical = await queryStripeAiSpendFromBigQuery(
-      {
+    const historical = await getOrSetCache(
+      `api:combined-billing-overview:ai-spend-historical:${stableStringify({
         startDate: previousRange.startDate,
         endDate,
         grain,
         targetCurrency,
         topLimit: 1,
         detailLimit: 1,
-        excludeCustomerIds: [],
-        excludeCustomerMonthPairs: [],
         prepaidOffsetByCustomerMonthPairs: (exclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
           pairKey: entry.pairKey,
           prepaidAppliedMajor: entry.prepaidAppliedMajor,
         })),
-      },
-      { profile: "stripe_arr_correct" },
+      })}`,
+      SUBQUERY_CACHE_TTL_MS,
+      () =>
+        queryStripeAiSpendFromBigQuery(
+          {
+            startDate: previousRange.startDate,
+            endDate,
+            grain,
+            targetCurrency,
+            topLimit: 1,
+            detailLimit: 1,
+            excludeCustomerIds: [],
+            excludeCustomerMonthPairs: [],
+            prepaidOffsetByCustomerMonthPairs: (exclusions.customerMonthPrepaidOffsets || []).map((entry) => ({
+              pairKey: entry.pairKey,
+              prepaidAppliedMajor: entry.prepaidAppliedMajor,
+            })),
+          },
+          { profile: "stripe_arr_correct" },
+        ),
     );
     if (!currentMonthIncludedInRange) return historical;
 
@@ -1373,26 +1412,23 @@ async function buildCombinedBillingOverview(
       })()
     : Promise.resolve(new Map<string, number>());
 
-  const stripeMainPromise = queryStripeBillingOverviewFromBigQuery(
-    {
-      startDate,
-      endDate,
-      grain,
-      groupBy: "none",
-      targetCurrency,
-      includeCustomerArrRows: includeCac || shouldComputeLtv,
-      includeCurrentMonthProjection: false,
-    },
-    { profile: "stripe_arr_correct" },
-  );
-  const hubspotExpandedPromise = generateReport({
+  const stripeMainPromise = cachedQueryStripeBillingOverview({
+    startDate,
+    endDate,
+    grain,
+    groupBy: "none",
+    targetCurrency,
+    includeCustomerArrRows: includeCac || shouldComputeLtv,
+    includeCurrentMonthProjection: false,
+  });
+  const hubspotExpandedPromise = cachedGenerateHubspotReport({
     startDate: previousRange.startDate,
     endDate,
     mode: "contracted",
     grain,
   });
   const stripeBaselinePromise: Promise<Awaited<ReturnType<typeof queryStripeBillingOverviewFromBigQuery>> | null> = includeCac || shouldComputeLtv
-    ? queryStripeBillingOverviewFromBigQuery(
+    ? cachedQueryStripeBillingOverview(
         {
           startDate: previousRange.startDate,
           endDate: previousRange.endDate,
@@ -1402,7 +1438,6 @@ async function buildCombinedBillingOverview(
           includeCustomerArrRows: includeCac || shouldComputeLtv,
           includeCurrentMonthProjection: false,
         },
-        { profile: "stripe_arr_correct" },
       ).catch(() => null)
     : Promise.resolve(null);
   const [hubspotExpanded, stripeMain, stripeBaseline] = await Promise.all([
