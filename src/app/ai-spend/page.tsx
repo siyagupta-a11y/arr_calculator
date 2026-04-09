@@ -67,6 +67,8 @@ type ApiResponse = {
   grain: Grain;
   targetCurrency: string;
   totalRevenue: number;
+  meteredRevenueSalesled?: number;
+  meteredRevenueSelfserve?: number;
   points: AiSpendPoint[];
   topCustomers: AiSpendGroupRow[];
   topProducts: AiSpendGroupRow[];
@@ -413,10 +415,22 @@ export default function AiSpendPage() {
                 {data.reportRunId ? ` | Run: ${data.reportRunId}` : ""}
               </p>
             ) : null}
-            <div className="stripe-ui__stats" style={{ gridTemplateColumns: "repeat(5, minmax(140px, 1fr))" }}>
+            <div className="stripe-ui__stats" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
               <article className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Total net metered revenue</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.totalRevenue || 0, summaryCurrency)}</p>
+              </article>
+              <article className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Metered revenue sales-led</p>
+                <p className="stripe-ui__stat-value">
+                  {formatMoney(data.meteredRevenueSalesled || 0, summaryCurrency)}
+                </p>
+              </article>
+              <article className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Metered revenue self-serve</p>
+                <p className="stripe-ui__stat-value">
+                  {formatMoney(data.meteredRevenueSelfserve || 0, summaryCurrency)}
+                </p>
               </article>
               <article className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Periods</p>
