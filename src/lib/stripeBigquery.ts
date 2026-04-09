@@ -5655,7 +5655,6 @@ export async function queryStripeAiSpendFromBigQuery(
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
   const topLimit = Math.max(1, Math.min(5000, asInt(request.topLimit || 50)));
   const detailLimit = Math.max(1, Math.min(1000, asInt(request.detailLimit || 200)));
-  const includedDealstage = String(process.env.INCLUDED_DEALSTAGE || "").trim();
   const excludedCustomerIds = Array.from(
     new Set(
       (request.excludeCustomerIds || [])
@@ -5688,7 +5687,6 @@ export async function queryStripeAiSpendFromBigQuery(
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
-  const customersTable = getStripeCustomersTable();
 
   const excludedCustomersCteSql = excludedCustomerIds.length
     ? `excluded_customers AS (
@@ -5739,94 +5737,6 @@ export async function queryStripeAiSpendFromBigQuery(
   SELECT pair_key, prepaid_applied_major
   FROM UNNEST(CAST([] AS ARRAY<STRUCT<pair_key STRING, prepaid_applied_major FLOAT64>>))
 ),`;
-  const salesledEmailsCteSql = includedDealstage
-    ? `latest_contacts AS (
-  SELECT * EXCEPT(rn)
-  FROM (
-    SELECT
-      c.*,
-      ROW_NUMBER() OVER (
-        PARTITION BY c.id
-        ORDER BY c.updatedAt DESC
-      ) AS rn
-    FROM \`botpress-stripe-data-pipeline.hubspot.contacts\` c
-    WHERE LOWER(TRIM(COALESCE(CAST(c.properties_email AS STRING), ''))) LIKE '%@%'
-      AND COALESCE(c.archived, FALSE) = FALSE
-  )
-  WHERE rn = 1
-),
-latest_deals AS (
-  SELECT * EXCEPT(rn)
-  FROM (
-    SELECT
-      d.*,
-      COALESCE(
-        CASE
-          WHEN REGEXP_CONTAINS(TRIM(COALESCE(CAST(d.properties_closedate AS STRING), '')), r'^\\d{13,}$')
-            THEN TIMESTAMP_MILLIS(SAFE_CAST(TRIM(COALESCE(CAST(d.properties_closedate AS STRING), '')) AS INT64))
-          WHEN REGEXP_CONTAINS(TRIM(COALESCE(CAST(d.properties_closedate AS STRING), '')), r'^\\d{10}$')
-            THEN TIMESTAMP_SECONDS(SAFE_CAST(TRIM(COALESCE(CAST(d.properties_closedate AS STRING), '')) AS INT64))
-          ELSE SAFE_CAST(NULLIF(TRIM(CAST(d.properties_closedate AS STRING)), '') AS TIMESTAMP)
-        END,
-        SAFE_CAST(NULLIF(TRIM(CAST(d.createdAt AS STRING)), '') AS TIMESTAMP)
-      ) AS close_ts,
-      ROW_NUMBER() OVER (
-        PARTITION BY d.id
-        ORDER BY d.updatedAt DESC
-      ) AS rn
-    FROM \`botpress-stripe-data-pipeline.hubspot.deals\` d
-    WHERE COALESCE(d.archived, FALSE) = FALSE
-      AND TRIM(COALESCE(CAST(d.properties_dealstage AS STRING), '')) = @included_dealstage
-      AND LOWER(TRIM(COALESCE(CAST(d.properties_deployment_type__c AS STRING), ''))) = 'cloud'
-      AND COALESCE(
-        SAFE_CAST(
-          REGEXP_REPLACE(TRIM(COALESCE(CAST(d.properties_current_carr AS STRING), '0')), r'[^0-9.-]', '') AS FLOAT64
-        ),
-        0
-      ) > 0
-  )
-  WHERE rn = 1
-    AND close_ts IS NOT NULL
-    AND DATE(close_ts) BETWEEN DATE(@start_date) AND DATE(@end_date)
-),
-included_salesled_companies AS (
-  SELECT DISTINCT company_id
-  FROM (
-    SELECT
-      REGEXP_EXTRACT(TRIM(COALESCE(CAST(d.properties_hs_primary_associated_company AS STRING), '')), r'\\d+') AS company_id
-    FROM latest_deals d
-    UNION ALL
-    SELECT
-      REGEXP_EXTRACT(company_id_raw, r'\\d+') AS company_id
-    FROM latest_deals d
-    CROSS JOIN UNNEST(
-      CASE
-        WHEN d.companies IS NULL THEN CAST([] AS ARRAY<STRING>)
-        ELSE JSON_VALUE_ARRAY(d.companies, '$')
-      END
-    ) AS company_id_raw
-  )
-  WHERE company_id IS NOT NULL
-    AND TRIM(company_id) != ''
-),
-salesled_emails AS (
-  SELECT DISTINCT
-    LOWER(TRIM(COALESCE(CAST(c.properties_email AS STRING), ''))) AS email
-  FROM latest_contacts c
-  CROSS JOIN UNNEST(
-    CASE
-      WHEN c.companies IS NULL THEN CAST([] AS ARRAY<STRING>)
-      ELSE JSON_VALUE_ARRAY(c.companies, '$')
-    END
-  ) AS company_id_raw
-  JOIN included_salesled_companies isc
-    ON isc.company_id = REGEXP_EXTRACT(company_id_raw, r'\\d+')
-  WHERE LOWER(TRIM(COALESCE(CAST(c.properties_email AS STRING), ''))) != ''
-),`
-    : `salesled_emails AS (
-  SELECT email
-  FROM UNNEST(CAST([] AS ARRAY<STRING>)) AS email
-),`;
 
   const baseCte = `
 WITH latest_invoice_lines AS (
@@ -5868,19 +5778,6 @@ latest_invoices AS (
   )
   WHERE rn = 1
 ),
-latest_customers AS (
-  SELECT * EXCEPT(rn)
-  FROM (
-    SELECT
-      c.*,
-      ROW_NUMBER() OVER (
-        PARTITION BY c.id
-        ORDER BY c.batch_timestamp DESC
-      ) AS rn
-    FROM \`${customersTable}\` c
-  )
-  WHERE rn = 1
-),
 line_discounts AS (
   SELECT
     invoice_line_item_id,
@@ -5891,7 +5788,6 @@ line_discounts AS (
 ${excludedCustomersCteSql}
 ${excludedCustomerMonthPairsCteSql}
 ${prepaidOffsetsCteSql}
-${salesledEmailsCteSql}
 metered_lines_raw AS (
   SELECT
     DATE(il.period_start) AS event_date,
@@ -5900,13 +5796,6 @@ metered_lines_raw AS (
       NULLIF(TRIM(CAST(i.customer_name AS STRING)), ''),
       COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)')
     ) AS customer_name,
-    LOWER(
-      COALESCE(
-        NULLIF(TRIM(CAST(lc.email AS STRING)), ''),
-        NULLIF(TRIM(CAST(i.customer_email AS STRING)), ''),
-        ''
-      )
-    ) AS customer_email,
     COALESCE(NULLIF(TRIM(CAST(il.id AS STRING)), ''), '(blank)') AS line_item_id,
     COALESCE(NULLIF(TRIM(CAST(il.description AS STRING)), ''), '(blank)') AS line_item_description,
     COALESCE(NULLIF(TRIM(CAST(il.price_id AS STRING)), ''), '(blank)') AS price_id,
@@ -5925,8 +5814,6 @@ metered_lines_raw AS (
     ON ld.invoice_line_item_id = il.id
   LEFT JOIN latest_invoices i
     ON i.id = il.invoice_id
-  LEFT JOIN latest_customers lc
-    ON lc.id = COALESCE(NULLIF(TRIM(CAST(i.customer_id AS STRING)), ''), '(blank)')
   WHERE
     LOWER(COALESCE(p.recurring_usage_type, '')) = 'metered'
     AND LOWER(COALESCE(il.currency, '')) = @target_currency
@@ -5938,7 +5825,11 @@ metered_lines_with_offsets AS (
   SELECT
     ml.*,
     CASE
-      WHEN se.email IS NOT NULL THEN 'salesled'
+      WHEN
+        NULLIF(TRIM(COALESCE(ml.customer_name, '')), '') IS NOT NULL
+        AND TRIM(COALESCE(ml.customer_name, '')) != '(blank)'
+        AND TRIM(COALESCE(ml.customer_name, '')) != TRIM(COALESCE(ml.customer_id, ''))
+      THEN 'salesled'
       ELSE 'selfserve'
     END AS customer_segment,
     COALESCE(po.prepaid_applied_major, 0.0) AS prepaid_applied_major,
@@ -5958,8 +5849,6 @@ metered_lines_with_offsets AS (
   FROM metered_lines_raw ml
   LEFT JOIN prepaid_offsets po
     ON po.pair_key = CONCAT(ml.customer_id, '|', FORMAT_DATE('%Y-%m', ml.event_date))
-  LEFT JOIN salesled_emails se
-    ON se.email = ml.customer_email
 ),
 metered_lines AS (
   SELECT
@@ -6102,15 +5991,6 @@ FROM metered_lines
     { name: "end_date", type: "STRING", value: endDateIso },
     { name: "target_currency", type: "STRING", value: targetCurrency },
     { name: "grain", type: "STRING", value: grain },
-    ...(includedDealstage
-      ? ([
-          {
-            name: "included_dealstage",
-            type: "STRING",
-            value: includedDealstage,
-          },
-        ] as BigQueryNamedParameter[])
-      : []),
     ...excludedCustomerIds.map(
       (customerId, idx): BigQueryNamedParameter => ({
         name: `excluded_customer_${idx}`,
@@ -7740,7 +7620,6 @@ export async function queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery(
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
   const topLimit = Math.max(1, Math.min(5000, asInt(request.topLimit || 50)));
   const detailLimit = Math.max(1, Math.min(1000, asInt(request.detailLimit || 200)));
-  const includedDealstage = String(process.env.INCLUDED_DEALSTAGE || "").trim();
   const includes = Array.from(
     new Set(
       (request.productDescriptionIncludes || [])
@@ -7794,7 +7673,6 @@ export async function queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery(
   const profile = normalizeProfile(options?.profile);
   const table = getStripeUpcomingSnapshotsTable(profile);
   const productsTable = getStripeProductsTable(profile);
-  const customersTable = getStripeCustomersTable();
   const sa = getServiceAccount(profile);
   const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
   if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
@@ -7865,94 +7743,6 @@ SELECT snapshot_key AS snapshot_date FROM latest_snapshot
   SELECT customer_id, prepaid_applied_major
   FROM UNNEST(CAST([] AS ARRAY<STRUCT<customer_id STRING, prepaid_applied_major FLOAT64>>))
 ),`;
-  const salesledEmailsCteSql = includedDealstage
-    ? `latest_contacts AS (
-  SELECT * EXCEPT(rn)
-  FROM (
-    SELECT
-      c.*,
-      ROW_NUMBER() OVER (
-        PARTITION BY c.id
-        ORDER BY c.updatedAt DESC
-      ) AS rn
-    FROM \`botpress-stripe-data-pipeline.hubspot.contacts\` c
-    WHERE LOWER(TRIM(COALESCE(CAST(c.properties_email AS STRING), ''))) LIKE '%@%'
-      AND COALESCE(c.archived, FALSE) = FALSE
-  )
-  WHERE rn = 1
-),
-latest_deals AS (
-  SELECT * EXCEPT(rn)
-  FROM (
-    SELECT
-      d.*,
-      COALESCE(
-        CASE
-          WHEN REGEXP_CONTAINS(TRIM(COALESCE(CAST(d.properties_closedate AS STRING), '')), r'^\\d{13,}$')
-            THEN TIMESTAMP_MILLIS(SAFE_CAST(TRIM(COALESCE(CAST(d.properties_closedate AS STRING), '')) AS INT64))
-          WHEN REGEXP_CONTAINS(TRIM(COALESCE(CAST(d.properties_closedate AS STRING), '')), r'^\\d{10}$')
-            THEN TIMESTAMP_SECONDS(SAFE_CAST(TRIM(COALESCE(CAST(d.properties_closedate AS STRING), '')) AS INT64))
-          ELSE SAFE_CAST(NULLIF(TRIM(CAST(d.properties_closedate AS STRING)), '') AS TIMESTAMP)
-        END,
-        SAFE_CAST(NULLIF(TRIM(CAST(d.createdAt AS STRING)), '') AS TIMESTAMP)
-      ) AS close_ts,
-      ROW_NUMBER() OVER (
-        PARTITION BY d.id
-        ORDER BY d.updatedAt DESC
-      ) AS rn
-    FROM \`botpress-stripe-data-pipeline.hubspot.deals\` d
-    WHERE COALESCE(d.archived, FALSE) = FALSE
-      AND TRIM(COALESCE(CAST(d.properties_dealstage AS STRING), '')) = @included_dealstage
-      AND LOWER(TRIM(COALESCE(CAST(d.properties_deployment_type__c AS STRING), ''))) = 'cloud'
-      AND COALESCE(
-        SAFE_CAST(
-          REGEXP_REPLACE(TRIM(COALESCE(CAST(d.properties_current_carr AS STRING), '0')), r'[^0-9.-]', '') AS FLOAT64
-        ),
-        0
-      ) > 0
-  )
-  WHERE rn = 1
-    AND close_ts IS NOT NULL
-    AND DATE(close_ts) BETWEEN DATE(@start_date) AND DATE(@end_date)
-),
-included_salesled_companies AS (
-  SELECT DISTINCT company_id
-  FROM (
-    SELECT
-      REGEXP_EXTRACT(TRIM(COALESCE(CAST(d.properties_hs_primary_associated_company AS STRING), '')), r'\\d+') AS company_id
-    FROM latest_deals d
-    UNION ALL
-    SELECT
-      REGEXP_EXTRACT(company_id_raw, r'\\d+') AS company_id
-    FROM latest_deals d
-    CROSS JOIN UNNEST(
-      CASE
-        WHEN d.companies IS NULL THEN CAST([] AS ARRAY<STRING>)
-        ELSE JSON_VALUE_ARRAY(d.companies, '$')
-      END
-    ) AS company_id_raw
-  )
-  WHERE company_id IS NOT NULL
-    AND TRIM(company_id) != ''
-),
-salesled_emails AS (
-  SELECT DISTINCT
-    LOWER(TRIM(COALESCE(CAST(c.properties_email AS STRING), ''))) AS email
-  FROM latest_contacts c
-  CROSS JOIN UNNEST(
-    CASE
-      WHEN c.companies IS NULL THEN CAST([] AS ARRAY<STRING>)
-      ELSE JSON_VALUE_ARRAY(c.companies, '$')
-    END
-  ) AS company_id_raw
-  JOIN included_salesled_companies isc
-    ON isc.company_id = REGEXP_EXTRACT(company_id_raw, r'\\d+')
-  WHERE LOWER(TRIM(COALESCE(CAST(c.properties_email AS STRING), ''))) != ''
-),`
-    : `salesled_emails AS (
-  SELECT email
-  FROM UNNEST(CAST([] AS ARRAY<STRING>)) AS email
-),`;
 
   const baseCte = `
 WITH table_rows AS (
@@ -7993,22 +7783,8 @@ products_lookup AS (
     ) AS product_description
   FROM \`${productsTable}\`
 ),
-latest_customers AS (
-  SELECT * EXCEPT(rn)
-  FROM (
-    SELECT
-      c.*,
-      ROW_NUMBER() OVER (
-        PARTITION BY c.id
-        ORDER BY c.batch_timestamp DESC
-      ) AS rn
-    FROM \`${customersTable}\` c
-  )
-  WHERE rn = 1
-),
 ${excludedCustomersCteSql}
 ${prepaidOffsetsCteSql}
-${salesledEmailsCteSql}
 matched_lines_raw AS (
   SELECT
     DATE(t.period_start) AS event_date,
@@ -8017,14 +7793,6 @@ matched_lines_raw AS (
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_name')), ''),
       COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)')
     ) AS customer_name,
-    LOWER(
-      COALESCE(
-        NULLIF(TRIM(CAST(lc.email AS STRING)), ''),
-        NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_email')), ''),
-        NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.email')), ''),
-        ''
-      )
-    ) AS customer_email,
     COALESCE(
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.line_item_id')), ''),
       NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.id')), ''),
@@ -8085,14 +7853,16 @@ ${excludedCustomerWhereSql}
       '(blank)'
     )
     AND (${descriptionTermsSql.join(" OR ")})
-  LEFT JOIN latest_customers lc
-    ON lc.id = COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)')
 ),
 matched_lines_with_offsets AS (
   SELECT
     ml.*,
     CASE
-      WHEN se.email IS NOT NULL THEN 'salesled'
+      WHEN
+        NULLIF(TRIM(COALESCE(ml.customer_name, '')), '') IS NOT NULL
+        AND TRIM(COALESCE(ml.customer_name, '')) != '(blank)'
+        AND TRIM(COALESCE(ml.customer_name, '')) != TRIM(COALESCE(ml.customer_id, ''))
+      THEN 'salesled'
       ELSE 'selfserve'
     END AS customer_segment,
     COALESCE(po.prepaid_applied_major, 0.0) AS prepaid_applied_major,
@@ -8112,8 +7882,6 @@ matched_lines_with_offsets AS (
   FROM matched_lines_raw ml
   LEFT JOIN prepaid_offsets po
     ON po.customer_id = ml.customer_id
-  LEFT JOIN salesled_emails se
-    ON se.email = ml.customer_email
 ),
 matched_lines AS (
   SELECT
@@ -8258,15 +8026,6 @@ FROM matched_lines
     { name: "next_month_start_date", type: "STRING", value: nextMonthStartIso },
     { name: "target_currency", type: "STRING", value: targetCurrency },
     { name: "grain", type: "STRING", value: grain },
-    ...(includedDealstage
-      ? ([
-          {
-            name: "included_dealstage",
-            type: "STRING",
-            value: includedDealstage,
-          },
-        ] as BigQueryNamedParameter[])
-      : []),
     ...includes.map((term, idx) => ({ name: `desc_${idx}`, type: "STRING" as const, value: term })),
     ...excludedCustomerIds.map((customerId, idx) => ({
       name: `excluded_customer_${idx}`,
