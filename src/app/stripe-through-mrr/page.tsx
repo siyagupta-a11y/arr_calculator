@@ -517,36 +517,52 @@ export default function StripeThroughMrrPage() {
   }
 
   async function fetchDetailReportPage(pageNum: number): Promise<ApiResponse> {
-    const res = await fetch("/api/stripe-through-mrr-report", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        startDate: data?.startDate || startDate,
-        endDate: data?.endDate || endDate,
-        detailStartMonth: data?.detailStartMonth || detailStartMonth,
-        detailEndMonth: data?.detailEndMonth || detailEndMonth,
-        grain: data?.grain || grain,
-        groupBy: data?.groupBy || groupBy,
-        countryFilters: countryFilterRules,
-        page: pageNum,
-        pageSize: PAGE_SIZE,
-      }),
-    });
-    const text = await res.text();
-    let json: unknown = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = null;
-    }
-    if (!res.ok) {
-      if (json && typeof json === "object" && "error" in json) {
-        throw new Error(String((json as { error?: unknown }).error || "Export page request failed"));
+    const maxAttempts = 6;
+    let attempt = 0;
+    while (attempt < maxAttempts) {
+      attempt += 1;
+      const res = await fetch("/api/stripe-through-mrr-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          startDate: data?.startDate || startDate,
+          endDate: data?.endDate || endDate,
+          detailStartMonth: data?.detailStartMonth || detailStartMonth,
+          detailEndMonth: data?.detailEndMonth || detailEndMonth,
+          grain: data?.grain || grain,
+          groupBy: data?.groupBy || groupBy,
+          countryFilters: countryFilterRules,
+          page: pageNum,
+          pageSize: PAGE_SIZE,
+        }),
+      });
+      const text = await res.text();
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
       }
-      throw new Error(text || `HTTP ${res.status}`);
+      if (res.ok) {
+        if (!json || typeof json !== "object") throw new Error("Invalid API response while exporting detail rows");
+        return json as ApiResponse;
+      }
+      const message =
+        json && typeof json === "object" && "error" in json
+          ? String((json as { error?: unknown }).error || "Export page request failed")
+          : text || `HTTP ${res.status}`;
+      const isRateLimited =
+        res.status === 429 ||
+        (res.status === 403 && /rate.?limit|too many api requests|exceeded rate/i.test(message));
+      const canRetry = attempt < maxAttempts && (isRateLimited || res.status >= 500);
+      if (canRetry) {
+        const waitMs = 500 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
+        await sleep(waitMs);
+        continue;
+      }
+      throw new Error(message || `HTTP ${res.status}`);
     }
-    if (!json || typeof json !== "object") throw new Error("Invalid API response while exporting detail rows");
-    return json as ApiResponse;
+    throw new Error("Export failed after retries");
   }
 
   async function fetchAllDetailRows(): Promise<Array<RawDetailRow | GroupedDetailRow>> {
@@ -557,11 +573,12 @@ export default function StripeThroughMrrPage() {
     rowsByPage.set(currentPage, (data.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
 
     if (totalPages > 1) {
-      const missingPages = Array.from({ length: totalPages }, (_, idx) => idx + 1).filter((pageNum) => pageNum !== currentPage);
-      const reports = await Promise.all(missingPages.map((pageNum) => fetchDetailReportPage(pageNum)));
-      for (const report of reports) {
+      for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
+        if (pageNum === currentPage) continue;
+        const report = await fetchDetailReportPage(pageNum);
         const reportPage = Math.max(1, report.pagination?.page || 1);
         rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
+        await sleep(120);
       }
     }
 
@@ -613,6 +630,7 @@ export default function StripeThroughMrrPage() {
             : text || `HTTP ${res.status}`;
         const isRateLimited =
           res.status === 429 ||
+          (res.status === 403 && /rate.?limit|too many api requests|exceeded rate/i.test(maybeError)) ||
           /rate limit|too many requests/i.test(maybeError);
         const canRetry = attempt < maxAttempts && (isRateLimited || res.status >= 500);
         if (canRetry) {
