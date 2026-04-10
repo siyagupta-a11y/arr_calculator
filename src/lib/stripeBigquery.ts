@@ -2586,6 +2586,18 @@ parsed AS (
     ) AS product_description_event
   FROM source
 ) ,
+customer_ids_in_scope AS (
+  SELECT DISTINCT customer_id
+  FROM parsed
+  WHERE customer_id <> '(blank)'
+  UNION DISTINCT
+  SELECT DISTINCT
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id
+  FROM \`${table}\` t
+  WHERE
+    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+    AND event_timestamp < TIMESTAMP(@detail_start_month_date)
+) ,
 products_lookup AS (
   SELECT
     COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id,
@@ -2613,6 +2625,9 @@ customers_workspace_lookup AS (
       ) AS rn
     FROM \`${customersMetadataTable}\` m
     WHERE LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
+      AND COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') IN (
+        SELECT customer_id FROM customer_ids_in_scope
+      )
   )
   WHERE rn = 1
 ) ,
@@ -2627,16 +2642,9 @@ customers_lookup AS (
   FROM \`${customersTable}\` c
   LEFT JOIN customers_workspace_lookup cwl
     ON cwl.customer_id = COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)')
-) ,
-customer_ids_in_scope AS (
-  SELECT DISTINCT customer_id FROM parsed
-  UNION DISTINCT
-  SELECT DISTINCT
-    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id
-  FROM \`${table}\` t
-  WHERE
-    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
-    AND event_timestamp < TIMESTAMP(@detail_start_month_date)
+  WHERE COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') IN (
+    SELECT customer_id FROM customer_ids_in_scope
+  )
 ),
 payment_methods_lookup AS (
   SELECT
@@ -3165,51 +3173,56 @@ history_source AS (
   SELECT
     UPPER(CAST(event_type AS STRING)) AS event_type,
     CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major,
-    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_id')), ''), '(blank)') AS customer_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_id')), ''),
       '(blank)'
     ) AS subscription_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_item_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_item')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item')), ''),
       '(blank)'
     ) AS subscription_item_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price')), ''),
       '(blank)'
     ) AS price_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product')), ''),
       '(blank)'
     ) AS product_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_nickname')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_description')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_display_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.nickname')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.lookup_key')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.product_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.lookup_key')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.product_name')), ''),
       '(blank)'
     ) AS price_description,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_description')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.display_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.nickname')), ''),
       ''
     ) AS product_description_event
-  FROM \`${table}\` t
-  WHERE
-    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
-    AND event_timestamp < TIMESTAMP(@detail_start_month_date)
+  FROM (
+    SELECT
+      t.*,
+      TO_JSON_STRING(t) AS raw_json
+    FROM \`${table}\` t
+    WHERE
+      LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+      AND event_timestamp < TIMESTAMP(@detail_start_month_date)
+  ) t
 ),
 history_enriched AS (
   SELECT
@@ -3312,59 +3325,64 @@ history_source AS (
   SELECT
     UPPER(CAST(event_type AS STRING)) AS event_type,
     CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major,
-    COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.customer_id')), ''), '(blank)') AS customer_id,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_id')), ''), '(blank)') AS customer_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspace_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspaceId')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspace.id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.metadata.workspace_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.metadata.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.workspace.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.metadata.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.metadata.workspaceId')), ''),
       ''
     ) AS event_workspace_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_id')), ''),
       '(blank)'
     ) AS subscription_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_item_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.subscription_item')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item')), ''),
       '(blank)'
     ) AS subscription_item_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price')), ''),
       '(blank)'
     ) AS price_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product')), ''),
       '(blank)'
     ) AS product_id,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_nickname')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_description')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price_display_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.nickname')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.lookup_key')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.price.product_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.lookup_key')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.product_name')), ''),
       '(blank)'
     ) AS price_description,
     COALESCE(
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product_description')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.display_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.product.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.nickname')), ''),
       ''
     ) AS product_description_event
-  FROM \`${table}\` t
-  WHERE
-    LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
-    AND event_timestamp < TIMESTAMP(@detail_start_month_date)
+  FROM (
+    SELECT
+      t.*,
+      TO_JSON_STRING(t) AS raw_json
+    FROM \`${table}\` t
+    WHERE
+      LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+      AND event_timestamp < TIMESTAMP(@detail_start_month_date)
+  ) t
 ),
 history_enriched AS (
   SELECT
@@ -3718,6 +3736,23 @@ buckets AS (
   JOIN bucket_candidates bc
     ON TRUE
 ),
+events_source AS (
+  SELECT
+    t.event_timestamp,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    TO_JSON_STRING(t) AS raw_json,
+    CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` AS t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+    AND t.event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+),
+customer_ids_in_scope AS (
+  SELECT DISTINCT customer_id
+  FROM events_source
+  WHERE customer_id <> '(blank)'
+),
 customers_workspace_lookup AS (
   SELECT
     customer_id,
@@ -3735,6 +3770,9 @@ customers_workspace_lookup AS (
       ) AS rn
     FROM \`${customersMetadataTable}\` m
     WHERE LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
+      AND COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') IN (
+        SELECT customer_id FROM customer_ids_in_scope
+      )
   )
   WHERE rn = 1
 ),
@@ -3746,35 +3784,34 @@ customers_lookup AS (
   FROM \`${customersTable}\` c
   LEFT JOIN customers_workspace_lookup cwl
     ON cwl.customer_id = COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)')
+  WHERE COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') IN (
+    SELECT customer_id FROM customer_ids_in_scope
+  )
 ),
 events_base AS (
   SELECT
-    t.event_timestamp,
-    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    e.event_timestamp,
+    e.customer_id,
     LOWER(
       COALESCE(
         NULLIF(TRIM(cl.customer_email), ''),
-        NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''),
+        NULLIF(TRIM(e.customer_id), ''),
         '(blank)'
       )
     ) AS customer_key,
     COALESCE(
       NULLIF(TRIM(cl.customer_workspace_id), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspace_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspaceId')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.workspace.id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.metadata.workspace_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(t), '$.metadata.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(e.raw_json, '$.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(e.raw_json, '$.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(e.raw_json, '$.workspace.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(e.raw_json, '$.metadata.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(e.raw_json, '$.metadata.workspaceId')), ''),
       ''
     ) AS workspace_id,
-    CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
-  FROM \`${table}\` AS t
+    e.mrr_change_major
+  FROM events_source e
   LEFT JOIN customers_lookup cl
-    ON cl.customer_id = COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)')
-  CROSS JOIN bounds b
-  WHERE
-    LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
-    AND t.event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+    ON cl.customer_id = e.customer_id
 ),
 customer_ids_by_key AS (
   SELECT
@@ -3963,6 +4000,24 @@ buckets AS (
   CROSS JOIN bounds b
   WHERE GREATEST(bc.bucket_start, b.requested_start_date) < LEAST(bc.bucket_end_exclusive_raw, b.requested_end_exclusive_date)
 ),
+events_source AS (
+  SELECT
+    t.event_timestamp,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    COALESCE(NULLIF(TRIM(CAST(t.product_id AS STRING)), ''), '(blank)') AS product_id_norm,
+    COALESCE(NULLIF(TRIM(CAST(t.price_id AS STRING)), ''), '') AS price_id_norm,
+    CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+    AND t.event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+),
+customer_ids_in_scope AS (
+  SELECT DISTINCT customer_id
+  FROM events_source
+  WHERE customer_id <> '(blank)'
+),
 products_lookup AS (
   SELECT
     COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id,
@@ -3987,6 +4042,9 @@ customers_workspace_lookup AS (
       ) AS rn
     FROM \`${customersMetadataTable}\` m
     WHERE LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
+      AND COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') IN (
+        SELECT customer_id FROM customer_ids_in_scope
+      )
   )
   WHERE rn = 1
 ),
@@ -3998,69 +4056,55 @@ customers_lookup AS (
   FROM \`${customersTable}\` c
   LEFT JOIN customers_workspace_lookup cwl
     ON cwl.customer_id = COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)')
-),
-events_source AS (
-  SELECT
-    t.event_timestamp,
-    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
-    COALESCE(NULLIF(TRIM(CAST(t.product_id AS STRING)), ''), '(blank)') AS product_id_norm,
-    COALESCE(NULLIF(TRIM(CAST(t.price_id AS STRING)), ''), '') AS price_id_norm,
-    CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
-  FROM \`${table}\` t
-  CROSS JOIN bounds b
-  WHERE
-    LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
-    AND t.event_timestamp < TIMESTAMP(b.requested_end_exclusive_date)
+  WHERE COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') IN (
+    SELECT customer_id FROM customer_ids_in_scope
+  )
 ),
 events_base AS (
   SELECT
-    es.event_timestamp,
-    es.customer_id,
-    LOWER(COALESCE(NULLIF(TRIM(cl.customer_email), ''), NULLIF(TRIM(es.customer_id), ''), '(blank)')) AS customer_key,
-    COALESCE(NULLIF(TRIM(cl.customer_workspace_id), ''), '') AS workspace_id,
-    es.mrr_change_major,
+    base.event_timestamp,
+    base.customer_id,
+    base.customer_key,
+    base.workspace_id,
+    base.mrr_change_major,
     CASE
       -- Explicit overrides for known Stripe products.
-      WHEN LOWER(es.product_id_norm) = 'prod_m9gpcuhm0q9uzg' THEN 0
-      WHEN LOWER(es.product_id_norm) = 'prod_pbflquwvpscoaw' THEN 1
-      WHEN REGEXP_CONTAINS(plan_hints, r'enterprise') THEN 5
-      WHEN REGEXP_CONTAINS(plan_hints, r'managed') THEN 4
-      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])team([^a-z]|$)') THEN 3
-      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])plus([^a-z]|$)') THEN 2
-      WHEN REGEXP_CONTAINS(plan_hints, r'pay\\s*as\\s*you\\s*go|payg|metered|usage|token') THEN 1
+      WHEN LOWER(base.product_id_norm) = 'prod_m9gpcuhm0q9uzg' THEN 0
+      WHEN LOWER(base.product_id_norm) = 'prod_pbflquwvpscoaw' THEN 1
+      WHEN REGEXP_CONTAINS(base.plan_hints, r'enterprise') THEN 5
+      WHEN REGEXP_CONTAINS(base.plan_hints, r'managed') THEN 4
+      WHEN REGEXP_CONTAINS(base.plan_hints, r'(^|[^a-z])team([^a-z]|$)') THEN 3
+      WHEN REGEXP_CONTAINS(base.plan_hints, r'(^|[^a-z])plus([^a-z]|$)') THEN 2
+      WHEN REGEXP_CONTAINS(base.plan_hints, r'pay\\s*as\\s*you\\s*go|payg|metered|usage|token') THEN 1
       ELSE 0
     END AS plan_rank
   FROM (
     SELECT
-      es.*,
+      es.event_timestamp,
+      es.customer_id,
+      es.product_id_norm,
+      LOWER(COALESCE(NULLIF(TRIM(cl.customer_email), ''), NULLIF(TRIM(es.customer_id), ''), '(blank)')) AS customer_key,
+      COALESCE(NULLIF(TRIM(cl.customer_workspace_id), ''), '') AS workspace_id,
+      es.mrr_change_major,
       LOWER(
         CONCAT(
           ' ',
           COALESCE(NULLIF(TRIM(es.price_id_norm), ''), ''),
           ' ',
           COALESCE(NULLIF(TRIM(es.product_id_norm), ''), ''),
+          ' ',
+          COALESCE(NULLIF(TRIM(pl.product_name), ''), ''),
+          ' ',
+          COALESCE(NULLIF(TRIM(pl.product_description), ''), ''),
           ' '
         )
-      ) AS raw_plan_hints
+      ) AS plan_hints
     FROM events_source es
-  ) es
-  LEFT JOIN customers_lookup cl
-    ON cl.customer_id = es.customer_id
-  LEFT JOIN products_lookup pl
-    ON pl.product_id = es.product_id_norm
-  CROSS JOIN (
-    SELECT 1
-  ) _
-  CROSS JOIN UNNEST([
-    LOWER(
-      CONCAT(
-        es.raw_plan_hints,
-        COALESCE(CONCAT(' ', NULLIF(TRIM(pl.product_name), '')), ''),
-        COALESCE(CONCAT(' ', NULLIF(TRIM(pl.product_description), '')), ''),
-        ' '
-      )
-    )
-  ]) AS plan_hints
+    LEFT JOIN customers_lookup cl
+      ON cl.customer_id = es.customer_id
+    LEFT JOIN products_lookup pl
+      ON pl.product_id = es.product_id_norm
+  ) base
 ),
 customer_ids_by_key AS (
   SELECT
