@@ -151,6 +151,10 @@ function downloadCsv(filename: string, header: string[], rows: Array<Array<unkno
   URL.revokeObjectURL(url);
 }
 
+function csvTimestamp() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
 async function parseApiResponse(res: Response) {
   const text = await res.text();
   let json: unknown = null;
@@ -332,6 +336,51 @@ export default function TofuPage() {
       row.contributionMrr,
     ]);
     downloadCsv(filename, header, csvRows);
+  }
+
+  function exportMainTableCsv() {
+    if (!data) return;
+
+    if (effectiveGroupBy === "plan") {
+      const header = ["plan", "bridge_metric", ...planPeriodOrder.map((period) => period.key)];
+      const csvRows = planBridgeRows.map((row) => [
+        PLAN_LABELS[row.plan] || row.plan,
+        row.metric,
+        ...planPeriodOrder.map((period) => Number(row.valuesByPeriod[period.key] || 0)),
+      ]);
+      downloadCsv(
+        `tofu-plan-bridge-${effectiveCombineMode}-${csvTimestamp()}.csv`,
+        header,
+        csvRows,
+      );
+      return;
+    }
+
+    const header = [
+      "period_key",
+      "period_label",
+      "beginning_arr",
+      "new_arr",
+      "expansion_arr",
+      "contraction_arr",
+      "churn_arr",
+      "ending_arr",
+    ];
+    const csvRows = rows.map((row) => [
+      row.periodKey,
+      row.periodLabel,
+      row.beginningArr,
+      row.newArr,
+      row.expansionArr,
+      row.contractionArr,
+      row.churnArr,
+      row.endingArr,
+    ]);
+    downloadCsv(
+      `tofu-monthly-bridge-${effectiveCombineMode}-${csvTimestamp()}.csv`,
+      header,
+      csvRows,
+    );
   }
 
   function renderDrillCell(row: TofuMonthRow, metric: TofuDetailMetric, value: number) {
@@ -516,9 +565,19 @@ export default function TofuPage() {
           </section>
 
           <section className="stripe-ui__panel ui-reveal ui-reveal-3">
-            <h2 className="stripe-ui__panel-title">
-              {effectiveGroupBy === "plan" ? "TOFU ARR bridge by plan" : "Monthly TOFU ARR bridge"}
-            </h2>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+              <h2 className="stripe-ui__panel-title" style={{ marginBottom: 0 }}>
+                {effectiveGroupBy === "plan" ? "TOFU ARR bridge by plan" : "Monthly TOFU ARR bridge"}
+              </h2>
+              <button
+                type="button"
+                className="stripe-ui__btn stripe-ui__btn--secondary"
+                onClick={exportMainTableCsv}
+                disabled={effectiveGroupBy === "plan" ? planBridgeRows.length === 0 : rows.length === 0}
+              >
+                Export table CSV
+              </button>
+            </div>
             {effectiveGroupBy === "plan" ? (
               <p className="stripe-ui__panel-subtitle">
                 For plan switches, ARR is removed from the previous plan as Net upgrade/downgrade and added to the
