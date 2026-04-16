@@ -5963,7 +5963,7 @@ GROUP BY bucket_start
 ORDER BY bucket_start ASC
 `;
 
-  const topCustomersQuery = `
+const topCustomersQuery = `
 ${baseCte}
 SELECT
   customer_id AS group_key,
@@ -5973,7 +5973,6 @@ SELECT
 FROM metered_lines
 GROUP BY group_key, group_label
 ORDER BY revenue DESC, group_label ASC
-LIMIT @top_limit
 `;
 
   const topProductsQuery = `
@@ -6067,10 +6066,7 @@ FROM metered_lines
 
   const [summaryRows, topCustomersRows, topProductsRows, topPricesRows, detailRowsRaw, segmentSummaryRows] = await Promise.all([
     runBigQueryQueryRows(accessToken, projectId, location, summaryQuery, baseParams),
-    runBigQueryQueryRows(accessToken, projectId, location, topCustomersQuery, [
-      ...baseParams,
-      { name: "top_limit", type: "INT64", value: String(topLimit) },
-    ]),
+    runBigQueryQueryRows(accessToken, projectId, location, topCustomersQuery, baseParams),
     runBigQueryQueryRows(accessToken, projectId, location, topProductsQuery, [
       ...baseParams,
       { name: "top_limit", type: "INT64", value: String(topLimit) },
@@ -7996,7 +7992,7 @@ GROUP BY bucket_start
 ORDER BY bucket_start ASC
 `;
 
-  const topCustomersQuery = `
+const topCustomersQuery = `
 ${baseCte}
 SELECT
   customer_id AS group_key,
@@ -8006,7 +8002,6 @@ SELECT
 FROM matched_lines
 GROUP BY group_key, group_label
 ORDER BY revenue DESC, group_label ASC
-LIMIT @top_limit
 `;
 
   const topProductsQuery = `
@@ -8092,10 +8087,7 @@ FROM matched_lines
 
   const [summaryRows, topCustomersRows, topProductsRows, topPricesRows, detailRowsRaw, segmentSummaryRows] = await Promise.all([
     runBigQueryQueryRows(accessToken, projectId, location, summaryQuery, baseParams),
-    runBigQueryQueryRows(accessToken, projectId, location, topCustomersQuery, [
-      ...baseParams,
-      { name: "top_limit", type: "INT64", value: String(topLimit) },
-    ]),
+    runBigQueryQueryRows(accessToken, projectId, location, topCustomersQuery, baseParams),
     runBigQueryQueryRows(accessToken, projectId, location, topProductsQuery, [
       ...baseParams,
       { name: "top_limit", type: "INT64", value: String(topLimit) },
