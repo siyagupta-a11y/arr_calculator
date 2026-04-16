@@ -628,6 +628,32 @@ function annualizedArrFromRevenueForPeriod(revenue: number, periodStart: string,
   if (!start || !end || end.getTime() < start.getTime()) {
     return round2(Number(revenue || 0) * 12);
   }
+
+  const startYear = start.getUTCFullYear();
+  const startMonth = start.getUTCMonth();
+  const startDay = start.getUTCDate();
+  const endYear = end.getUTCFullYear();
+  const endMonth = end.getUTCMonth();
+  const endDay = end.getUTCDate();
+  const endMonthLastDay = new Date(Date.UTC(endYear, endMonth + 1, 0)).getUTCDate();
+
+  // Full calendar month buckets should annualize at exactly 12x.
+  if (startDay === 1 && startYear === endYear && startMonth === endMonth && endDay === endMonthLastDay) {
+    return round2(Number(revenue || 0) * 12);
+  }
+
+  // Full calendar quarter buckets should annualize at exactly 4x.
+  const isQuarterStartMonth = startMonth === 0 || startMonth === 3 || startMonth === 6 || startMonth === 9;
+  if (
+    startDay === 1 &&
+    isQuarterStartMonth &&
+    endDay === endMonthLastDay &&
+    endMonth === startMonth + 2 &&
+    endYear === startYear
+  ) {
+    return round2(Number(revenue || 0) * 4);
+  }
+
   const msPerDay = 24 * 60 * 60 * 1000;
   const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / msPerDay) + 1);
   return round2((Number(revenue || 0) * 365) / days);
