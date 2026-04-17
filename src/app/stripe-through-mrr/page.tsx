@@ -46,6 +46,7 @@ type GroupedDetailRow = {
   groupKey: string;
   groupLabel: string;
   customerCountry?: string;
+  customerTerritory?: string;
   monthKey: string;
   monthLabel: string;
   eventCount: number;
@@ -372,6 +373,7 @@ export default function StripeThroughMrrPage() {
         groupKey: string;
         groupLabel: string;
         customerCountry: string;
+        customerTerritory: string;
         associatedCustomerIds: string[];
         associatedWorkspaceIds: string[];
         salesAssist: "yes" | "no";
@@ -380,12 +382,13 @@ export default function StripeThroughMrrPage() {
       }
     >();
     for (const row of groupedRows) {
-      const mapKey = `${row.groupKey}|${row.groupLabel}|${row.customerCountry || "N/A"}`;
+      const mapKey = `${row.groupKey}|${row.groupLabel}|${row.customerCountry || "N/A"}|${row.customerTerritory || "N/A"}`;
       if (!byGroup.has(mapKey)) {
         byGroup.set(mapKey, {
           groupKey: row.groupKey,
           groupLabel: row.groupLabel || row.groupKey || "(blank)",
           customerCountry: row.customerCountry || "N/A",
+          customerTerritory: row.customerTerritory || "N/A",
           associatedCustomerIds: row.associatedCustomerIds || [],
           associatedWorkspaceIds: row.associatedWorkspaceIds || [],
           salesAssist: row.salesAssist === "yes" ? "yes" : "no",
@@ -396,6 +399,9 @@ export default function StripeThroughMrrPage() {
       const entry = byGroup.get(mapKey)!;
       if ((entry.customerCountry === "N/A" || !entry.customerCountry) && row.customerCountry) {
         entry.customerCountry = row.customerCountry;
+      }
+      if ((entry.customerTerritory === "N/A" || !entry.customerTerritory) && row.customerTerritory) {
+        entry.customerTerritory = row.customerTerritory;
       }
       entry.associatedCustomerIds = mergeStringLists(entry.associatedCustomerIds, row.associatedCustomerIds);
       entry.associatedWorkspaceIds = mergeStringLists(entry.associatedWorkspaceIds, row.associatedWorkspaceIds);
@@ -453,6 +459,7 @@ export default function StripeThroughMrrPage() {
       (g) =>
         String(g.groupLabel || g.groupKey || "").toLowerCase().includes(needle) ||
         String(g.customerCountry || "").toLowerCase().includes(needle) ||
+        String(g.customerTerritory || "").toLowerCase().includes(needle) ||
         g.associatedCustomerIds.some((customerId) => customerId.toLowerCase().includes(needle)),
     );
   }, [groupedMatrixRows, filterGroupSearch]);
@@ -464,6 +471,7 @@ export default function StripeThroughMrrPage() {
         groupKey: string;
         groupLabel: string;
         customerCountry: string;
+        customerTerritory: string;
         associatedCustomerIds: string[];
         associatedWorkspaceIds: string[];
         salesAssist: "yes" | "no";
@@ -471,12 +479,13 @@ export default function StripeThroughMrrPage() {
       }
     >();
     for (const row of rows) {
-      const mapKey = `${row.groupKey}|${row.groupLabel}|${row.customerCountry || "N/A"}`;
+      const mapKey = `${row.groupKey}|${row.groupLabel}|${row.customerCountry || "N/A"}|${row.customerTerritory || "N/A"}`;
       if (!byGroup.has(mapKey)) {
         byGroup.set(mapKey, {
           groupKey: row.groupKey,
           groupLabel: row.groupLabel || row.groupKey || "(blank)",
           customerCountry: row.customerCountry || "N/A",
+          customerTerritory: row.customerTerritory || "N/A",
           associatedCustomerIds: row.associatedCustomerIds || [],
           associatedWorkspaceIds: row.associatedWorkspaceIds || [],
           salesAssist: row.salesAssist === "yes" ? "yes" : "no",
@@ -486,6 +495,9 @@ export default function StripeThroughMrrPage() {
       const entry = byGroup.get(mapKey)!;
       if ((entry.customerCountry === "N/A" || !entry.customerCountry) && row.customerCountry) {
         entry.customerCountry = row.customerCountry;
+      }
+      if ((entry.customerTerritory === "N/A" || !entry.customerTerritory) && row.customerTerritory) {
+        entry.customerTerritory = row.customerTerritory;
       }
       entry.associatedCustomerIds = mergeStringLists(entry.associatedCustomerIds, row.associatedCustomerIds);
       entry.associatedWorkspaceIds = mergeStringLists(entry.associatedWorkspaceIds, row.associatedWorkspaceIds);
@@ -729,6 +741,7 @@ export default function StripeThroughMrrPage() {
             (g) =>
               String(g.groupLabel || g.groupKey || "").toLowerCase().includes(needle) ||
               String(g.customerCountry || "").toLowerCase().includes(needle) ||
+              String(g.customerTerritory || "").toLowerCase().includes(needle) ||
               g.associatedCustomerIds.some((customerId) => customerId.toLowerCase().includes(needle),
               ),
           )
@@ -737,14 +750,21 @@ export default function StripeThroughMrrPage() {
         selectedMetrics.map((metric) => `${month.monthLabel} - ${DETAIL_METRIC_OPTIONS.find((o) => o.key === metric)?.label || metric}`),
       );
       const baseHeaders = groupBy === "email"
-        ? ["Group", "Customer IDs", "Sales assist", ...metricHeaders]
+        ? ["Group", "Customer IDs", "Customer country", "Customer territory", "Sales assist", ...metricHeaders]
         : ["Group", ...metricHeaders];
       const csvRows = filtered.map((group) => {
         const values = detailMonthsInRange.flatMap((month) =>
           selectedMetrics.map((metric) => String(metricValue(group.byMonth.get(month.monthKey), metric))),
         );
         return groupBy === "email"
-          ? [displayGroupLabel(group), group.associatedCustomerIds.join(" | "), group.salesAssist, ...values]
+          ? [
+            displayGroupLabel(group),
+            group.associatedCustomerIds.join(" | "),
+            group.customerCountry || "N/A",
+            group.customerTerritory || "N/A",
+            group.salesAssist,
+            ...values,
+          ]
           : [displayGroupLabel(group), ...values];
       });
       downloadCsv("stripe-through-mrr-detail-grouped.csv", baseHeaders, csvRows);
@@ -780,6 +800,8 @@ export default function StripeThroughMrrPage() {
             previousMonth,
             customerId,
             group.groupLabel || group.groupKey || "(blank)",
+            group.customerCountry || "N/A",
+            group.customerTerritory || "N/A",
             group.associatedWorkspaceIds.join(" | "),
             "yes",
             String(previousMonthMrr),
@@ -795,6 +817,8 @@ export default function StripeThroughMrrPage() {
           "Previous month",
           "Customer ID",
           "Email group",
+          "Customer country",
+          "Customer territory",
           "Workspace IDs",
           "Sales assist",
           "Previous month-end MRR",
@@ -1289,6 +1313,8 @@ export default function StripeThroughMrrPage() {
                       <tr>
                         <th rowSpan={2}>Group</th>
                         {groupBy === "email" && <th rowSpan={2}>Customer IDs</th>}
+                        {groupBy === "email" && <th rowSpan={2}>Country</th>}
+                        {groupBy === "email" && <th rowSpan={2}>Territory</th>}
                         {groupBy === "email" && <th rowSpan={2}>Sales assist</th>}
                         {detailMonthsInRange.map((month) => (
                           <th key={month.monthKey} className="stripe-ui__num" colSpan={selectedMetrics.length}>
@@ -1327,9 +1353,11 @@ export default function StripeThroughMrrPage() {
                       </tr>
                     )
                       : filteredGroupedMatrixRows.map((group) => (
-                        <tr key={`${group.groupKey}|${group.groupLabel}|${group.customerCountry || "N/A"}`}>
+                        <tr key={`${group.groupKey}|${group.groupLabel}|${group.customerCountry || "N/A"}|${group.customerTerritory || "N/A"}`}>
                           <td>{displayGroupLabel(group)}</td>
                           {groupBy === "email" && <td>{group.associatedCustomerIds.join(", ")}</td>}
+                          {groupBy === "email" && <td>{group.customerCountry || "N/A"}</td>}
+                          {groupBy === "email" && <td>{group.customerTerritory || "N/A"}</td>}
                           {groupBy === "email" && <td>{group.salesAssist}</td>}
                           {detailMonthsInRange.flatMap((month) =>
                             selectedMetrics.map((metric) => {

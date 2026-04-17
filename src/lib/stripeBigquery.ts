@@ -117,6 +117,7 @@ export type StripeThroughMrrGroupedDetailRow = {
   groupKey: string;
   groupLabel: string;
   customerCountry?: string;
+  customerTerritory?: string;
   monthKey: string;
   monthLabel: string;
   eventCount: number;
@@ -3300,6 +3301,7 @@ FROM filtered_group_totals`;
     customer_workspace_id,
     customer_country,
     customer_country_code,
+    customer_territory,
     customer_created
   FROM enriched
 ),
@@ -3317,7 +3319,11 @@ group_totals AS (
     COALESCE(
       ARRAY_AGG(NULLIF(customer_country_code, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
       ''
-    ) AS group_customer_country_code
+    ) AS group_customer_country_code,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_territory, 'N/A') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      'N/A'
+    ) AS group_customer_territory
   FROM grouped_source
   GROUP BY group_key, group_label
 ),
@@ -3416,7 +3422,11 @@ history_by_group AS (
     COALESCE(
       ARRAY_AGG(NULLIF(customer_country_code, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
       ''
-    ) AS group_customer_country_code
+    ) AS group_customer_country_code,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_territory, 'N/A') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      'N/A'
+    ) AS group_customer_territory
   FROM history_enriched
   GROUP BY group_key, group_label
 ),
@@ -3428,7 +3438,8 @@ all_group_totals AS (
     associated_customer_ids,
     associated_workspace_ids,
     group_customer_country,
-    group_customer_country_code
+    group_customer_country_code,
+    group_customer_territory
   FROM group_totals
   UNION ALL
   SELECT
@@ -3438,7 +3449,8 @@ all_group_totals AS (
     hbg.associated_customer_ids,
     hbg.associated_workspace_ids,
     hbg.group_customer_country,
-    hbg.group_customer_country_code
+    hbg.group_customer_country_code,
+    hbg.group_customer_territory
   FROM history_by_group hbg
   WHERE ${historyGroupFilterSql}
     AND NOT EXISTS (
@@ -3459,7 +3471,8 @@ paged_groups AS (
     associated_customer_ids,
     associated_workspace_ids,
     group_customer_country,
-    group_customer_country_code
+    group_customer_country_code,
+    group_customer_territory
   FROM filtered_group_totals
   ORDER BY net_mrr_change DESC, group_label ASC
   LIMIT @limit_rows
@@ -3485,6 +3498,7 @@ group_monthly AS (
     ANY_VALUE(pg.associated_workspace_ids) AS associated_workspace_ids,
     ANY_VALUE(pg.group_customer_country) AS group_customer_country,
     ANY_VALUE(pg.group_customer_country_code) AS group_customer_country_code,
+    ANY_VALUE(pg.group_customer_territory) AS group_customer_territory,
     m.month_start,
     COUNT(gs.event_timestamp) AS event_count,
     COALESCE(SUM(gs.mrr_change_major), 0.0) AS net_mrr_change,
@@ -3512,6 +3526,7 @@ group_monthly_with_base AS (
     gm.associated_workspace_ids,
     gm.group_customer_country,
     gm.group_customer_country_code,
+    gm.group_customer_territory,
     gm.group_total_net_mrr_change,
     gm.month_start,
     gm.event_count,
@@ -3533,6 +3548,7 @@ SELECT
   gmb.associated_workspace_ids,
   gmb.group_customer_country,
   gmb.group_customer_country_code,
+  gmb.group_customer_territory,
   FORMAT_DATE('%Y-%m', gmb.month_start) AS month_key,
   FORMAT_DATE('%b %Y', gmb.month_start) AS month_label,
   gmb.event_count,
@@ -3629,6 +3645,10 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
             customerCountry:
               canonicalCountryLabel(asString(row.group_customer_country_code) || asString(row.group_customer_country)) ||
               asString(row.group_customer_country) ||
+              "N/A",
+            customerTerritory:
+              canonicalTerritoryLabel(asString(row.group_customer_territory)) ||
+              asString(row.group_customer_territory) ||
               "N/A",
             monthKey: asString(row.month_key),
             monthLabel: asString(row.month_label),
