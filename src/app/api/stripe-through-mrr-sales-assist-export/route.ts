@@ -33,12 +33,18 @@ function toMoneyText(value: number) {
   return Number.isFinite(value) ? value.toFixed(2) : "0.00";
 }
 
-async function buildResponse(detailMonth: string, targetCurrency: string) {
-  const payload = await queryStripeThroughMrrSalesAssistExportFromBigQuery(
-    { detailMonth, targetCurrency },
-    STRIPE_THROUGH_MRR_OPTIONS,
-  );
+function previousIsoMonth(isoMonth: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(isoMonth || "").trim());
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return "";
+  const d = new Date(Date.UTC(year, month - 1, 1));
+  d.setUTCMonth(d.getUTCMonth() - 1);
+  return d.toISOString().slice(0, 7);
+}
 
+async function buildResponse(detailMonth: string, targetCurrency: string) {
   let transactionalWorkspaceIds = new Set<string>();
   try {
     const fetched = await fetchWorkspaceIdsForDealStageLabel();
@@ -54,6 +60,20 @@ async function buildResponse(detailMonth: string, targetCurrency: string) {
       }`,
     );
   }
+  const workspaceIds = Array.from(transactionalWorkspaceIds);
+  if (!workspaceIds.length) {
+    return {
+      detailMonth,
+      previousMonth: previousIsoMonth(detailMonth),
+      targetCurrency: targetCurrency.toUpperCase(),
+      rows: [],
+    };
+  }
+
+  const payload = await queryStripeThroughMrrSalesAssistExportFromBigQuery(
+    { detailMonth, targetCurrency, workspaceIds },
+    STRIPE_THROUGH_MRR_OPTIONS,
+  );
 
   const rows: string[][] = [];
   for (const group of payload.rows) {
@@ -61,15 +81,9 @@ async function buildResponse(detailMonth: string, targetCurrency: string) {
     const current = Number(group.currentMonthEndMrr || 0);
     if (!(Math.abs(previous) <= EPSILON && current > EPSILON)) continue;
 
-    const workspaceIds = (group.associatedWorkspaceIds || []).filter(Boolean);
-    const hasSalesAssist = workspaceIds.some((workspaceId) =>
-      transactionalWorkspaceIds.has(normalizeWorkspaceIdToken(workspaceId)),
-    );
-    if (!hasSalesAssist) continue;
-
     const customerIds = (group.associatedCustomerIds || []).filter(Boolean);
     if (!customerIds.length) continue;
-    const workspaceCell = workspaceIds.join(" | ");
+    const workspaceCell = (group.associatedWorkspaceIds || []).filter(Boolean).join(" | ");
 
     for (const customerId of customerIds) {
       rows.push([

@@ -197,6 +197,7 @@ export type StripeThroughMrrCustomerArrResult = {
 export type StripeThroughMrrSalesAssistExportRequest = {
   detailMonth: string;
   targetCurrency: string;
+  workspaceIds?: string[];
 };
 
 export type StripeThroughMrrSalesAssistExportCandidateRow = {
@@ -3989,6 +3990,21 @@ export async function queryStripeThroughMrrSalesAssistExportFromBigQuery(
   const previousMonth = isoMonthFromDateUtc(previousMonthDate);
   const detailMonthStartIso = isoDateFromUtcDate(detailMonthDate);
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const transactionalWorkspaceIds = Array.from(
+    new Set(
+      (request.workspaceIds || [])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+  if (!transactionalWorkspaceIds.length) {
+    return {
+      detailMonth,
+      previousMonth,
+      targetCurrency: targetCurrency.toUpperCase(),
+      rows: [],
+    };
+  }
 
   const profile = normalizeProfile(options?.profile);
   const sa = getServiceAccount(profile);
@@ -3999,12 +4015,26 @@ export async function queryStripeThroughMrrSalesAssistExportFromBigQuery(
   const table = getStripeArrCorrectMrrChangeTable();
   const customersTable = getStripeCustomersTable();
   const customersMetadataTable = getStripeCustomersMetadataTable(profile);
+  const workspaceIdsSql = transactionalWorkspaceIds.map((id) => `'${escapeSqlString(id)}'`).join(", ");
 
   const query = `
 WITH bounds AS (
   SELECT
     DATE(@detail_month_start) AS detail_month_start,
     DATE_ADD(DATE(@detail_month_start), INTERVAL 1 MONTH) AS next_month_start
+),
+transactional_workspace_ids AS (
+  SELECT workspace_id
+  FROM UNNEST([${workspaceIdsSql}]) AS workspace_id
+),
+eligible_customer_ids AS (
+  SELECT DISTINCT COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') AS customer_id
+  FROM \`${customersMetadataTable}\` m
+  WHERE
+    LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
+    AND LOWER(COALESCE(NULLIF(TRIM(CAST(m.value AS STRING)), ''), '')) IN (
+      SELECT workspace_id FROM transactional_workspace_ids
+    )
 ),
 events_source AS (
   SELECT
@@ -4017,6 +4047,9 @@ events_source AS (
   WHERE
     LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
     AND t.event_timestamp < TIMESTAMP(b.next_month_start)
+    AND COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') IN (
+      SELECT customer_id FROM eligible_customer_ids
+    )
 ),
 customer_ids_in_scope AS (
   SELECT DISTINCT customer_id
@@ -4042,6 +4075,9 @@ customers_workspace_lookup AS (
     WHERE LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
       AND COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') IN (
         SELECT customer_id FROM customer_ids_in_scope
+      )
+      AND LOWER(COALESCE(NULLIF(TRIM(CAST(m.value AS STRING)), ''), '')) IN (
+        SELECT workspace_id FROM transactional_workspace_ids
       )
   )
   WHERE rn = 1
