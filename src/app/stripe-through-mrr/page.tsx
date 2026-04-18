@@ -123,6 +123,10 @@ const GRAIN_OPTIONS: Array<{ key: Grain; label: string }> = [
 ];
 
 const PAGE_SIZE = 1000;
+const EXPORT_PAGE_SIZE_RAW = 5000;
+const EXPORT_PAGE_SIZE_GROUPED = 1200;
+const EXPORT_FETCH_CONCURRENCY_RAW = 4;
+const EXPORT_FETCH_CONCURRENCY_GROUPED = 2;
 
 function defaultDateRange() {
   const end = new Date();
@@ -524,7 +528,7 @@ export default function StripeThroughMrrPage() {
     downloadCsv(`stripe-through-mrr-${effectiveGrain}.csv`, headers, rows);
   }
 
-  async function fetchDetailReportPage(pageNum: number): Promise<ApiResponse> {
+  async function fetchDetailReportPage(pageNum: number, pageSize: number): Promise<ApiResponse> {
     const maxAttempts = 6;
     let attempt = 0;
     while (attempt < maxAttempts) {
@@ -541,7 +545,7 @@ export default function StripeThroughMrrPage() {
           groupBy: data?.groupBy || groupBy,
           countryFilters: countryFilterRules,
           page: pageNum,
-          pageSize: PAGE_SIZE,
+          pageSize,
         }),
       });
       const text = await res.text();
@@ -575,18 +579,36 @@ export default function StripeThroughMrrPage() {
 
   async function fetchAllDetailRows(): Promise<Array<RawDetailRow | GroupedDetailRow>> {
     if (!data) return [];
-    const totalPages = Math.max(1, data.pagination.totalPages || 1);
-    const currentPage = Math.max(1, data.pagination.page || 1);
-    const rowsByPage = new Map<number, Array<RawDetailRow | GroupedDetailRow>>();
-    rowsByPage.set(currentPage, (data.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
+    const isGrouped = (data?.detailMode || detailMode) === "grouped";
+    const exportPageSize = isGrouped ? EXPORT_PAGE_SIZE_GROUPED : EXPORT_PAGE_SIZE_RAW;
+    const exportConcurrency = isGrouped ? EXPORT_FETCH_CONCURRENCY_GROUPED : EXPORT_FETCH_CONCURRENCY_RAW;
+    const totalRows = Math.max(0, data.pagination.totalRows || 0);
+    if (totalRows <= 0) return [];
 
-    if (totalPages > 1) {
-      for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
-        if (pageNum === currentPage) continue;
-        const report = await fetchDetailReportPage(pageNum);
-        const reportPage = Math.max(1, report.pagination?.page || 1);
+    const totalPages = Math.max(1, Math.ceil(totalRows / exportPageSize));
+    const rowsByPage = new Map<number, Array<RawDetailRow | GroupedDetailRow>>();
+    let nextPage = 1;
+
+    const worker = async () => {
+      while (true) {
+        const pageNum = nextPage;
+        nextPage += 1;
+        if (pageNum > totalPages) return;
+        const report = await fetchDetailReportPage(pageNum, exportPageSize);
+        const reportPage = Math.max(1, report.pagination?.page || pageNum);
         rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
-        await sleep(120);
+      }
+    };
+
+    const workers = Array.from({ length: Math.min(exportConcurrency, totalPages) }, () => worker());
+    await Promise.all(workers);
+
+    if (rowsByPage.size !== totalPages) {
+      for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
+        if (rowsByPage.has(pageNum)) continue;
+        const report = await fetchDetailReportPage(pageNum, exportPageSize);
+        const reportPage = Math.max(1, report.pagination?.page || pageNum);
+        rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
       }
     }
 
