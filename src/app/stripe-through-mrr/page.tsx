@@ -759,6 +759,44 @@ export default function StripeThroughMrrPage() {
     }
   }
 
+  function exportDisplayedSalesAssistCsv() {
+    if (detailMode !== "grouped" || groupBy !== "email") {
+      setError("Sales assist full export is available only when grouped by Email.");
+      return;
+    }
+    const rows = filteredGroupedMatrixRows.filter((group) => group.salesAssist === "yes");
+    const metricHeaders = detailMonthsInRange.flatMap((month) =>
+      selectedMetrics.map((metric) => `${month.monthLabel} - ${DETAIL_METRIC_OPTIONS.find((o) => o.key === metric)?.label || metric}`),
+    );
+    const csvRows = rows.map((group) => {
+      const values = detailMonthsInRange.flatMap((month) =>
+        selectedMetrics.map((metric) => String(metricValue(group.byMonth.get(month.monthKey), metric))),
+      );
+      return [
+        displayGroupLabel(group),
+        group.associatedCustomerIds.join(" | "),
+        group.customerCountry || "N/A",
+        group.customerTerritory || "N/A",
+        group.associatedWorkspaceIds.join(" | "),
+        group.salesAssist || "no",
+        ...values,
+      ];
+    });
+    downloadCsv(
+      `stripe-through-mrr-sales-assist-all-displayed-${effectiveDetailStartMonth}-to-${effectiveDetailEndMonth}.csv`,
+      [
+        "Group",
+        "Customer IDs",
+        "Customer country",
+        "Customer territory",
+        "Workspace IDs",
+        "Sales assist",
+        ...metricHeaders,
+      ],
+      csvRows,
+    );
+  }
+
   function toggleMetric(metric: DetailMetricKey) {
     setSelectedMetrics((prev) => {
       if (prev.includes(metric)) {
@@ -1051,6 +1089,14 @@ export default function StripeThroughMrrPage() {
                 title={`Uses detail month ${effectiveDetailEndMonth} and compares against ${previousIsoMonth(effectiveDetailEndMonth) || "previous month"}.`}
               >
                 {exportingCsv ? "Exporting..." : "Download Sales Assist CSV"}
+              </button>
+              <button
+                className="stripe-ui__btn stripe-ui__btn--ghost"
+                onClick={exportDisplayedSalesAssistCsv}
+                disabled={detailMode !== "grouped" || groupBy !== "email" || !filteredGroupedMatrixRows.length || exportingCsv}
+                title="Exports all currently displayed sales-assist=yes grouped-email rows."
+              >
+                Download Sales Assist CSV (All Yes)
               </button>
             </div>
 
