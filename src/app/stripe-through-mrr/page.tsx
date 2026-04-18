@@ -234,6 +234,16 @@ function previousIsoMonth(isoMonth: string) {
   return d.toISOString().slice(0, 7);
 }
 
+function isoMonthEnd(isoMonth: string) {
+  if (!isIsoMonth(isoMonth)) return "";
+  const [yearRaw, monthRaw] = isoMonth.split("-");
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return "";
+  const last = new Date(Date.UTC(year, month, 0, 0, 0, 0, 0));
+  return last.toISOString().slice(0, 10);
+}
+
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
@@ -605,18 +615,20 @@ export default function StripeThroughMrrPage() {
     const prevMonth = previousIsoMonth(exportMonth);
     if (!prevMonth) throw new Error(`Invalid detail month: ${exportMonth}`);
     const forcedStartDate = isoMonthStart(prevMonth);
-    const exportStartDate = startDate && startDate < forcedStartDate ? startDate : forcedStartDate;
+    const exportEndDate = isoMonthEnd(exportMonth);
+    if (!exportEndDate) throw new Error(`Invalid detail month end: ${exportMonth}`);
     const payloadBase = {
-      startDate: exportStartDate,
-      endDate,
+      // Keep this export tightly scoped: only the previous month and selected month.
+      startDate: forcedStartDate,
+      endDate: exportEndDate,
       detailStartMonth: prevMonth,
       detailEndMonth: exportMonth,
-      grain,
+      grain: "monthly" as Grain,
       groupBy: "email" as GroupBy,
       pageSize: 5000,
     };
     const fetchPageWithRetry = async (pageNum: number) => {
-      const maxAttempts = 4;
+      const maxAttempts = 8;
       let attempt = 0;
       while (attempt < maxAttempts) {
         attempt += 1;
@@ -646,7 +658,7 @@ export default function StripeThroughMrrPage() {
           /rate limit|too many requests/i.test(maybeError);
         const canRetry = attempt < maxAttempts && (isRateLimited || res.status >= 500);
         if (canRetry) {
-          const waitMs = 400 * Math.pow(2, attempt - 1);
+          const waitMs = 400 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 200);
           await sleep(waitMs);
           continue;
         }
@@ -660,6 +672,7 @@ export default function StripeThroughMrrPage() {
     for (let pageNum = 2; pageNum <= extraPages + 1; pageNum += 1) {
       const pageData = await fetchPageWithRetry(pageNum);
       allRows.push(...pageData.detailRows);
+      await sleep(120);
     }
     return allRows.filter(isGroupedRow);
   }
