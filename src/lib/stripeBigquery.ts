@@ -145,6 +145,7 @@ export type StripeThroughMrrReportRequest = {
   pageSize: number;
   targetCurrency: string;
   skipSummary?: boolean;
+  skipCount?: boolean;
 };
 
 export type StripeThroughMrrReportResult = {
@@ -2908,6 +2909,7 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const pageSize = Math.max(1, Math.min(STRIPE_THROUGH_MRR_MAX_PAGE_SIZE, Math.floor(asNumber(request.pageSize) || 1000)));
   const page = Math.max(1, Math.floor(asNumber(request.page) || 1));
   const skipSummary = !!request.skipSummary;
+  const skipCount = !!request.skipCount;
 
   const profile = normalizeProfile(options?.profile);
   const sa = getServiceAccount(profile);
@@ -3134,17 +3136,7 @@ WHERE
   let totalRows = 0;
   let detailRowsRaw: Record<string, unknown>[] = [];
   if (groupBy === "none") {
-    const countQuery = `${detailBaseCte}
-SELECT
-  COUNT(*) AS total_rows
-FROM enriched`;
-    const countRows = await runBigQueryQueryRows(accessToken, projectId, location, countQuery, detailBaseParams);
-    totalRows = asInt((countRows[0] || {}).total_rows);
-    const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
-    const clampedPage = Math.min(page, totalPages);
-    const offsetRows = (clampedPage - 1) * pageSize;
-    if (totalRows > 0) {
-      const rowsQuery = `${detailBaseCte}
+    const rowsQuery = `${detailBaseCte}
 SELECT
   FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', event_timestamp, 'UTC') AS event_timestamp_utc,
   event_type,
@@ -3163,164 +3155,35 @@ FROM enriched
 ORDER BY event_timestamp DESC, subscription_item_id DESC, price_id DESC
 LIMIT @limit_rows
 OFFSET @offset_rows`;
+    if (skipCount) {
+      const offsetRows = (page - 1) * pageSize;
       detailRowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, rowsQuery, [
         ...detailBaseParams,
         { name: "limit_rows", type: "INT64", value: String(pageSize) },
         { name: "offset_rows", type: "INT64", value: String(offsetRows) },
       ]);
+    } else {
+      const countQuery = `${detailBaseCte}
+SELECT
+  COUNT(*) AS total_rows
+FROM enriched`;
+      const countRows = await runBigQueryQueryRows(accessToken, projectId, location, countQuery, detailBaseParams);
+      totalRows = asInt((countRows[0] || {}).total_rows);
+      const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
+      const clampedPage = Math.min(page, totalPages);
+      const offsetRows = (clampedPage - 1) * pageSize;
+      if (totalRows > 0) {
+        detailRowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, rowsQuery, [
+          ...detailBaseParams,
+          { name: "limit_rows", type: "INT64", value: String(pageSize) },
+          { name: "offset_rows", type: "INT64", value: String(offsetRows) },
+        ]);
+      }
     }
   } else {
     const groupSql = STRIPE_THROUGH_MRR_GROUP_BY_SQL[groupBy];
     const historyGroupFilterSql = groupBy === "email" ? "TRUE" : "hbg.base_mrr <> 0";
-    const countQuery = `${detailBaseCte}
-, grouped_source AS (
-  SELECT
-    ${groupSql.keyExpr} AS group_key,
-    ${groupSql.labelExpr} AS group_label,
-    event_timestamp,
-    event_type,
-    mrr_change_major,
-    customer_country,
-    customer_country_code,
-    customer_created
-  FROM enriched
-),
-group_totals AS (
-  SELECT
-    group_key,
-    group_label,
-    ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
-    COALESCE(
-      ARRAY_AGG(NULLIF(customer_country, 'N/A') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
-      'N/A'
-    ) AS group_customer_country,
-    COALESCE(
-      ARRAY_AGG(NULLIF(customer_country_code, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
-      ''
-    ) AS group_customer_country_code
-  FROM grouped_source
-  GROUP BY group_key, group_label
-),
-history_source AS (
-  SELECT
-    UPPER(CAST(event_type AS STRING)) AS event_type,
-    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major,
-    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_id')), ''), '(blank)') AS customer_id,
-    COALESCE(
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_id')), ''),
-      '(blank)'
-    ) AS subscription_id,
-    COALESCE(
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item')), ''),
-      '(blank)'
-    ) AS subscription_item_id,
-    COALESCE(
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.id')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price')), ''),
-      '(blank)'
-    ) AS price_id,
-    COALESCE(
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_id')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.id')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product')), ''),
-      '(blank)'
-    ) AS product_id,
-    COALESCE(
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_nickname')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_description')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_display_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.nickname')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.name')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.lookup_key')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.product_name')), ''),
-      '(blank)'
-    ) AS price_description,
-    COALESCE(
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_description')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.name')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.display_name')), ''),
-      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.nickname')), ''),
-      ''
-    ) AS product_description_event
-  FROM (
-    SELECT
-      t.*,
-      TO_JSON_STRING(t) AS raw_json
-    FROM \`${table}\` t
-    WHERE
-      LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
-      AND event_timestamp < TIMESTAMP(@detail_start_month_date)
-  ) t
-),
-history_enriched AS (
-  SELECT
-    hs.*,
-    COALESCE(cc.customer_email, '') AS customer_email,
-    cc.customer_created AS customer_created,
-    COALESCE(cc.customer_country, 'N/A') AS customer_country,
-    COALESCE(cc.customer_country_code, '') AS customer_country_code,
-    COALESCE(cc.customer_territory, 'N/A') AS customer_territory,
-    COALESCE(
-      NULLIF(TRIM(pl.product_description_table), ''),
-      NULLIF(TRIM(hs.product_description_event), ''),
-      '(blank)'
-    ) AS product_description
-  FROM history_source hs
-  LEFT JOIN customer_countries_enriched cc ON cc.customer_id = hs.customer_id
-  LEFT JOIN products_lookup pl ON pl.product_id = hs.product_id
-),
-history_by_group AS (
-  SELECT
-    ${groupSql.keyExpr} AS group_key,
-    ${groupSql.labelExpr} AS group_label,
-    COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr,
-    COALESCE(
-      ARRAY_AGG(NULLIF(customer_country, 'N/A') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
-      'N/A'
-    ) AS group_customer_country,
-    COALESCE(
-      ARRAY_AGG(NULLIF(customer_country_code, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
-      ''
-    ) AS group_customer_country_code
-  FROM history_enriched
-  GROUP BY group_key, group_label
-),
-all_group_totals AS (
-  SELECT group_key, group_label, group_customer_country, group_customer_country_code FROM group_totals
-  UNION ALL
-  SELECT hbg.group_key, hbg.group_label, hbg.group_customer_country, hbg.group_customer_country_code
-  FROM history_by_group hbg
-  WHERE ${historyGroupFilterSql}
-    AND NOT EXISTS (
-      SELECT 1 FROM group_totals gt
-      WHERE gt.group_key = hbg.group_key AND gt.group_label = hbg.group_label
-    )
-),
-filtered_group_totals AS (
-  SELECT *
-  FROM all_group_totals
-  ${countryFilter.whereSql ? `WHERE ${countryFilter.whereSql}` : ""}
-)
-SELECT
-  COUNT(*) AS total_rows
-FROM filtered_group_totals`;
-    const countRows = await runBigQueryQueryRows(
-      accessToken,
-      projectId,
-      location,
-      countQuery,
-      groupedDetailParamsWithCountryFilters,
-    );
-    totalRows = asInt((countRows[0] || {}).total_rows);
-    const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
-    const clampedPage = Math.min(page, totalPages);
-    const offsetRows = (clampedPage - 1) * pageSize;
-    if (totalRows > 0) {
-      const rowsQuery = `${detailBaseCte}
+    const rowsQuery = `${detailBaseCte}
 , grouped_source AS (
   SELECT
     ${groupSql.keyExpr} AS group_key,
@@ -3610,17 +3473,174 @@ SELECT
   ) AS month_end_arr
 FROM group_monthly_with_base gmb
 ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_start ASC`;
+    if (skipCount) {
+      const offsetRows = (page - 1) * pageSize;
       detailRowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, rowsQuery, [
         ...groupedDetailParamsWithCountryFilters,
         { name: "limit_rows", type: "INT64", value: String(pageSize) },
         { name: "offset_rows", type: "INT64", value: String(offsetRows) },
       ]);
+    } else {
+      const countQuery = `${detailBaseCte}
+, grouped_source AS (
+  SELECT
+    ${groupSql.keyExpr} AS group_key,
+    ${groupSql.labelExpr} AS group_label,
+    event_timestamp,
+    event_type,
+    mrr_change_major,
+    customer_country,
+    customer_country_code,
+    customer_created
+  FROM enriched
+),
+group_totals AS (
+  SELECT
+    group_key,
+    group_label,
+    ROUND(COALESCE(SUM(mrr_change_major), 0.0), 2) AS net_mrr_change,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country, 'N/A') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      'N/A'
+    ) AS group_customer_country,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country_code, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      ''
+    ) AS group_customer_country_code
+  FROM grouped_source
+  GROUP BY group_key, group_label
+),
+history_source AS (
+  SELECT
+    UPPER(CAST(event_type AS STRING)) AS event_type,
+    CAST(COALESCE(mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_id')), ''), '(blank)') AS customer_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_id')), ''),
+      '(blank)'
+    ) AS subscription_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item')), ''),
+      '(blank)'
+    ) AS subscription_item_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price')), ''),
+      '(blank)'
+    ) AS price_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product')), ''),
+      '(blank)'
+    ) AS product_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.nickname')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.lookup_key')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.product_name')), ''),
+      '(blank)'
+    ) AS price_description,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.display_name')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.nickname')), ''),
+      ''
+    ) AS product_description_event
+  FROM (
+    SELECT
+      t.*,
+      TO_JSON_STRING(t) AS raw_json
+    FROM \`${table}\` t
+    WHERE
+      LOWER(COALESCE(CAST(currency AS STRING), '')) = @target_currency
+      AND event_timestamp < TIMESTAMP(@detail_start_month_date)
+  ) t
+),
+history_enriched AS (
+  SELECT
+    hs.*,
+    COALESCE(cc.customer_email, '') AS customer_email,
+    cc.customer_created AS customer_created,
+    COALESCE(cc.customer_country, 'N/A') AS customer_country,
+    COALESCE(cc.customer_country_code, '') AS customer_country_code,
+    COALESCE(cc.customer_territory, 'N/A') AS customer_territory,
+    COALESCE(
+      NULLIF(TRIM(pl.product_description_table), ''),
+      NULLIF(TRIM(hs.product_description_event), ''),
+      '(blank)'
+    ) AS product_description
+  FROM history_source hs
+  LEFT JOIN customer_countries_enriched cc ON cc.customer_id = hs.customer_id
+  LEFT JOIN products_lookup pl ON pl.product_id = hs.product_id
+),
+history_by_group AS (
+  SELECT
+    ${groupSql.keyExpr} AS group_key,
+    ${groupSql.labelExpr} AS group_label,
+    COALESCE(SUM(mrr_change_major), 0.0) AS base_mrr,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country, 'N/A') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      'N/A'
+    ) AS group_customer_country,
+    COALESCE(
+      ARRAY_AGG(NULLIF(customer_country_code, '') IGNORE NULLS ORDER BY IFNULL(customer_created, TIMESTAMP('9999-12-31')) ASC LIMIT 1)[OFFSET(0)],
+      ''
+    ) AS group_customer_country_code
+  FROM history_enriched
+  GROUP BY group_key, group_label
+),
+all_group_totals AS (
+  SELECT group_key, group_label, group_customer_country, group_customer_country_code FROM group_totals
+  UNION ALL
+  SELECT hbg.group_key, hbg.group_label, hbg.group_customer_country, hbg.group_customer_country_code
+  FROM history_by_group hbg
+  WHERE ${historyGroupFilterSql}
+    AND NOT EXISTS (
+      SELECT 1 FROM group_totals gt
+      WHERE gt.group_key = hbg.group_key AND gt.group_label = hbg.group_label
+    )
+),
+filtered_group_totals AS (
+  SELECT *
+  FROM all_group_totals
+  ${countryFilter.whereSql ? `WHERE ${countryFilter.whereSql}` : ""}
+)
+SELECT
+  COUNT(*) AS total_rows
+FROM filtered_group_totals`;
+      const countRows = await runBigQueryQueryRows(
+        accessToken,
+        projectId,
+        location,
+        countQuery,
+        groupedDetailParamsWithCountryFilters,
+      );
+      totalRows = asInt((countRows[0] || {}).total_rows);
+      const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
+      const clampedPage = Math.min(page, totalPages);
+      const offsetRows = (clampedPage - 1) * pageSize;
+      if (totalRows > 0) {
+        detailRowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, rowsQuery, [
+          ...groupedDetailParamsWithCountryFilters,
+          { name: "limit_rows", type: "INT64", value: String(pageSize) },
+          { name: "offset_rows", type: "INT64", value: String(offsetRows) },
+        ]);
+      }
     }
   }
 
   const detailMode: "raw" | "grouped" = groupBy === "none" ? "raw" : "grouped";
-  const totalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
-  const clampedPage = Math.min(page, totalPages);
+  const computedTotalPages = totalRows > 0 ? Math.ceil(totalRows / pageSize) : 1;
+  const clampedPage = Math.min(page, computedTotalPages);
   const groupLabelForDisplay = (rawKey: string, rawLabel: string) => {
     const raw = rawLabel || rawKey;
     if (groupBy === "country") return canonicalCountryLabel(raw) || raw || "N/A";
@@ -3697,6 +3717,14 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
           };
         });
 
+  const returnedRows = detailRows.length;
+  const hasMore = skipCount ? returnedRows === pageSize : clampedPage < computedTotalPages;
+  const effectiveTotalRows = skipCount
+    ? ((page - 1) * pageSize + returnedRows + (hasMore ? 1 : 0))
+    : totalRows;
+  const effectiveTotalPages = skipCount ? (hasMore ? page + 1 : Math.max(1, page)) : computedTotalPages;
+  const effectivePage = skipCount ? page : clampedPage;
+
   return {
     startDate: startDateIso,
     endDate: endDateIso,
@@ -3710,12 +3738,12 @@ ORDER BY gmb.group_total_net_mrr_change DESC, gmb.group_label ASC, gmb.month_sta
     detailRows,
     detailMode,
     pagination: {
-      page: clampedPage,
+      page: effectivePage,
       pageSize,
-      returnedRows: detailRows.length,
-      totalRows,
-      totalPages,
-      hasMore: clampedPage < totalPages,
+      returnedRows,
+      totalRows: effectiveTotalRows,
+      totalPages: effectiveTotalPages,
+      hasMore,
     },
   };
 }

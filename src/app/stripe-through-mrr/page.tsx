@@ -123,8 +123,8 @@ const GRAIN_OPTIONS: Array<{ key: Grain; label: string }> = [
 ];
 
 const PAGE_SIZE = 1000;
-const EXPORT_PAGE_SIZE_RAW = 30000;
-const EXPORT_PAGE_SIZE_GROUPED = 8000;
+const EXPORT_PAGE_SIZE_RAW = 20000;
+const EXPORT_PAGE_SIZE_GROUPED = 5000;
 const EXPORT_FETCH_CONCURRENCY_RAW = 3;
 const EXPORT_FETCH_CONCURRENCY_GROUPED = 2;
 
@@ -528,7 +528,12 @@ export default function StripeThroughMrrPage() {
     downloadCsv(`stripe-through-mrr-${effectiveGrain}.csv`, headers, rows);
   }
 
-  async function fetchDetailReportPage(pageNum: number, pageSize: number, skipSummary = false): Promise<ApiResponse> {
+  async function fetchDetailReportPage(
+    pageNum: number,
+    pageSize: number,
+    skipSummary = false,
+    skipCount = false,
+  ): Promise<ApiResponse> {
     const maxAttempts = 8;
     let attempt = 0;
     while (attempt < maxAttempts) {
@@ -548,6 +553,7 @@ export default function StripeThroughMrrPage() {
             page: pageNum,
             pageSize,
             skipSummary,
+            skipCount,
           }),
         });
         const text = await res.text();
@@ -594,8 +600,6 @@ export default function StripeThroughMrrPage() {
     const isGrouped = (data?.detailMode || detailMode) === "grouped";
     const exportPageSize = isGrouped ? EXPORT_PAGE_SIZE_GROUPED : EXPORT_PAGE_SIZE_RAW;
     const exportConcurrency = isGrouped ? EXPORT_FETCH_CONCURRENCY_GROUPED : EXPORT_FETCH_CONCURRENCY_RAW;
-    const totalRows = Math.max(0, data.pagination.totalRows || 0);
-    if (totalRows <= 0) return [];
 
     const candidatePageSizes = Array.from(
       new Set([
@@ -609,35 +613,32 @@ export default function StripeThroughMrrPage() {
     let lastError: unknown = null;
     for (const candidatePageSize of candidatePageSizes) {
       try {
-        const totalPages = Math.max(1, Math.ceil(totalRows / candidatePageSize));
         const rowsByPage = new Map<number, Array<RawDetailRow | GroupedDetailRow>>();
-        let nextPage = 1;
+        let nextBatchStartPage = 1;
+        let stopPage: number | null = null;
 
-        const worker = async () => {
-          while (true) {
-            const pageNum = nextPage;
-            nextPage += 1;
-            if (pageNum > totalPages) return;
-            const report = await fetchDetailReportPage(pageNum, candidatePageSize, true);
-            const reportPage = Math.max(1, report.pagination?.page || pageNum);
+        while (stopPage == null || nextBatchStartPage <= stopPage) {
+          const pages = Array.from({ length: exportConcurrency }, (_, idx) => nextBatchStartPage + idx);
+          const batch = await Promise.all(
+            pages.map((pageNum) => fetchDetailReportPage(pageNum, candidatePageSize, true, true)),
+          );
+
+          for (const report of batch) {
+            const reportPage = Math.max(1, report.pagination?.page || 1);
             rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
+            const returnedRows = Math.max(0, report.pagination?.returnedRows || report.detailRows?.length || 0);
+            if (returnedRows < candidatePageSize) {
+              stopPage = stopPage == null ? reportPage : Math.min(stopPage, reportPage);
+            }
           }
-        };
-
-        const workers = Array.from({ length: Math.min(exportConcurrency, totalPages) }, () => worker());
-        await Promise.all(workers);
-
-        if (rowsByPage.size !== totalPages) {
-          for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
-            if (rowsByPage.has(pageNum)) continue;
-            const report = await fetchDetailReportPage(pageNum, candidatePageSize, true);
-            const reportPage = Math.max(1, report.pagination?.page || pageNum);
-            rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
-          }
+          nextBatchStartPage += exportConcurrency;
         }
 
+        if (stopPage == null) {
+          stopPage = Math.max(0, ...Array.from(rowsByPage.keys()));
+        }
         const allRows: Array<RawDetailRow | GroupedDetailRow> = [];
-        for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
+        for (let pageNum = 1; pageNum <= stopPage; pageNum += 1) {
           allRows.push(...(rowsByPage.get(pageNum) || []));
         }
         return allRows;
