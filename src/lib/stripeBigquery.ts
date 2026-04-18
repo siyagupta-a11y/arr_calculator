@@ -699,6 +699,7 @@ const STRIPE_CHARGES_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.charg
 const STRIPE_PAYMENT_METHODS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.payment_methods";
 const STRIPE_UPCOMING_SNAPSHOTS_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.upcoming_invoice_line_snapshots";
+const STRIPE_THROUGH_MRR_MAX_PAGE_SIZE = 20000;
 const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   GOOGLE_SERVICE_ACCOUNT_JSON: "GOOGLE_SERVICE_ACCOUNT_JSON_STRIPE_ARR_CORRECT",
   GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64_STRIPE_ARR_CORRECT",
@@ -2903,7 +2904,7 @@ export async function queryStripeThroughMrrReportFromBigQuery(
     "group_customer_country",
   );
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
-  const pageSize = Math.max(1, Math.min(5000, Math.floor(asNumber(request.pageSize) || 1000)));
+  const pageSize = Math.max(1, Math.min(STRIPE_THROUGH_MRR_MAX_PAGE_SIZE, Math.floor(asNumber(request.pageSize) || 1000)));
   const page = Math.max(1, Math.floor(asNumber(request.page) || 1));
 
   const profile = normalizeProfile(options?.profile);

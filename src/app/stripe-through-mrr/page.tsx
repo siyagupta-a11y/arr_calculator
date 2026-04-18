@@ -123,9 +123,9 @@ const GRAIN_OPTIONS: Array<{ key: Grain; label: string }> = [
 ];
 
 const PAGE_SIZE = 1000;
-const EXPORT_PAGE_SIZE_RAW = 5000;
-const EXPORT_PAGE_SIZE_GROUPED = 1200;
-const EXPORT_FETCH_CONCURRENCY_RAW = 4;
+const EXPORT_PAGE_SIZE_RAW = 20000;
+const EXPORT_PAGE_SIZE_GROUPED = 20000;
+const EXPORT_FETCH_CONCURRENCY_RAW = 3;
 const EXPORT_FETCH_CONCURRENCY_GROUPED = 2;
 
 function defaultDateRange() {
