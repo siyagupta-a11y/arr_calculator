@@ -144,6 +144,7 @@ export type StripeThroughMrrReportRequest = {
   page: number;
   pageSize: number;
   targetCurrency: string;
+  skipSummary?: boolean;
 };
 
 export type StripeThroughMrrReportResult = {
@@ -699,7 +700,7 @@ const STRIPE_CHARGES_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.charg
 const STRIPE_PAYMENT_METHODS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.payment_methods";
 const STRIPE_UPCOMING_SNAPSHOTS_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.upcoming_invoice_line_snapshots";
-const STRIPE_THROUGH_MRR_MAX_PAGE_SIZE = 20000;
+const STRIPE_THROUGH_MRR_MAX_PAGE_SIZE = 100000;
 const STRIPE_ARR_CORRECT_ENV_MAP: Record<string, string> = {
   GOOGLE_SERVICE_ACCOUNT_JSON: "GOOGLE_SERVICE_ACCOUNT_JSON_STRIPE_ARR_CORRECT",
   GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64_STRIPE_ARR_CORRECT",
@@ -2906,6 +2907,7 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
   const pageSize = Math.max(1, Math.min(STRIPE_THROUGH_MRR_MAX_PAGE_SIZE, Math.floor(asNumber(request.pageSize) || 1000)));
   const page = Math.max(1, Math.floor(asNumber(request.page) || 1));
+  const skipSummary = !!request.skipSummary;
 
   const profile = normalizeProfile(options?.profile);
   const sa = getServiceAccount(profile);
@@ -3080,25 +3082,29 @@ WHERE
     { name: "end_exclusive_date", type: "STRING", value: endExclusiveDateIso },
   ];
 
-  const [summaryRows, totalMrrRows] = await Promise.all([
-    runBigQueryQueryRows(accessToken, projectId, location, summaryQuery, baseParams),
-    runBigQueryQueryRows(accessToken, projectId, location, totalMrrQuery, [
-      { name: "target_currency", type: "STRING", value: targetCurrency },
-      { name: "end_exclusive_date", type: "STRING", value: endExclusiveDateIso },
-    ]),
-  ]);
+  let months: StripeThroughMrrMonthlyRow[] = [];
+  let totalMrr = 0;
+  if (!skipSummary) {
+    const [summaryRows, totalMrrRows] = await Promise.all([
+      runBigQueryQueryRows(accessToken, projectId, location, summaryQuery, baseParams),
+      runBigQueryQueryRows(accessToken, projectId, location, totalMrrQuery, [
+        { name: "target_currency", type: "STRING", value: targetCurrency },
+        { name: "end_exclusive_date", type: "STRING", value: endExclusiveDateIso },
+      ]),
+    ]);
 
-  const months: StripeThroughMrrMonthlyRow[] = summaryRows.map((row) => ({
-    monthKey: asString(row.month_key),
-    monthLabel: asString(row.month_label),
-    monthEndMrr: asNumber(row.month_end_mrr),
-    newMrr: asNumber(row.new_mrr),
-    expansionMrr: asNumber(row.expansion_mrr),
-    contractionMrr: asNumber(row.contraction_mrr),
-    churnMrr: asNumber(row.churn_mrr),
-    netMrrChange: asNumber(row.net_mrr_change),
-  }));
-  const totalMrr = asNumber((totalMrrRows[0] || {}).total_mrr);
+    months = summaryRows.map((row) => ({
+      monthKey: asString(row.month_key),
+      monthLabel: asString(row.month_label),
+      monthEndMrr: asNumber(row.month_end_mrr),
+      newMrr: asNumber(row.new_mrr),
+      expansionMrr: asNumber(row.expansion_mrr),
+      contractionMrr: asNumber(row.contraction_mrr),
+      churnMrr: asNumber(row.churn_mrr),
+      netMrrChange: asNumber(row.net_mrr_change),
+    }));
+    totalMrr = asNumber((totalMrrRows[0] || {}).total_mrr);
+  }
 
   const detailBaseCte = buildStripeThroughMrrDetailBaseCte(
     table,

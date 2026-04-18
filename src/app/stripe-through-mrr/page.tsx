@@ -123,9 +123,9 @@ const GRAIN_OPTIONS: Array<{ key: Grain; label: string }> = [
 ];
 
 const PAGE_SIZE = 1000;
-const EXPORT_PAGE_SIZE_RAW = 20000;
-const EXPORT_PAGE_SIZE_GROUPED = 20000;
-const EXPORT_FETCH_CONCURRENCY_RAW = 3;
+const EXPORT_PAGE_SIZE_RAW = 100000;
+const EXPORT_PAGE_SIZE_GROUPED = 100000;
+const EXPORT_FETCH_CONCURRENCY_RAW = 2;
 const EXPORT_FETCH_CONCURRENCY_GROUPED = 2;
 
 function defaultDateRange() {
@@ -528,7 +528,7 @@ export default function StripeThroughMrrPage() {
     downloadCsv(`stripe-through-mrr-${effectiveGrain}.csv`, headers, rows);
   }
 
-  async function fetchDetailReportPage(pageNum: number, pageSize: number): Promise<ApiResponse> {
+  async function fetchDetailReportPage(pageNum: number, pageSize: number, skipSummary = false): Promise<ApiResponse> {
     const maxAttempts = 6;
     let attempt = 0;
     while (attempt < maxAttempts) {
@@ -546,6 +546,7 @@ export default function StripeThroughMrrPage() {
           countryFilters: countryFilterRules,
           page: pageNum,
           pageSize,
+          skipSummary,
         }),
       });
       const text = await res.text();
@@ -594,7 +595,7 @@ export default function StripeThroughMrrPage() {
         const pageNum = nextPage;
         nextPage += 1;
         if (pageNum > totalPages) return;
-        const report = await fetchDetailReportPage(pageNum, exportPageSize);
+        const report = await fetchDetailReportPage(pageNum, exportPageSize, true);
         const reportPage = Math.max(1, report.pagination?.page || pageNum);
         rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
       }
@@ -606,7 +607,7 @@ export default function StripeThroughMrrPage() {
     if (rowsByPage.size !== totalPages) {
       for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
         if (rowsByPage.has(pageNum)) continue;
-        const report = await fetchDetailReportPage(pageNum, exportPageSize);
+        const report = await fetchDetailReportPage(pageNum, exportPageSize, true);
         const reportPage = Math.max(1, report.pagination?.page || pageNum);
         rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
       }

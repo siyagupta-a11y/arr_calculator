@@ -55,6 +55,7 @@ type ApiBody = {
   countryFilters?: string[] | string;
   page?: number;
   pageSize?: number;
+  skipSummary?: boolean | string;
 };
 
 function normalizeCountryFilters(raw: string[] | string | undefined) {
@@ -102,6 +103,11 @@ function parsePayload(raw: Partial<ApiBody>): StripeThroughMrrReportRequest {
 
   const pageSizeRaw = Number(raw.pageSize || DEFAULT_PAGE_SIZE);
   const pageSize = Number.isFinite(pageSizeRaw) && pageSizeRaw > 0 ? Math.floor(pageSizeRaw) : DEFAULT_PAGE_SIZE;
+  const skipSummaryRaw = raw.skipSummary;
+  const skipSummary =
+    skipSummaryRaw === true ||
+    String(skipSummaryRaw || "").trim().toLowerCase() === "true" ||
+    String(skipSummaryRaw || "").trim() === "1";
 
   const targetCurrency =
     String(process.env.STRIPE_THROUGH_MRR_TARGET_CURRENCY || "").trim() ||
@@ -119,6 +125,7 @@ function parsePayload(raw: Partial<ApiBody>): StripeThroughMrrReportRequest {
     page,
     pageSize,
     targetCurrency,
+    skipSummary,
   };
 }
 
@@ -161,6 +168,7 @@ export async function GET(req: Request) {
       countryFilters: searchParams.get("countryFilters") || "",
       page: Number(searchParams.get("page") || 1),
       pageSize: Number(searchParams.get("pageSize") || DEFAULT_PAGE_SIZE),
+      skipSummary: searchParams.get("skipSummary") || "",
     };
     const report = await validateAndRun(body);
     return NextResponse.json(report);
