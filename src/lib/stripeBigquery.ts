@@ -194,6 +194,29 @@ export type StripeThroughMrrCustomerArrResult = {
   rows: StripeThroughMrrCustomerArrRow[];
 };
 
+export type StripeThroughMrrSalesAssistExportRequest = {
+  detailMonth: string;
+  targetCurrency: string;
+};
+
+export type StripeThroughMrrSalesAssistExportCandidateRow = {
+  emailGroup: string;
+  associatedCustomerIds: string[];
+  associatedWorkspaceIds: string[];
+  customerCountry: string;
+  customerCountryCode: string;
+  customerTerritory: string;
+  previousMonthEndMrr: number;
+  currentMonthEndMrr: number;
+};
+
+export type StripeThroughMrrSalesAssistExportResult = {
+  detailMonth: string;
+  previousMonth: string;
+  targetCurrency: string;
+  rows: StripeThroughMrrSalesAssistExportCandidateRow[];
+};
+
 export type StripeThroughMrrCustomerPlan = "enterprise" | "managed" | "team" | "plus" | "pay_as_you_go" | "free";
 
 export type StripeThroughMrrCustomerPlanRow = {
@@ -3948,6 +3971,216 @@ ORDER BY sr.customer_key ASC, sr.bucket_start ASC
       periodStart: asString(row.period_start),
       periodEnd: asString(row.period_end),
       arr: asNumber(row.arr),
+    })),
+  };
+}
+
+export async function queryStripeThroughMrrSalesAssistExportFromBigQuery(
+  request: StripeThroughMrrSalesAssistExportRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeThroughMrrSalesAssistExportResult> {
+  const detailMonthDate = parseIsoMonthUtc(request.detailMonth);
+  if (!detailMonthDate) {
+    throw new Error("Invalid detailMonth");
+  }
+
+  const previousMonthDate = addMonthsUtc(detailMonthDate, -1);
+  const detailMonth = isoMonthFromDateUtc(detailMonthDate);
+  const previousMonth = isoMonthFromDateUtc(previousMonthDate);
+  const detailMonthStartIso = isoDateFromUtcDate(detailMonthDate);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const table = getStripeArrCorrectMrrChangeTable();
+  const customersTable = getStripeCustomersTable();
+  const customersMetadataTable = getStripeCustomersMetadataTable(profile);
+
+  const query = `
+WITH bounds AS (
+  SELECT
+    DATE(@detail_month_start) AS detail_month_start,
+    DATE_ADD(DATE(@detail_month_start), INTERVAL 1 MONTH) AS next_month_start
+),
+events_source AS (
+  SELECT
+    t.event_timestamp,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    TO_JSON_STRING(t) AS raw_json,
+    CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major
+  FROM \`${table}\` AS t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+    AND t.event_timestamp < TIMESTAMP(b.next_month_start)
+),
+customer_ids_in_scope AS (
+  SELECT DISTINCT customer_id
+  FROM events_source
+  WHERE customer_id <> '(blank)'
+),
+customers_workspace_lookup AS (
+  SELECT
+    customer_id,
+    workspace_id
+  FROM (
+    SELECT
+      COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+      NULLIF(TRIM(CAST(m.value AS STRING)), '') AS workspace_id,
+      COALESCE(NULLIF(TRIM(CAST(m.batch_timestamp AS STRING)), ''), '') AS batch_timestamp_value,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)')
+        ORDER BY
+          COALESCE(NULLIF(TRIM(CAST(m.batch_timestamp AS STRING)), ''), '') DESC,
+          NULLIF(TRIM(CAST(m.value AS STRING)), '') DESC
+      ) AS rn
+    FROM \`${customersMetadataTable}\` m
+    WHERE LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
+      AND COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') IN (
+        SELECT customer_id FROM customer_ids_in_scope
+      )
+  )
+  WHERE rn = 1
+),
+customers_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') AS customer_id,
+    LOWER(COALESCE(NULLIF(TRIM(CAST(c.email AS STRING)), ''), '')) AS customer_email,
+    COALESCE(NULLIF(TRIM(cwl.workspace_id), ''), '') AS customer_workspace_id,
+    COALESCE(
+      NULLIF(TRIM(CAST(c.address_country AS STRING)), ''),
+      NULLIF(TRIM(CAST(c.shipping_address_country AS STRING)), ''),
+      ''
+    ) AS raw_customer_country
+  FROM \`${customersTable}\` c
+  LEFT JOIN customers_workspace_lookup cwl
+    ON cwl.customer_id = COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)')
+  WHERE COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') IN (
+    SELECT customer_id FROM customer_ids_in_scope
+  )
+),
+events_base AS (
+  SELECT
+    e.event_timestamp,
+    LOWER(
+      COALESCE(
+        NULLIF(TRIM(cl.customer_email), ''),
+        NULLIF(TRIM(e.customer_id), ''),
+        '(blank)'
+      )
+    ) AS customer_key,
+    e.customer_id,
+    COALESCE(
+      NULLIF(TRIM(cl.customer_workspace_id), ''),
+      NULLIF(TRIM(JSON_VALUE(e.raw_json, '$.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(e.raw_json, '$.workspaceId')), ''),
+      NULLIF(TRIM(JSON_VALUE(e.raw_json, '$.workspace.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(e.raw_json, '$.metadata.workspace_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(e.raw_json, '$.metadata.workspaceId')), ''),
+      ''
+    ) AS workspace_id,
+    COALESCE(NULLIF(TRIM(cl.raw_customer_country), ''), '') AS raw_customer_country,
+    e.mrr_change_major
+  FROM events_source e
+  LEFT JOIN customers_lookup cl
+    ON cl.customer_id = e.customer_id
+),
+group_dimensions AS (
+  SELECT
+    customer_key,
+    ARRAY_AGG(DISTINCT IF(customer_id = '(blank)', NULL, customer_id) IGNORE NULLS) AS associated_customer_ids,
+    ARRAY_AGG(DISTINCT IF(workspace_id = '', NULL, workspace_id) IGNORE NULLS) AS associated_workspace_ids,
+    COALESCE(
+      ARRAY_AGG(NULLIF(TRIM(raw_customer_country), '') IGNORE NULLS LIMIT 1)[OFFSET(0)],
+      ''
+    ) AS group_customer_country
+  FROM events_base
+  GROUP BY customer_key
+),
+mrr_by_group AS (
+  SELECT
+    eb.customer_key,
+    COALESCE(SUM(IF(eb.event_timestamp < TIMESTAMP(b.detail_month_start), eb.mrr_change_major, 0.0)), 0.0) AS previous_month_end_mrr,
+    COALESCE(SUM(eb.mrr_change_major), 0.0) AS current_month_end_mrr
+  FROM events_base eb
+  CROSS JOIN bounds b
+  GROUP BY eb.customer_key
+),
+country_normalized AS (
+  SELECT
+    gd.customer_key,
+    gd.associated_customer_ids,
+    gd.associated_workspace_ids,
+    gd.group_customer_country AS customer_country,
+    CASE
+      WHEN REGEXP_CONTAINS(TRIM(gd.group_customer_country), r'^[A-Za-z]{2}$') THEN UPPER(TRIM(gd.group_customer_country))
+      WHEN REGEXP_CONTAINS(TRIM(gd.group_customer_country), r'^[A-Za-z]{3}$') THEN (
+        CASE UPPER(TRIM(gd.group_customer_country))
+          WHEN 'USA' THEN 'US'
+          WHEN 'CAN' THEN 'CA'
+          WHEN 'GBR' THEN 'GB'
+          WHEN 'AUS' THEN 'AU'
+          WHEN 'NZL' THEN 'NZ'
+          ELSE ''
+        END
+      )
+      ELSE (
+        CASE LOWER(TRIM(gd.group_customer_country))
+          ${COUNTRY_KEY_TO_CODE_SQL_WHENS}
+          ELSE ''
+        END
+      )
+    END AS customer_country_code
+  FROM group_dimensions gd
+)
+SELECT
+  cn.customer_key,
+  COALESCE(cn.associated_customer_ids, ARRAY<STRING>[]) AS associated_customer_ids,
+  COALESCE(cn.associated_workspace_ids, ARRAY<STRING>[]) AS associated_workspace_ids,
+  COALESCE(NULLIF(TRIM(cn.customer_country), ''), 'N/A') AS customer_country,
+  COALESCE(NULLIF(TRIM(cn.customer_country_code), ''), '') AS customer_country_code,
+  CASE
+    WHEN COALESCE(NULLIF(TRIM(cn.customer_country_code), ''), '') = '' THEN 'N/A'
+    ELSE (
+      CASE UPPER(TRIM(cn.customer_country_code))
+        ${COUNTRY_CODE_TO_TERRITORY_SQL_WHENS}
+        ELSE 'Other'
+      END
+    )
+  END AS customer_territory,
+  ROUND(mbg.previous_month_end_mrr, 2) AS previous_month_end_mrr,
+  ROUND(mbg.current_month_end_mrr, 2) AS current_month_end_mrr
+FROM country_normalized cn
+JOIN mrr_by_group mbg
+  ON mbg.customer_key = cn.customer_key
+ORDER BY mbg.current_month_end_mrr DESC, cn.customer_key ASC
+`;
+
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, [
+    { name: "detail_month_start", type: "STRING", value: detailMonthStartIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+  ]);
+
+  return {
+    detailMonth,
+    previousMonth,
+    targetCurrency: targetCurrency.toUpperCase(),
+    rows: rows.map((row) => ({
+      emailGroup: asString(row.customer_key),
+      associatedCustomerIds: asStringArray(row.associated_customer_ids),
+      associatedWorkspaceIds: asStringArray(row.associated_workspace_ids),
+      customerCountry:
+        canonicalCountryLabel(asString(row.customer_country_code) || asString(row.customer_country)) ||
+        asString(row.customer_country) ||
+        "N/A",
+      customerCountryCode: asString(row.customer_country_code),
+      customerTerritory: canonicalTerritoryLabel(asString(row.customer_territory)) || asString(row.customer_territory) || "N/A",
+      previousMonthEndMrr: asNumber(row.previous_month_end_mrr),
+      currentMonthEndMrr: asNumber(row.current_month_end_mrr),
     })),
   };
 }

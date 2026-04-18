@@ -219,10 +219,6 @@ function isIsoMonth(value: string) {
   return /^\d{4}-\d{2}$/.test(String(value || ""));
 }
 
-function isoMonthStart(isoMonth: string) {
-  return `${isoMonth}-01`;
-}
-
 function previousIsoMonth(isoMonth: string) {
   if (!isIsoMonth(isoMonth)) return "";
   const [yearRaw, monthRaw] = isoMonth.split("-");
@@ -232,16 +228,6 @@ function previousIsoMonth(isoMonth: string) {
   const d = new Date(Date.UTC(year, month - 1, 1));
   d.setUTCMonth(d.getUTCMonth() - 1);
   return d.toISOString().slice(0, 7);
-}
-
-function isoMonthEnd(isoMonth: string) {
-  if (!isIsoMonth(isoMonth)) return "";
-  const [yearRaw, monthRaw] = isoMonth.split("-");
-  const year = Number(yearRaw);
-  const month = Number(monthRaw);
-  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return "";
-  const last = new Date(Date.UTC(year, month, 0, 0, 0, 0, 0));
-  return last.toISOString().slice(0, 10);
 }
 
 function sleep(ms: number) {
@@ -611,72 +597,6 @@ export default function StripeThroughMrrPage() {
     return allRows;
   }
 
-  async function fetchGroupedEmailRowsForSalesAssistExport(exportMonth: string): Promise<GroupedDetailRow[]> {
-    const prevMonth = previousIsoMonth(exportMonth);
-    if (!prevMonth) throw new Error(`Invalid detail month: ${exportMonth}`);
-    const forcedStartDate = isoMonthStart(prevMonth);
-    const exportEndDate = isoMonthEnd(exportMonth);
-    if (!exportEndDate) throw new Error(`Invalid detail month end: ${exportMonth}`);
-    const payloadBase = {
-      // Keep this export tightly scoped: only the previous month and selected month.
-      startDate: forcedStartDate,
-      endDate: exportEndDate,
-      detailStartMonth: prevMonth,
-      detailEndMonth: exportMonth,
-      grain: "monthly" as Grain,
-      groupBy: "email" as GroupBy,
-      pageSize: 5000,
-    };
-    const fetchPageWithRetry = async (pageNum: number) => {
-      const maxAttempts = 8;
-      let attempt = 0;
-      while (attempt < maxAttempts) {
-        attempt += 1;
-        const res = await fetch("/api/stripe-through-mrr-report", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...payloadBase, page: pageNum }),
-        });
-        const text = await res.text();
-        let json: unknown = null;
-        try {
-          json = text ? JSON.parse(text) : null;
-        } catch {
-          json = null;
-        }
-        if (res.ok) {
-          if (!json || typeof json !== "object") throw new Error("Invalid API response");
-          return json as ApiResponse;
-        }
-        const maybeError =
-          json && typeof json === "object" && "error" in json
-            ? String((json as { error?: unknown }).error || "")
-            : text || `HTTP ${res.status}`;
-        const isRateLimited =
-          res.status === 429 ||
-          (res.status === 403 && /rate.?limit|too many api requests|exceeded rate/i.test(maybeError)) ||
-          /rate limit|too many requests/i.test(maybeError);
-        const canRetry = attempt < maxAttempts && (isRateLimited || res.status >= 500);
-        if (canRetry) {
-          const waitMs = 400 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 200);
-          await sleep(waitMs);
-          continue;
-        }
-        throw new Error(maybeError || `HTTP ${res.status}`);
-      }
-      throw new Error("Sales assist export failed after retries");
-    };
-    const first = await fetchPageWithRetry(1);
-    const extraPages = Math.max(0, (first.pagination.totalPages || 1) - 1);
-    const allRows = [...first.detailRows];
-    for (let pageNum = 2; pageNum <= extraPages + 1; pageNum += 1) {
-      const pageData = await fetchPageWithRetry(pageNum);
-      allRows.push(...pageData.detailRows);
-      await sleep(120);
-    }
-    return allRows.filter(isGroupedRow);
-  }
-
   async function exportRawDetailCsv() {
     setExportingCsv(true);
     try {
@@ -796,33 +716,26 @@ export default function StripeThroughMrrPage() {
       if (!isIsoMonth(exportMonth) || !previousMonth) {
         throw new Error("Invalid detail month selected for sales-assist export");
       }
-      const groupedRows = await fetchGroupedEmailRowsForSalesAssistExport(exportMonth);
-      const matrix = buildGroupMatrix(groupedRows);
-      const EPS = 1e-9;
-      const csvRows: string[][] = [];
-      for (const group of matrix) {
-        if (group.salesAssist !== "yes") continue;
-        const previousMonthMrr = group.byMonth.get(previousMonth)?.monthEndMrr ?? 0;
-        const currentMonthMrr = group.byMonth.get(exportMonth)?.monthEndMrr ?? 0;
-        if (Math.abs(previousMonthMrr) > EPS) continue;
-        if (!(currentMonthMrr > EPS)) continue;
-        const customerIds = group.associatedCustomerIds.length ? group.associatedCustomerIds : ["(blank)"];
-        for (const customerId of customerIds) {
-          csvRows.push([
-            exportMonth,
-            previousMonth,
-            customerId,
-            group.groupLabel || group.groupKey || "(blank)",
-            group.customerCountry || "N/A",
-            group.customerTerritory || "N/A",
-            group.associatedWorkspaceIds.join(" | "),
-            "yes",
-            String(previousMonthMrr),
-            String(currentMonthMrr),
-          ]);
-        }
+      const res = await fetch("/api/stripe-through-mrr-sales-assist-export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ detailMonth: exportMonth }),
+      });
+      const text = await res.text();
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
       }
-      csvRows.sort((a, b) => a[2].localeCompare(b[2]));
+      if (!res.ok) {
+        if (json && typeof json === "object" && "error" in json) {
+          throw new Error(String((json as { error?: unknown }).error || "Sales assist export failed"));
+        }
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const payload = json as { rows?: string[][] };
+      const csvRows = Array.isArray(payload?.rows) ? payload.rows : [];
       downloadCsv(
         `stripe-through-mrr-sales-assist-new-customers-${exportMonth}.csv`,
         [
