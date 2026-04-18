@@ -123,9 +123,9 @@ const GRAIN_OPTIONS: Array<{ key: Grain; label: string }> = [
 ];
 
 const PAGE_SIZE = 1000;
-const EXPORT_PAGE_SIZE_RAW = 100000;
-const EXPORT_PAGE_SIZE_GROUPED = 100000;
-const EXPORT_FETCH_CONCURRENCY_RAW = 2;
+const EXPORT_PAGE_SIZE_RAW = 30000;
+const EXPORT_PAGE_SIZE_GROUPED = 8000;
+const EXPORT_FETCH_CONCURRENCY_RAW = 3;
 const EXPORT_FETCH_CONCURRENCY_GROUPED = 2;
 
 function defaultDateRange() {
@@ -529,51 +529,62 @@ export default function StripeThroughMrrPage() {
   }
 
   async function fetchDetailReportPage(pageNum: number, pageSize: number, skipSummary = false): Promise<ApiResponse> {
-    const maxAttempts = 6;
+    const maxAttempts = 8;
     let attempt = 0;
     while (attempt < maxAttempts) {
       attempt += 1;
-      const res = await fetch("/api/stripe-through-mrr-report", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          startDate: data?.startDate || startDate,
-          endDate: data?.endDate || endDate,
-          detailStartMonth: data?.detailStartMonth || detailStartMonth,
-          detailEndMonth: data?.detailEndMonth || detailEndMonth,
-          grain: data?.grain || grain,
-          groupBy: data?.groupBy || groupBy,
-          countryFilters: countryFilterRules,
-          page: pageNum,
-          pageSize,
-          skipSummary,
-        }),
-      });
-      const text = await res.text();
-      let json: unknown = null;
       try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
+        const res = await fetch("/api/stripe-through-mrr-report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            startDate: data?.startDate || startDate,
+            endDate: data?.endDate || endDate,
+            detailStartMonth: data?.detailStartMonth || detailStartMonth,
+            detailEndMonth: data?.detailEndMonth || detailEndMonth,
+            grain: data?.grain || grain,
+            groupBy: data?.groupBy || groupBy,
+            countryFilters: countryFilterRules,
+            page: pageNum,
+            pageSize,
+            skipSummary,
+          }),
+        });
+        const text = await res.text();
+        let json: unknown = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch {
+          json = null;
+        }
+        if (res.ok) {
+          if (!json || typeof json !== "object") throw new Error("Invalid API response while exporting detail rows");
+          return json as ApiResponse;
+        }
+        const message =
+          json && typeof json === "object" && "error" in json
+            ? String((json as { error?: unknown }).error || "Export page request failed")
+            : text || `HTTP ${res.status}`;
+        const isRateLimited =
+          res.status === 429 ||
+          (res.status === 403 && /rate.?limit|too many api requests|exceeded rate/i.test(message));
+        const canRetry = attempt < maxAttempts && (isRateLimited || res.status >= 500);
+        if (canRetry) {
+          const waitMs = 500 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
+          await sleep(waitMs);
+          continue;
+        }
+        throw new Error(message || `HTTP ${res.status}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || "");
+        const isTransientNetwork = /failed to fetch|networkerror|load failed|network request failed/i.test(message);
+        if (attempt < maxAttempts && isTransientNetwork) {
+          const waitMs = 500 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
+          await sleep(waitMs);
+          continue;
+        }
+        throw new Error(message || "Export page request failed");
       }
-      if (res.ok) {
-        if (!json || typeof json !== "object") throw new Error("Invalid API response while exporting detail rows");
-        return json as ApiResponse;
-      }
-      const message =
-        json && typeof json === "object" && "error" in json
-          ? String((json as { error?: unknown }).error || "Export page request failed")
-          : text || `HTTP ${res.status}`;
-      const isRateLimited =
-        res.status === 429 ||
-        (res.status === 403 && /rate.?limit|too many api requests|exceeded rate/i.test(message));
-      const canRetry = attempt < maxAttempts && (isRateLimited || res.status >= 500);
-      if (canRetry) {
-        const waitMs = 500 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
-        await sleep(waitMs);
-        continue;
-      }
-      throw new Error(message || `HTTP ${res.status}`);
     }
     throw new Error("Export failed after retries");
   }
@@ -586,38 +597,55 @@ export default function StripeThroughMrrPage() {
     const totalRows = Math.max(0, data.pagination.totalRows || 0);
     if (totalRows <= 0) return [];
 
-    const totalPages = Math.max(1, Math.ceil(totalRows / exportPageSize));
-    const rowsByPage = new Map<number, Array<RawDetailRow | GroupedDetailRow>>();
-    let nextPage = 1;
+    const candidatePageSizes = Array.from(
+      new Set([
+        exportPageSize,
+        Math.max(PAGE_SIZE, Math.floor(exportPageSize / 2)),
+        Math.max(PAGE_SIZE, Math.floor(exportPageSize / 4)),
+        PAGE_SIZE,
+      ]),
+    );
 
-    const worker = async () => {
-      while (true) {
-        const pageNum = nextPage;
-        nextPage += 1;
-        if (pageNum > totalPages) return;
-        const report = await fetchDetailReportPage(pageNum, exportPageSize, true);
-        const reportPage = Math.max(1, report.pagination?.page || pageNum);
-        rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
-      }
-    };
+    let lastError: unknown = null;
+    for (const candidatePageSize of candidatePageSizes) {
+      try {
+        const totalPages = Math.max(1, Math.ceil(totalRows / candidatePageSize));
+        const rowsByPage = new Map<number, Array<RawDetailRow | GroupedDetailRow>>();
+        let nextPage = 1;
 
-    const workers = Array.from({ length: Math.min(exportConcurrency, totalPages) }, () => worker());
-    await Promise.all(workers);
+        const worker = async () => {
+          while (true) {
+            const pageNum = nextPage;
+            nextPage += 1;
+            if (pageNum > totalPages) return;
+            const report = await fetchDetailReportPage(pageNum, candidatePageSize, true);
+            const reportPage = Math.max(1, report.pagination?.page || pageNum);
+            rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
+          }
+        };
 
-    if (rowsByPage.size !== totalPages) {
-      for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
-        if (rowsByPage.has(pageNum)) continue;
-        const report = await fetchDetailReportPage(pageNum, exportPageSize, true);
-        const reportPage = Math.max(1, report.pagination?.page || pageNum);
-        rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
+        const workers = Array.from({ length: Math.min(exportConcurrency, totalPages) }, () => worker());
+        await Promise.all(workers);
+
+        if (rowsByPage.size !== totalPages) {
+          for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
+            if (rowsByPage.has(pageNum)) continue;
+            const report = await fetchDetailReportPage(pageNum, candidatePageSize, true);
+            const reportPage = Math.max(1, report.pagination?.page || pageNum);
+            rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
+          }
+        }
+
+        const allRows: Array<RawDetailRow | GroupedDetailRow> = [];
+        for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
+          allRows.push(...(rowsByPage.get(pageNum) || []));
+        }
+        return allRows;
+      } catch (error) {
+        lastError = error;
       }
     }
-
-    const allRows: Array<RawDetailRow | GroupedDetailRow> = [];
-    for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
-      allRows.push(...(rowsByPage.get(pageNum) || []));
-    }
-    return allRows;
+    throw lastError instanceof Error ? lastError : new Error("Export failed");
   }
 
   async function exportRawDetailCsv() {
