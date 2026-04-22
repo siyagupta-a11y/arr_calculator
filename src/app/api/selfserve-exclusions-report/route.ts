@@ -78,28 +78,6 @@ function round2(value: number) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
 
-function toIsoDateOnly(value: Date) {
-  return value.toISOString().slice(0, 10);
-}
-
-function previousMonthStartIso(dateText: string) {
-  const parsed = parseIsoDateOnly(dateText);
-  if (!parsed) return dateText;
-  const prevMonthStart = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth() - 1, 1, 0, 0, 0, 0));
-  return toIsoDateOnly(prevMonthStart);
-}
-
-function previousIsoMonth(monthKey: string) {
-  const match = /^(\d{4})-(\d{2})$/.exec(String(monthKey || "").trim());
-  if (!match) return "";
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return "";
-  const d = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
-  d.setUTCMonth(d.getUTCMonth() - 1);
-  return d.toISOString().slice(0, 7);
-}
-
 function parsePayload(raw: Partial<ApiBody>): SelfserveExclusionsRequest {
   const startDate = String(raw.startDate || "").trim();
   const endDate = String(raw.endDate || "").trim();
@@ -184,7 +162,7 @@ async function buildReport(payload: SelfserveExclusionsRequest): Promise<Selfser
     try {
       const stripe = await queryStripeThroughMrrCustomerArrFromBigQuery(
         {
-          startDate: previousMonthStartIso(payload.startDate),
+          startDate: payload.startDate,
           endDate: payload.endDate,
           targetCurrency,
           grain: "monthly",
@@ -201,34 +179,16 @@ async function buildReport(payload: SelfserveExclusionsRequest): Promise<Selfser
   for (const email of eligibleMatchedEmails) {
     valuesByEmail.set(email, Object.fromEntries(periodKeys.map((key) => [key, 0])));
   }
-  const allMonthlyMrrByEmail = new Map<string, Record<string, number>>();
-  for (const email of eligibleMatchedEmails) {
-    allMonthlyMrrByEmail.set(email, {});
-  }
 
   for (const row of stripeRows) {
     const email = normalizeEmail(row.customerKey);
-    if (!allMonthlyMrrByEmail.has(email)) continue;
+    if (!valuesByEmail.has(email)) continue;
     const periodKey = String(row.periodKey || "");
-    if (!periodKey) continue;
+    if (!periodKey || !periodKeys.includes(periodKey)) continue;
+    if (!eligibleEmailsByPeriod.get(periodKey)?.has(email)) continue;
     const periodMrr = round2(Number(row.arr || 0) / 12);
-    const monthly = allMonthlyMrrByEmail.get(email)!;
-    monthly[periodKey] = round2((monthly[periodKey] || 0) + periodMrr);
-  }
-
-  const totalMrrChangeByPeriod: Record<string, number> = Object.fromEntries(periodKeys.map((key) => [key, 0]));
-  for (const email of eligibleMatchedEmails) {
-    const monthly = allMonthlyMrrByEmail.get(email) || {};
     const bucket = valuesByEmail.get(email)!;
-    for (const periodKey of periodKeys) {
-      if (!eligibleEmailsByPeriod.get(periodKey)?.has(email)) continue;
-      const currentMrr = round2(Number(monthly[periodKey] || 0));
-      const prevMrr = round2(Number(monthly[previousIsoMonth(periodKey)] || 0));
-      bucket[periodKey] = currentMrr;
-      totalMrrChangeByPeriod[periodKey] = round2(
-        Number(totalMrrChangeByPeriod[periodKey] || 0) + (currentMrr - prevMrr),
-      );
-    }
+    bucket[periodKey] = round2((bucket[periodKey] || 0) + periodMrr);
   }
 
   const emailRows: SelfserveExclusionsEmailRow[] = Array.from(valuesByEmail.entries())
@@ -246,6 +206,20 @@ async function buildReport(payload: SelfserveExclusionsRequest): Promise<Selfser
       if (Math.abs(diff) > EPSILON) return diff;
       return a.email.localeCompare(b.email);
     });
+
+  const totalMrrByPeriod: Record<string, number> = Object.fromEntries(
+    periodKeys.map((periodKey) => [
+      periodKey,
+      round2(emailRows.reduce((sum, row) => sum + Number(row.valuesByPeriod[periodKey] || 0), 0)),
+    ]),
+  );
+  const totalMrrChangeByPeriod: Record<string, number> = {};
+  let previousTotalMrr = 0;
+  for (const period of periods) {
+    const currentTotalMrr = round2(Number(totalMrrByPeriod[period.key] || 0));
+    totalMrrChangeByPeriod[period.key] = round2(currentTotalMrr - previousTotalMrr);
+    previousTotalMrr = currentTotalMrr;
+  }
 
   const periodSummary = periodMapFromRows(periods, emailRows, totalMrrChangeByPeriod);
   const periodsOut = periods.map((period) => {
