@@ -130,17 +130,32 @@ async function buildReport(payload: SelfserveExclusionsRequest): Promise<Selfser
   const periodKeys = periods.map((period) => period.key);
 
   const matchedEmails = new Set<string>();
+  const eligibleEmailsByPeriod = new Map<string, Set<string>>();
+  for (const periodKey of periodKeys) {
+    eligibleEmailsByPeriod.set(periodKey, new Set<string>());
+  }
   for (const row of combined.rows || []) {
     if (row.source !== "hubspot_account") continue;
     for (const key of row.matchedStripeKeys || []) {
       const email = normalizeEmail(key);
-      if (email.includes("@")) matchedEmails.add(email);
+      if (!email.includes("@")) continue;
+      matchedEmails.add(email);
+      for (const periodKey of periodKeys) {
+        const hubspotArr = Number(row.hubspotValuesByPeriod?.[periodKey] || 0);
+        if (hubspotArr > EPSILON) {
+          eligibleEmailsByPeriod.get(periodKey)?.add(email);
+        }
+      }
     }
+  }
+  const eligibleMatchedEmails = new Set<string>();
+  for (const set of eligibleEmailsByPeriod.values()) {
+    for (const email of set) eligibleMatchedEmails.add(email);
   }
 
   const targetCurrency = String(combined.targetCurrency || "USD").toUpperCase();
   let stripeRows: StripeThroughMrrCustomerArrRow[] = [];
-  if (matchedEmails.size > 0) {
+  if (eligibleMatchedEmails.size > 0) {
     try {
       const stripe = await queryStripeThroughMrrCustomerArrFromBigQuery(
         {
@@ -158,7 +173,7 @@ async function buildReport(payload: SelfserveExclusionsRequest): Promise<Selfser
   }
 
   const valuesByEmail = new Map<string, Record<string, number>>();
-  for (const email of matchedEmails) {
+  for (const email of eligibleMatchedEmails) {
     valuesByEmail.set(email, Object.fromEntries(periodKeys.map((key) => [key, 0])));
   }
 
@@ -167,6 +182,7 @@ async function buildReport(payload: SelfserveExclusionsRequest): Promise<Selfser
     if (!valuesByEmail.has(email)) continue;
     const periodKey = String(row.periodKey || "");
     if (!periodKey || !periodKeys.includes(periodKey)) continue;
+    if (!eligibleEmailsByPeriod.get(periodKey)?.has(email)) continue;
     const periodMrr = round2(Number(row.arr || 0) / 12);
     const bucket = valuesByEmail.get(email)!;
     bucket[periodKey] = round2((bucket[periodKey] || 0) + periodMrr);
@@ -208,7 +224,7 @@ async function buildReport(payload: SelfserveExclusionsRequest): Promise<Selfser
     periods: periodsOut,
     emailRows,
     summary: {
-      matchedEmailCount: matchedEmails.size,
+      matchedEmailCount: eligibleMatchedEmails.size,
       emailsWithAnyMrr: emailRows.filter((row) => Math.abs(row.totalMrr) > EPSILON).length,
     },
   };
