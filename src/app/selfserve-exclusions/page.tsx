@@ -12,6 +12,7 @@ type SelfserveExclusionsResponse = {
     key: string;
     label: string;
     totalMrr: number;
+    totalMrrChange: number;
     totalArr: number;
     emailCount: number;
   }>;
@@ -240,6 +241,12 @@ export default function SelfserveExclusionsPage() {
                   {selectedPeriod ? formatMoney(selectedPeriod.totalMrr || 0, currency) : formatMoney(0, currency)}
                 </p>
               </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Selected period total MRR change</p>
+                <p className="stripe-ui__stat-value">
+                  {selectedPeriod ? formatMoney(selectedPeriod.totalMrrChange || 0, currency) : formatMoney(0, currency)}
+                </p>
+              </div>
             </div>
           </section>
 
@@ -251,6 +258,7 @@ export default function SelfserveExclusionsPage() {
                   <tr>
                     <th>Month</th>
                     <th className="stripe-ui__num">Total MRR</th>
+                    <th className="stripe-ui__num">Total MRR change</th>
                     <th className="stripe-ui__num">Email count (non-zero MRR)</th>
                   </tr>
                 </thead>
@@ -259,6 +267,7 @@ export default function SelfserveExclusionsPage() {
                     <tr key={period.key}>
                       <td>{period.label}</td>
                       <td className="stripe-ui__num">{formatMoney(period.totalMrr || 0, currency)}</td>
+                      <td className="stripe-ui__num">{formatMoney(period.totalMrrChange || 0, currency)}</td>
                       <td className="stripe-ui__num">{new Intl.NumberFormat().format(period.emailCount || 0)}</td>
                     </tr>
                   ))}

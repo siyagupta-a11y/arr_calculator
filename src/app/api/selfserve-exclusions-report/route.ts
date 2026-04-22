@@ -42,6 +42,7 @@ type SelfserveExclusionsResponse = {
     key: string;
     label: string;
     totalMrr: number;
+    totalMrrChange: number;
     totalArr: number;
     emailCount: number;
   }>;
@@ -77,6 +78,28 @@ function round2(value: number) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+function toIsoDateOnly(value: Date) {
+  return value.toISOString().slice(0, 10);
+}
+
+function previousMonthStartIso(dateText: string) {
+  const parsed = parseIsoDateOnly(dateText);
+  if (!parsed) return dateText;
+  const prevMonthStart = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth() - 1, 1, 0, 0, 0, 0));
+  return toIsoDateOnly(prevMonthStart);
+}
+
+function previousIsoMonth(monthKey: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(monthKey || "").trim());
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return "";
+  const d = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+  d.setUTCMonth(d.getUTCMonth() - 1);
+  return d.toISOString().slice(0, 7);
+}
+
 function parsePayload(raw: Partial<ApiBody>): SelfserveExclusionsRequest {
   const startDate = String(raw.startDate || "").trim();
   const endDate = String(raw.endDate || "").trim();
@@ -95,6 +118,7 @@ function summarizeErrorMessage(error: unknown) {
 function periodMapFromRows(
   periods: Array<{ key: string }>,
   emailRows: SelfserveExclusionsEmailRow[],
+  totalMrrChangeByPeriod: Record<string, number>,
 ) {
   return periods.map((period) => {
     const totalMrr = round2(
@@ -104,6 +128,7 @@ function periodMapFromRows(
     return {
       key: period.key,
       totalMrr,
+      totalMrrChange: round2(Number(totalMrrChangeByPeriod[period.key] || 0)),
       totalArr: round2(totalMrr * 12),
       emailCount,
     };
@@ -159,7 +184,7 @@ async function buildReport(payload: SelfserveExclusionsRequest): Promise<Selfser
     try {
       const stripe = await queryStripeThroughMrrCustomerArrFromBigQuery(
         {
-          startDate: payload.startDate,
+          startDate: previousMonthStartIso(payload.startDate),
           endDate: payload.endDate,
           targetCurrency,
           grain: "monthly",
@@ -176,16 +201,34 @@ async function buildReport(payload: SelfserveExclusionsRequest): Promise<Selfser
   for (const email of eligibleMatchedEmails) {
     valuesByEmail.set(email, Object.fromEntries(periodKeys.map((key) => [key, 0])));
   }
+  const allMonthlyMrrByEmail = new Map<string, Record<string, number>>();
+  for (const email of eligibleMatchedEmails) {
+    allMonthlyMrrByEmail.set(email, {});
+  }
 
   for (const row of stripeRows) {
     const email = normalizeEmail(row.customerKey);
-    if (!valuesByEmail.has(email)) continue;
+    if (!allMonthlyMrrByEmail.has(email)) continue;
     const periodKey = String(row.periodKey || "");
-    if (!periodKey || !periodKeys.includes(periodKey)) continue;
-    if (!eligibleEmailsByPeriod.get(periodKey)?.has(email)) continue;
+    if (!periodKey) continue;
     const periodMrr = round2(Number(row.arr || 0) / 12);
+    const monthly = allMonthlyMrrByEmail.get(email)!;
+    monthly[periodKey] = round2((monthly[periodKey] || 0) + periodMrr);
+  }
+
+  const totalMrrChangeByPeriod: Record<string, number> = Object.fromEntries(periodKeys.map((key) => [key, 0]));
+  for (const email of eligibleMatchedEmails) {
+    const monthly = allMonthlyMrrByEmail.get(email) || {};
     const bucket = valuesByEmail.get(email)!;
-    bucket[periodKey] = round2((bucket[periodKey] || 0) + periodMrr);
+    for (const periodKey of periodKeys) {
+      if (!eligibleEmailsByPeriod.get(periodKey)?.has(email)) continue;
+      const currentMrr = round2(Number(monthly[periodKey] || 0));
+      const prevMrr = round2(Number(monthly[previousIsoMonth(periodKey)] || 0));
+      bucket[periodKey] = currentMrr;
+      totalMrrChangeByPeriod[periodKey] = round2(
+        Number(totalMrrChangeByPeriod[periodKey] || 0) + (currentMrr - prevMrr),
+      );
+    }
   }
 
   const emailRows: SelfserveExclusionsEmailRow[] = Array.from(valuesByEmail.entries())
@@ -204,13 +247,14 @@ async function buildReport(payload: SelfserveExclusionsRequest): Promise<Selfser
       return a.email.localeCompare(b.email);
     });
 
-  const periodSummary = periodMapFromRows(periods, emailRows);
+  const periodSummary = periodMapFromRows(periods, emailRows, totalMrrChangeByPeriod);
   const periodsOut = periods.map((period) => {
     const summary = periodSummary.find((item) => item.key === period.key);
     return {
       key: period.key,
       label: period.label,
       totalMrr: summary?.totalMrr || 0,
+      totalMrrChange: summary?.totalMrrChange || 0,
       totalArr: summary?.totalArr || 0,
       emailCount: summary?.emailCount || 0,
     };
