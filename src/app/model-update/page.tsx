@@ -430,7 +430,7 @@ function mergeIntoSelfserveAllSubsCsv(
       continue;
     }
     if (salesAssistIdx >= 0 && salesAssistCustomerIds.has(normalizeCustomerIdToken(customerId))) {
-      row[salesAssistIdx] = "yes";
+      row[salesAssistIdx] = "Yes";
     }
     const stripeMatch = stripeByCustomer.get(customerId);
     if (stripeMatch) {
@@ -470,7 +470,7 @@ function mergeIntoSelfserveAllSubsCsv(
       newRow[initialSubIdx] = `=IFERROR(INDEX(FILTER(${startRef}:${endRef},${startRef}:${endRef}<>0),1),0)`;
     }
     if (salesAssistIdx >= 0 && salesAssistCustomerIds.has(normalizeCustomerIdToken(stripeRow.customerId))) {
-      newRow[salesAssistIdx] = "yes";
+      newRow[salesAssistIdx] = "Yes";
     }
     if (emailIdx >= 0) newRow[emailIdx] = stripeRow.email;
     outputRows.push(newRow);
