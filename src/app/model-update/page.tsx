@@ -479,6 +479,104 @@ function mergeIntoSelfserveAllSubsCsv(
   return outputRows;
 }
 
+function asNumberOrZero(value: string) {
+  const parsed = Number(String(value || "").trim());
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeEmailToken(value: string) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function signedUpSortScore(value: string) {
+  const raw = String(value || "").trim();
+  if (!raw) return Number.POSITIVE_INFINITY;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const ts = Date.parse(`${raw}T00:00:00Z`);
+    return Number.isFinite(ts) ? ts : Number.POSITIVE_INFINITY;
+  }
+  const mdY = /^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/.exec(raw);
+  if (mdY) {
+    const month = Number(mdY[1]);
+    const day = Number(mdY[2]);
+    const year = Number(mdY[3]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return Date.UTC(year, month - 1, day);
+    }
+  }
+  const fallback = Date.parse(raw);
+  return Number.isFinite(fallback) ? fallback : Number.POSITIVE_INFINITY;
+}
+
+function mergeSelfserveRowsByEmail(rows: string[][]): string[][] {
+  if (!rows.length) throw new Error("No rows to merge by email.");
+  const header = rows[0];
+  const headerIndex = new Map<string, number>();
+  for (let i = 0; i < header.length; i += 1) headerIndex.set(header[i], i);
+
+  const emailColumn = "Email";
+  const customerIdColumn = "Customer ID";
+  const signedUpColumn = "Signed up";
+  const firstMonthColumn = "First Month of MRR";
+  const initialSubColumn = "Initial Subscription $";
+  const newEnterpriseColumn = "New Enterprise";
+  const salesAssistColumn = "Sales-Assist";
+  const monthColumns = header.filter((key) => /^20\d{2}-\d{2}$/.test(String(key || "").trim()));
+
+  const grouped = new Map<string, string[][]>();
+  for (let i = 1; i < rows.length; i += 1) {
+    const row = rows[i];
+    const emailIdx = headerIndex.get(emailColumn) ?? -1;
+    const emailValue = emailIdx >= 0 ? String(row[emailIdx] || "").trim() : "";
+    const groupKey = normalizeEmailToken(emailValue) || `(blank-email-${i})`;
+    if (!grouped.has(groupKey)) grouped.set(groupKey, []);
+    grouped.get(groupKey)?.push(row);
+  }
+
+  const outRows: string[][] = [header];
+  for (const group of grouped.values()) {
+    const flattened: Record<string, string> = {};
+    for (const row of group) {
+      for (let c = 0; c < header.length; c += 1) {
+        const key = header[c];
+        const value = String(row[c] || "").trim();
+        if (!key) continue;
+        if (/^20/.test(key) && value) {
+          const prev = asNumberOrZero(flattened[key] || "0");
+          flattened[key] = String(prev + asNumberOrZero(value));
+        } else if (!flattened[key] && value) {
+          flattened[key] = value;
+        }
+      }
+    }
+
+    let earliest = group[0];
+    const signedUpIdx = headerIndex.get(signedUpColumn) ?? -1;
+    if (signedUpIdx >= 0) {
+      for (const candidate of group) {
+        const candScore = signedUpSortScore(String(candidate[signedUpIdx] || ""));
+        const earlyScore = signedUpSortScore(String(earliest[signedUpIdx] || ""));
+        if (candScore < earlyScore) earliest = candidate;
+      }
+    }
+
+    const earliestCustomerIdIdx = headerIndex.get(customerIdColumn) ?? -1;
+    flattened[customerIdColumn] =
+      earliestCustomerIdIdx >= 0 ? String(earliest[earliestCustomerIdIdx] || "").trim() : flattened[customerIdColumn] || "";
+    flattened[firstMonthColumn] = "";
+    flattened[initialSubColumn] = "";
+    flattened[newEnterpriseColumn] = flattened[newEnterpriseColumn] || "";
+    flattened[salesAssistColumn] = flattened[salesAssistColumn] || "";
+    for (const month of monthColumns) {
+      if (!flattened[month]) flattened[month] = "";
+    }
+
+    outRows.push(header.map((key) => flattened[key] || ""));
+  }
+
+  return outRows;
+}
+
 export default function ModelUpdatePage() {
   const defaults = useMemo(() => defaultDateRange(), []);
   const [startDate, setStartDate] = useState(defaults.startDate);
@@ -589,43 +687,67 @@ export default function ModelUpdatePage() {
     setTransformError(null);
     setTransformSuccess(null);
     try {
-      const stripeFile = files.stripeMrrPerCustomer;
-      if (!stripeFile) throw new Error("Upload Stripe MRR per customer file first.");
-      if (!currentSelfserveAllSubsFile) throw new Error("Upload current selfserve-all-subs file.");
-      const salesAssistFile = files.salesAssistWorkspaceIds;
-      if (!salesAssistFile) throw new Error("Upload sales assist workspace IDs file first.");
-      const parsedStripe = parseStripeMrrPerCustomerCsv(await stripeFile.text());
-      const workspaceIds = extractWorkspaceIdsFromSalesAssistCsv(await salesAssistFile.text());
-      const salesAssistCustomerIds = new Set<string>();
-      if (workspaceIds.length) {
-        const res = await fetch("/api/model-update-sales-assist-customers", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workspaceIds }),
-        });
-        const text = await res.text();
-        const json = text ? (JSON.parse(text) as { customerIds?: string[]; error?: string }) : {};
-        if (!res.ok) {
-          throw new Error(json.error || `Failed to map workspace IDs (${res.status})`);
-        }
-        for (const customerId of Array.isArray(json.customerIds) ? json.customerIds : []) {
-          const normalized = normalizeCustomerIdToken(customerId);
-          if (normalized) salesAssistCustomerIds.add(normalized);
-        }
-      }
-      const merged = mergeIntoSelfserveAllSubsCsv(
-        await currentSelfserveAllSubsFile.text(),
-        parsedStripe,
-        startDate,
-        endDate,
-        salesAssistCustomerIds,
-      );
+      const { parsedStripe, merged, salesAssistCustomerIds } = await buildSelfserveAllSubsMonthRows();
       downloadCsv(`selfserve-all-subs-month-${parsedStripe.monthColumn}.csv`, merged);
       setTransformSuccess(
         `Downloaded merged selfserve-all-subs CSV for ${parsedStripe.monthColumn}. Sales-assist customers marked: ${salesAssistCustomerIds.size}.`,
       );
     } catch (e: unknown) {
       setTransformError(e instanceof Error ? e.message : "Failed to build merged selfserve-all-subs CSV.");
+    }
+  }
+
+  async function buildSelfserveAllSubsMonthRows() {
+    const stripeFile = files.stripeMrrPerCustomer;
+    if (!stripeFile) throw new Error("Upload Stripe MRR per customer file first.");
+    if (!currentSelfserveAllSubsFile) throw new Error("Upload current selfserve-all-subs file.");
+    const salesAssistFile = files.salesAssistWorkspaceIds;
+    if (!salesAssistFile) throw new Error("Upload sales assist workspace IDs file first.");
+    const parsedStripe = parseStripeMrrPerCustomerCsv(await stripeFile.text());
+    const workspaceIds = extractWorkspaceIdsFromSalesAssistCsv(await salesAssistFile.text());
+    const salesAssistCustomerIds = new Set<string>();
+    if (workspaceIds.length) {
+      const res = await fetch("/api/model-update-sales-assist-customers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceIds }),
+      });
+      const text = await res.text();
+      const json = text ? (JSON.parse(text) as { customerIds?: string[]; error?: string }) : {};
+      if (!res.ok) {
+        throw new Error(json.error || `Failed to map workspace IDs (${res.status})`);
+      }
+      for (const customerId of Array.isArray(json.customerIds) ? json.customerIds : []) {
+        const normalized = normalizeCustomerIdToken(customerId);
+        if (normalized) salesAssistCustomerIds.add(normalized);
+      }
+    }
+    const merged = mergeIntoSelfserveAllSubsCsv(
+      await currentSelfserveAllSubsFile.text(),
+      parsedStripe,
+      startDate,
+      endDate,
+      salesAssistCustomerIds,
+    );
+    return {
+      parsedStripe,
+      merged,
+      salesAssistCustomerIds,
+    };
+  }
+
+  async function downloadSelfserveAllMergedCsv() {
+    setTransformError(null);
+    setTransformSuccess(null);
+    try {
+      const { parsedStripe, merged } = await buildSelfserveAllSubsMonthRows();
+      const groupedByEmail = mergeSelfserveRowsByEmail(merged);
+      downloadCsv(`selfserve-all-merged-${parsedStripe.monthColumn}.csv`, groupedByEmail);
+      setTransformSuccess(
+        `Downloaded selfserve-all-merged CSV for ${parsedStripe.monthColumn} (${Math.max(groupedByEmail.length - 1, 0)} grouped emails).`,
+      );
+    } catch (e: unknown) {
+      setTransformError(e instanceof Error ? e.message : "Failed to build selfserve-all-merged CSV.");
     }
   }
 
@@ -783,6 +905,9 @@ export default function ModelUpdatePage() {
               </button>
               <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={() => void downloadMergedSelfserveAllSubsCsv()}>
                 Download selfserve-all-subs-month CSV
+              </button>
+              <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={() => void downloadSelfserveAllMergedCsv()}>
+                Download selfserve-all-merged CSV
               </button>
             </div>
           </div>
