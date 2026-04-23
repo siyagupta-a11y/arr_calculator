@@ -1,4 +1,8 @@
-import { fetchCompanyIdsForContactEmails, fetchWorkspaceIdsForDealStageLabel } from "@/lib/hubspot";
+import {
+  fetchCompanyIdsForContactEmails,
+  fetchDealStageIdToLabelMap,
+  fetchDealsInStage,
+} from "@/lib/hubspot";
 import { generateReport } from "@/lib/report";
 import {
   queryStripeThroughMrrCustomerArrFromBigQuery,
@@ -34,6 +38,7 @@ export type CombinedAllSubsRow = {
   accountId: string;
   accountName: string;
   salesAssist: "yes" | "no";
+  salesAssistByPeriod?: Record<string, "yes" | "no">;
   stripeKeys: string[];
   matchedStripeKeys: string[];
   hubspotValuesByPeriod: Record<string, number>;
@@ -199,6 +204,48 @@ function normalizeWorkspaceId(value: string) {
   return String(value || "").trim().toLowerCase();
 }
 
+function normalizeStageLabelKey(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function isUnknownPropertyError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  const message = String(error.message || "").toLowerCase();
+  return (
+    message.includes("property") &&
+    (message.includes("does not exist") ||
+      message.includes("no property found") ||
+      message.includes("not a valid property"))
+  );
+}
+
+function parseHubspotTimestampMs(rawValue: unknown) {
+  const text = String(rawValue ?? "").trim();
+  if (!text) return NaN;
+  const asNum = Number(text);
+  if (Number.isFinite(asNum)) {
+    if (asNum > 1e12) return asNum;
+    if (asNum > 1e9) return asNum * 1000;
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function monthKeyFromTimestampMs(ms: number) {
+  if (!Number.isFinite(ms)) return "";
+  return new Date(ms).toISOString().slice(0, 7);
+}
+
+function monthKeyFromPeriodKey(periodKey: string) {
+  const key = String(periodKey || "").trim();
+  if (/^\d{4}-\d{2}$/.test(key)) return key;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(key)) return key.slice(0, 7);
+  return "";
+}
+
 function isCloudDeploymentType(value: string) {
   return String(value || "").trim().toLowerCase() === "cloud";
 }
@@ -209,6 +256,172 @@ function targetCurrency() {
     String(process.env.STRIPE_ARR_CORRECT_TARGET_CURRENCY || "").trim() ||
     "USD"
   );
+}
+
+type SalesAssistEventKind = "on" | "off";
+type SalesAssistWorkspaceEvent = {
+  atMs: number;
+  kind: SalesAssistEventKind;
+};
+
+async function resolveDealStageIdsByLabelOrEnv(
+  idsEnvName: string,
+  fallbackLabelEnvName: string,
+  fallbackLabelDefault: string,
+) {
+  const configured = Array.from(
+    new Set(
+      String(process.env[idsEnvName] || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  );
+  if (configured.length) return configured;
+
+  const normalizedLabel = normalizeStageLabelKey(
+    String(process.env[fallbackLabelEnvName] || fallbackLabelDefault),
+  );
+  if (!normalizedLabel) return [];
+
+  const stageIdToLabel = await fetchDealStageIdToLabelMap();
+  return Array.from(stageIdToLabel.entries())
+    .filter(([, label]) => normalizeStageLabelKey(label || "") === normalizedLabel)
+    .map(([stageId]) => stageId);
+}
+
+async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string, SalesAssistWorkspaceEvent[]>> {
+  const transactionalStageIds = await resolveDealStageIdsByLabelOrEnv(
+    "HUBSPOT_TRANSACTIONAL_STAGE_ID",
+    "HUBSPOT_TRANSACTIONAL_STAGE_LABEL",
+    "Closed Won (Transactional Pipeline)",
+  );
+  const salesPipelineStageIds = Array.from(
+    new Set(
+      String(process.env.INCLUDED_DEALSTAGE || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  );
+
+  const stageGroups: Array<{ stageIds: string[]; kind: SalesAssistEventKind }> = [
+    { stageIds: transactionalStageIds, kind: "on" },
+    { stageIds: salesPipelineStageIds, kind: "off" },
+  ];
+
+  const workspaceProp = String(process.env.DEAL_WORKSPACE_ID_PROP || "workspace_id").trim() || "workspace_id";
+  const workspacePropCandidates = Array.from(
+    new Set(
+      [
+        workspaceProp,
+        workspaceProp.endsWith("__c") ? workspaceProp.slice(0, -3) : `${workspaceProp}__c`,
+        "workspace_id",
+        "workspace_id__c",
+      ]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+
+  const out = new Map<string, SalesAssistWorkspaceEvent[]>();
+  for (const group of stageGroups) {
+    for (const stageId of group.stageIds) {
+      let deals: Awaited<ReturnType<typeof fetchDealsInStage>> = [];
+      let fetched = false;
+      for (const workspaceField of workspacePropCandidates) {
+        try {
+          deals = await fetchDealsInStage([workspaceField, "closedate"], stageId);
+          fetched = true;
+          break;
+        } catch (error) {
+          if (isUnknownPropertyError(error)) continue;
+          throw error;
+        }
+      }
+      if (!fetched) continue;
+
+      for (const deal of deals || []) {
+        const properties = (deal.properties || {}) as Record<string, unknown>;
+        const workspaceId = normalizeWorkspaceId(
+          workspacePropCandidates
+            .map((key) => String(properties[key] ?? "").trim())
+            .find((value) => !!value) || "",
+        );
+        if (!workspaceId) continue;
+        const atMs = parseHubspotTimestampMs(properties.closedate);
+        if (!Number.isFinite(atMs)) continue;
+        if (!out.has(workspaceId)) out.set(workspaceId, []);
+        out.get(workspaceId)?.push({ atMs, kind: group.kind });
+      }
+    }
+  }
+
+  for (const events of out.values()) {
+    events.sort((a, b) => {
+      if (a.atMs !== b.atMs) return a.atMs - b.atMs;
+      if (a.kind === b.kind) return 0;
+      return a.kind === "on" ? -1 : 1;
+    });
+  }
+
+  return out;
+}
+
+function buildSalesAssistMonthMap(
+  eventsByWorkspaceId: Map<string, SalesAssistWorkspaceEvent[]>,
+  periodKeys: string[],
+) {
+  const monthKeys = Array.from(
+    new Set(
+      periodKeys
+        .map((periodKey) => monthKeyFromPeriodKey(periodKey))
+        .filter(Boolean),
+    ),
+  ).sort((a, b) => a.localeCompare(b));
+  const out = new Map<string, Map<string, boolean>>();
+  if (!monthKeys.length) return out;
+
+  for (const [workspaceId, events] of eventsByWorkspaceId.entries()) {
+    let active = false;
+    let idx = 0;
+    const activeByMonth = new Map<string, boolean>();
+    for (const monthKey of monthKeys) {
+      while (idx < events.length) {
+        const eventMonth = monthKeyFromTimestampMs(events[idx].atMs);
+        if (!eventMonth || eventMonth > monthKey) break;
+        active = events[idx].kind === "on";
+        idx += 1;
+      }
+      activeByMonth.set(monthKey, active);
+    }
+    out.set(workspaceId, activeByMonth);
+  }
+  return out;
+}
+
+function buildSalesAssistByPeriodForWorkspaceSet(
+  workspaceIds: Iterable<string>,
+  periods: Array<{ key: string }>,
+  salesAssistByWorkspaceMonth: Map<string, Map<string, boolean>>,
+): Record<string, "yes" | "no"> {
+  const out: Record<string, "yes" | "no"> = {};
+  for (const period of periods) {
+    const monthKey = monthKeyFromPeriodKey(period.key);
+    let isYes = false;
+    if (monthKey) {
+      for (const workspaceId of workspaceIds) {
+        const normalizedWorkspaceId = normalizeWorkspaceId(workspaceId);
+        if (!normalizedWorkspaceId) continue;
+        if (salesAssistByWorkspaceMonth.get(normalizedWorkspaceId)?.get(monthKey)) {
+          isYes = true;
+          break;
+        }
+      }
+    }
+    out[period.key] = isYes ? "yes" : "no";
+  }
+  return out;
 }
 
 function buildHubspotAccountMap(report: ReportResponse) {
@@ -599,18 +812,19 @@ export async function generateCombinedAllSubsReport(
   const stripePlanRows: StripeThroughMrrCustomerPlanRow[] = stripeCustomerPlan?.rows || [];
 
   const { periods, accounts, companyIdToAccountKey } = buildHubspotAccountMap(hubspotReport);
+  const latestPeriodKey = periods.length ? periods[periods.length - 1].key : "";
   const { customers: stripeCustomers, aliasesToCustomerKey } = buildStripeCustomerMap(
     stripeArrRows,
     stripePlanRows,
   );
   const warnings: string[] = [];
-  let transactionalWorkspaceIds = new Set<string>();
+  let salesAssistByWorkspaceMonth = new Map<string, Map<string, boolean>>();
   if (includeSalesAssist) {
     try {
-      transactionalWorkspaceIds = new Set(
-        Array.from(await fetchWorkspaceIdsForDealStageLabel())
-          .map((workspaceId) => normalizeWorkspaceId(workspaceId))
-          .filter(Boolean),
+      const eventsByWorkspaceId = await loadSalesAssistWorkspaceEventsByWorkspaceId();
+      salesAssistByWorkspaceMonth = buildSalesAssistMonthMap(
+        eventsByWorkspaceId,
+        periods.map((period) => period.key),
       );
     } catch (error: unknown) {
       warnings.push(
@@ -654,18 +868,19 @@ export async function generateCombinedAllSubsReport(
 
   const rows: CombinedAllSubsRow[] = [];
   for (const account of accounts.values()) {
+    const salesAssistByPeriod = buildSalesAssistByPeriodForWorkspaceSet(
+      account.matchedStripeWorkspaceIds,
+      periods,
+      salesAssistByWorkspaceMonth,
+    );
     rows.push({
       id: `hubspot:${account.accountKey}`,
       source: "hubspot_account",
       customerLabel: customerLabel(account.accountName, account.accountId),
       accountId: account.accountId,
       accountName: account.accountName,
-      salesAssist:
-        Array.from(account.matchedStripeWorkspaceIds).some((workspaceId) =>
-          transactionalWorkspaceIds.has(normalizeWorkspaceId(workspaceId)),
-        )
-          ? "yes"
-          : "no",
+      salesAssist: (latestPeriodKey && salesAssistByPeriod[latestPeriodKey]) || "no",
+      salesAssistByPeriod,
       stripeKeys: Array.from(account.stripeKeys).sort(),
       matchedStripeKeys: Array.from(account.matchedStripeKeys).sort(),
       hubspotValuesByPeriod: account.hubspotValuesByPeriod,
@@ -688,18 +903,19 @@ export async function generateCombinedAllSubsReport(
     }
     ensurePlanDefaults(periods, plansByPeriod);
 
+    const salesAssistByPeriod = buildSalesAssistByPeriodForWorkspaceSet(
+      stripeCustomer.workspaceIds,
+      periods,
+      salesAssistByWorkspaceMonth,
+    );
     rows.push({
       id: `stripe:${customerKey}`,
       source: "stripe_only_customer",
       customerLabel: customerKey,
       accountId: "",
       accountName: "",
-      salesAssist:
-        Array.from(stripeCustomer.workspaceIds).some((workspaceId) =>
-          transactionalWorkspaceIds.has(normalizeWorkspaceId(workspaceId)),
-        )
-          ? "yes"
-          : "no",
+      salesAssist: (latestPeriodKey && salesAssistByPeriod[latestPeriodKey]) || "no",
+      salesAssistByPeriod,
       stripeKeys: Array.from(stripeCustomer.matchingKeys).sort(),
       matchedStripeKeys: [],
       hubspotValuesByPeriod: {},

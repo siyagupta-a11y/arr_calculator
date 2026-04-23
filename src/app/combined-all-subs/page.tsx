@@ -15,6 +15,7 @@ type CombinedAllSubsRow = {
   accountId: string;
   accountName: string;
   salesAssist: "yes" | "no";
+  salesAssistByPeriod?: Record<string, "yes" | "no">;
   stripeKeys: string[];
   matchedStripeKeys: string[];
   hubspotValuesByPeriod: Record<string, number>;
@@ -252,6 +253,7 @@ export default function CombinedAllSubsPage() {
         "matched_stripe_keys",
       ];
       for (const period of data.periods) {
+        header.push(`sales_assist_${period.key}`);
         header.push(`hubspot_plan_${period.key}`);
         header.push(`stripe_plan_${period.key}`);
         header.push(`combined_plan_${period.key}`);
@@ -269,6 +271,7 @@ export default function CombinedAllSubsPage() {
           row.matchedStripeKeys.join(" | "),
         ];
         for (const period of data.periods) {
+          cells.push(row.salesAssistByPeriod?.[period.key] || "no");
           cells.push(formatPlanLabel(row.hubspotPlansByPeriod?.[period.key] || "free"));
           cells.push(formatPlanLabel(row.stripePlansByPeriod?.[period.key] || "free"));
           cells.push(formatPlanLabel(row.plansByPeriod?.[period.key] || "free"));
@@ -290,6 +293,7 @@ export default function CombinedAllSubsPage() {
       "matched_stripe_keys",
     ];
     for (const period of data.periods) {
+      header.push(`sales_assist_${period.key}`);
       header.push(`hubspot_arr_${period.key}`);
       header.push(`stripe_arr_${period.key}`);
       header.push(`combined_arr_${period.key}`);
@@ -308,6 +312,7 @@ export default function CombinedAllSubsPage() {
         row.matchedStripeKeys.join(" | "),
       ];
       for (const period of data.periods) {
+        cells.push(row.salesAssistByPeriod?.[period.key] || "no");
         cells.push(Number(row.hubspotValuesByPeriod[period.key] || 0));
         cells.push(Number(row.stripeValuesByPeriod[period.key] || 0));
         cells.push(Number(row.valuesByPeriod[period.key] || 0));
@@ -323,15 +328,16 @@ export default function CombinedAllSubsPage() {
     if (effectiveDisplayMode === "plan") {
       const header: Array<string> = [
         "id",
-        "source",
-        "customer_label",
-        "account_id",
-        "account_name",
-        "sales_assist",
-      ];
-      for (const period of data.periods) {
-        header.push(`combined_plan_${period.key}`);
-      }
+      "source",
+      "customer_label",
+      "account_id",
+      "account_name",
+      "sales_assist",
+    ];
+    for (const period of data.periods) {
+      header.push(`sales_assist_${period.key}`);
+      header.push(`combined_plan_${period.key}`);
+    }
 
       const rows: Array<Array<string | number>> = [header];
       for (const row of data.rows) {
@@ -344,6 +350,7 @@ export default function CombinedAllSubsPage() {
           row.salesAssist,
         ];
         for (const period of data.periods) {
+          cells.push(row.salesAssistByPeriod?.[period.key] || "no");
           cells.push(formatPlanLabel(row.plansByPeriod?.[period.key] || "free"));
         }
         rows.push(cells);
@@ -365,6 +372,7 @@ export default function CombinedAllSubsPage() {
       "sales_assist",
     ];
     for (const period of data.periods) {
+      header.push(`sales_assist_${period.key}`);
       header.push(`combined_arr_${period.key}`);
     }
 
@@ -379,6 +387,7 @@ export default function CombinedAllSubsPage() {
         row.salesAssist,
       ];
       for (const period of data.periods) {
+        cells.push(row.salesAssistByPeriod?.[period.key] || "no");
         cells.push(Number(row.valuesByPeriod[period.key] || 0));
       }
       rows.push(cells);

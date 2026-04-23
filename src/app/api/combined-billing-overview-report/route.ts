@@ -16,7 +16,10 @@ import {
   resolveEnterprisePrepaidAiSpendCurrentMonthCarryForwardOffsets,
   resolveEnterprisePrepaidAiSpendExclusions,
 } from "@/lib/aiSpendEnterprisePrepaidExclusions";
-import { generateCombinedAllSubsReport } from "@/lib/combinedAllSubsReport";
+import {
+  generateCombinedAllSubsReport,
+  type CombinedAllSubsResponse,
+} from "@/lib/combinedAllSubsReport";
 import { queryBambooHrFullTimeRosterByDate } from "@/lib/bamboohr";
 import { fetchQuickBooksSalesMarketingCostsByMonth } from "@/lib/quickbooks";
 import {
@@ -727,6 +730,216 @@ function buildAiSpendSourceSeries(
   return { points, monthlyArrByPeriod, initialPrevMrr };
 }
 
+type SourceSegment = "salesled" | "selfserve";
+type SourceSegmentAccumulator = {
+  prevMrr: number;
+  mrrEnd: number;
+  newMrr: number;
+  expansionMrr: number;
+  contractionMrr: number;
+  churnMrr: number;
+};
+
+function periodStartIsoFromCanonicalKey(periodKey: string, grain: CombinedGrain) {
+  const key = String(periodKey || "").trim();
+  if (!key) return "";
+  if (grain === "daily") return key;
+  if (grain === "monthly") return `${key}-01`;
+  const quarterMatch = /^(\d{4})-Q([1-4])$/i.exec(key);
+  if (!quarterMatch) return key;
+  const year = Number(quarterMatch[1]);
+  const quarter = Number(quarterMatch[2]);
+  const month = (quarter - 1) * 3 + 1;
+  return `${year}-${String(month).padStart(2, "0")}-01`;
+}
+
+function resolveCombinedAllSubsPeriodKey(
+  canonicalPeriodKey: string,
+  grain: CombinedGrain,
+  availablePeriodKeys: Set<string>,
+) {
+  const canonical = String(canonicalPeriodKey || "").trim();
+  if (!canonical) return "";
+  if (grain === "daily" || grain === "monthly") {
+    return availablePeriodKeys.has(canonical) ? canonical : "";
+  }
+
+  const quarterMatch = /^(\d{4})-Q([1-4])$/i.exec(canonical);
+  if (!quarterMatch) return "";
+  const year = Number(quarterMatch[1]);
+  const quarter = Number(quarterMatch[2]);
+  const endMonth = quarter * 3;
+  const endMonthKey = `${year}-${String(endMonth).padStart(2, "0")}`;
+  if (availablePeriodKeys.has(endMonthKey)) return endMonthKey;
+
+  const monthCandidates = Array.from(availablePeriodKeys)
+    .filter((key) => /^\d{4}-\d{2}$/.test(key))
+    .filter((key) => {
+      const m = /^(\d{4})-(\d{2})$/.exec(key);
+      if (!m) return false;
+      const y = Number(m[1]);
+      const month = Number(m[2]);
+      return y === year && Math.floor((month - 1) / 3) + 1 === quarter;
+    })
+    .sort((a, b) => a.localeCompare(b));
+  return monthCandidates.length ? monthCandidates[monthCandidates.length - 1] : "";
+}
+
+function sourceSegmentForCombinedAllSubsRow(
+  row: CombinedAllSubsResponse["rows"][number],
+  reportPeriodKey: string,
+): SourceSegment {
+  if (row.source === "hubspot_account") return "salesled";
+  const salesAssistValue =
+    row.salesAssistByPeriod?.[reportPeriodKey] ??
+    row.salesAssist ??
+    "no";
+  return String(salesAssistValue || "").trim().toLowerCase() === "yes" ? "salesled" : "selfserve";
+}
+
+function applySegmentMovement(
+  acc: SourceSegmentAccumulator,
+  segment: SourceSegment,
+  prevSegment: SourceSegment,
+  currSegment: SourceSegment,
+  prevArr: number,
+  currArr: number,
+) {
+  const prevHas = Math.abs(prevArr) > 1e-9;
+  const currHas = Math.abs(currArr) > 1e-9;
+  const prevIn = prevHas && prevSegment === segment;
+  const currIn = currHas && currSegment === segment;
+
+  if (prevIn) acc.prevMrr = round2(acc.prevMrr + prevArr / 12);
+  if (currIn) acc.mrrEnd = round2(acc.mrrEnd + currArr / 12);
+
+  if (!prevIn && !currIn) return;
+
+  if (!prevIn && currIn) {
+    if (!prevHas) {
+      acc.newMrr = round2(acc.newMrr + currArr / 12);
+    } else {
+      acc.expansionMrr = round2(acc.expansionMrr + currArr / 12);
+    }
+    return;
+  }
+
+  if (prevIn && !currIn) {
+    acc.churnMrr = round2(acc.churnMrr - prevArr / 12);
+    return;
+  }
+
+  const diffArr = round2(currArr - prevArr);
+  if (diffArr > 1e-9) {
+    acc.expansionMrr = round2(acc.expansionMrr + diffArr / 12);
+  } else if (diffArr < -1e-9) {
+    acc.contractionMrr = round2(acc.contractionMrr + diffArr / 12);
+  }
+}
+
+function buildSourcePointsFromCombinedAllSubsReport(
+  periodOrder: PeriodRef[],
+  grain: CombinedGrain,
+  previousRange: { startDate: string; endDate: string },
+  report: CombinedAllSubsResponse,
+) {
+  const availablePeriodKeys = new Set((report.periods || []).map((period) => String(period.key || "").trim()).filter(Boolean));
+  const periodRefs = periodOrder.map((period) => {
+    const canonical = canonicalHubPeriodKey(period.key, grain) || period.key;
+    const reportKey = resolveCombinedAllSubsPeriodKey(canonical, grain, availablePeriodKeys);
+    return {
+      sourceKey: period.key,
+      canonicalKey: canonical,
+      reportKey,
+      label: period.label,
+    };
+  });
+
+  const previousCanonicalKey = periodKeyFromIsoDateForGrain(previousRange.endDate, grain);
+  const previousReportKey = resolveCombinedAllSubsPeriodKey(previousCanonicalKey, grain, availablePeriodKeys);
+  const segmentOrder: SourceSegment[] = ["salesled", "selfserve"];
+  const bySegment: Record<SourceSegment, CombinedPoint[]> = {
+    salesled: [],
+    selfserve: [],
+  };
+
+  for (let idx = 0; idx < periodRefs.length; idx += 1) {
+    const period = periodRefs[idx];
+    const prevPeriod = idx > 0 ? periodRefs[idx - 1] : null;
+    const prevKey = prevPeriod?.reportKey || previousReportKey;
+
+    const accBySegment: Record<SourceSegment, SourceSegmentAccumulator> = {
+      salesled: {
+        prevMrr: 0,
+        mrrEnd: 0,
+        newMrr: 0,
+        expansionMrr: 0,
+        contractionMrr: 0,
+        churnMrr: 0,
+      },
+      selfserve: {
+        prevMrr: 0,
+        mrrEnd: 0,
+        newMrr: 0,
+        expansionMrr: 0,
+        contractionMrr: 0,
+        churnMrr: 0,
+      },
+    };
+
+    for (const row of report.rows || []) {
+      const currArr = round2(Number(row.valuesByPeriod?.[period.reportKey] || 0));
+      const prevArr = round2(Number(row.valuesByPeriod?.[prevKey] || 0));
+      const currSegment = sourceSegmentForCombinedAllSubsRow(row, period.reportKey);
+      const prevSegment = sourceSegmentForCombinedAllSubsRow(row, prevKey);
+
+      for (const segment of segmentOrder) {
+        applySegmentMovement(accBySegment[segment], segment, prevSegment, currSegment, prevArr, currArr);
+      }
+    }
+
+    const periodStart = periodStartIsoFromCanonicalKey(period.canonicalKey, grain);
+    const periodEnd = periodEndIsoFromKey(period.canonicalKey, grain) || periodStart;
+
+    for (const segment of segmentOrder) {
+      const acc = accBySegment[segment];
+      const prevMrr = round2(acc.prevMrr);
+      const mrrEnd = round2(acc.mrrEnd);
+      const newMrr = round2(acc.newMrr);
+      const expansionMrr = round2(acc.expansionMrr);
+      const contractionMrr = round2(acc.contractionMrr);
+      const churnMrr = round2(acc.churnMrr);
+      const netMrrChange = round2(newMrr + expansionMrr + contractionMrr + churnMrr);
+      const mrrGrowthRatePct =
+        Math.abs(prevMrr) > 1e-9
+          ? round2(((mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
+          : 0;
+      const retention = calculateRetentionRates(prevMrr, expansionMrr, contractionMrr, churnMrr);
+      const arr = round2(mrrEnd * 12);
+      const arrGrowth = round2(arr - prevMrr * 12);
+      bySegment[segment].push({
+        key: period.canonicalKey,
+        label: period.label,
+        periodStart,
+        periodEnd,
+        mrrEnd,
+        newMrr,
+        expansionMrr,
+        contractionMrr,
+        churnMrr,
+        netMrrChange,
+        mrrGrowthRatePct,
+        ndrPct: retention.ndrPct,
+        gdrPct: retention.gdrPct,
+        arr,
+        arrGrowth,
+      });
+    }
+  }
+
+  return bySegment;
+}
+
 function mergeCombinedAndAiSeries(
   combinedPoints: CombinedPoint[],
   aiPoints: CombinedPoint[],
@@ -1196,8 +1409,26 @@ async function buildCombinedBillingOverview(
     endDateObj.getTime() >= currentMonthStartObj.getTime() &&
     startDateObj.getTime() < nextMonthStartObj.getTime();
   const shouldComputeLtv = grain === "monthly";
+  const sourcePlanGrain = grain === "daily" ? "daily" : "monthly";
   let aiSpendExcludedEnterprisePrepaidCustomers: EnterprisePrepaidAiSpendExclusionRow[] = [];
   let aiSpendDailyPointBreakdown: AiSpendDailyPointBreakdown[] = [];
+  const sourceCombinedAllSubsPromise = getOrSetCache(
+    `api:combined-billing-overview:combined-all-subs-source:${stableStringify({
+      startDate: previousRange.startDate,
+      endDate,
+      grain: sourcePlanGrain,
+    })}`,
+    SUBQUERY_CACHE_TTL_MS,
+    () =>
+      generateCombinedAllSubsReport({
+        startDate: previousRange.startDate,
+        endDate,
+        combineMode: "grouped",
+        displayMode: "arr",
+        planGrain: sourcePlanGrain,
+        includeSalesAssist: true,
+      }),
+  );
   const ltvCombinedUsersPromise: Promise<CombinedLtvUserCounts> = shouldComputeLtv
     ? generateCombinedAllSubsReport({
         startDate: previousRange.startDate,
@@ -1696,9 +1927,25 @@ async function buildCombinedBillingOverview(
     aiSpendSourcePoints = aiSpendSourcePoints.map((point) => ({ ...point }));
     linePoints = points;
   }
+  let salesledSourcePoints = hubPoints;
+  let selfserveSourcePoints = selfservePoints;
+  try {
+    const sourceCombinedAllSubs = await sourceCombinedAllSubsPromise;
+    const sourceSplit = buildSourcePointsFromCombinedAllSubsReport(
+      periodOrder,
+      grain,
+      previousRange,
+      sourceCombinedAllSubs,
+    );
+    salesledSourcePoints = sourceSplit.salesled;
+    selfserveSourcePoints = sourceSplit.selfserve;
+  } catch {
+    salesledSourcePoints = hubPoints;
+    selfserveSourcePoints = selfservePoints;
+  }
   const lineSourcePoints: LineSourcePoints = {
-    salesled: hubPoints,
-    selfserve: selfservePoints,
+    salesled: salesledSourcePoints,
+    selfserve: selfserveSourcePoints,
     aiSpend: aiSpendSourcePoints,
   };
 
@@ -1767,11 +2014,11 @@ async function buildCombinedBillingOverview(
     return {
       key,
       label: period.label,
-      selfserveGdrPct: selfservePoints[idx]?.gdrPct || 0,
-      salesledGdrPct: hubPoints[idx]?.gdrPct || 0,
+      selfserveGdrPct: lineSourcePoints.selfserve[idx]?.gdrPct || 0,
+      salesledGdrPct: lineSourcePoints.salesled[idx]?.gdrPct || 0,
       combinedGdrPct: points[idx]?.gdrPct || 0,
-      selfserveNdrPct: selfservePoints[idx]?.ndrPct || 0,
-      salesledNdrPct: hubPoints[idx]?.ndrPct || 0,
+      selfserveNdrPct: lineSourcePoints.selfserve[idx]?.ndrPct || 0,
+      salesledNdrPct: lineSourcePoints.salesled[idx]?.ndrPct || 0,
       combinedNdrPct: points[idx]?.ndrPct || 0,
     };
   });
