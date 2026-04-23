@@ -415,8 +415,8 @@ export default function CombinedAllSubsPage() {
             <Link href="/ndr-gdr" className="stripe-ui__hero-link">
               Open NDR/GDR
             </Link>
-            <Link href="/selfserve-exclusions" className="stripe-ui__hero-link">
-              Open Selfserve Exclusions
+            <Link href="/model-update" className="stripe-ui__hero-link">
+              Open Model Update
             </Link>
           </div>
         </div>
