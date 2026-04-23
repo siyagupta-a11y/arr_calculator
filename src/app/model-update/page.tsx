@@ -286,7 +286,67 @@ function findHeaderIndex(normalizedHeader: string[], aliases: string[]) {
   return -1;
 }
 
-function mergeIntoSelfserveAllSubsCsv(selfserveCsvText: string, parsedStripe: ParsedStripeMrr): string[][] {
+function toColumnA1(index: number) {
+  let value = index + 1;
+  let column = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    column = String.fromCharCode(65 + remainder) + column;
+    value = Math.floor((value - 1) / 26);
+  }
+  return column;
+}
+
+function parseMonthKey(month: string) {
+  const trimmed = String(month || "").trim();
+  if (!/^\d{4}-\d{2}$/.test(trimmed)) return null;
+  return trimmed;
+}
+
+function parseIsoDate(dateText: string) {
+  const text = String(dateText || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  return text;
+}
+
+function sampleDatePattern(rows: string[][], columnIdx: number) {
+  if (columnIdx < 0) return null;
+  for (let i = 1; i < rows.length; i += 1) {
+    const value = String(rows[i]?.[columnIdx] || "").trim();
+    if (!value) continue;
+    if (/^\d{4}-\d{2}$/.test(value)) return "yyyy-mm";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return "yyyy-mm-dd";
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(value)) return "m/d/yyyy";
+    if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(value)) return "m-d-yyyy";
+  }
+  return null;
+}
+
+function formatDateLikeSample(sourceIsoDate: string, pattern: string | null, forMonthOnly: boolean) {
+  const iso = parseIsoDate(sourceIsoDate);
+  if (!iso) return forMonthOnly ? sourceIsoDate.slice(0, 7) : sourceIsoDate;
+  const [year, month, day] = iso.split("-");
+  if (pattern === "yyyy-mm") return `${year}-${month}`;
+  if (pattern === "yyyy-mm-dd") return forMonthOnly ? `${year}-${month}-01` : iso;
+  if (pattern === "m/d/yyyy") return forMonthOnly ? `${Number(month)}/1/${year}` : `${Number(month)}/${Number(day)}/${year}`;
+  if (pattern === "m-d-yyyy") return forMonthOnly ? `${Number(month)}-1-${year}` : `${Number(month)}-${Number(day)}-${year}`;
+  return forMonthOnly ? `${year}-${month}` : iso;
+}
+
+function isMonthWithinSelectedRange(month: string, startDate: string, endDate: string) {
+  const monthKey = parseMonthKey(month);
+  if (!monthKey) return false;
+  const startMonth = startDate.slice(0, 7);
+  const endMonth = endDate.slice(0, 7);
+  return monthKey >= startMonth && monthKey <= endMonth;
+}
+
+function mergeIntoSelfserveAllSubsCsv(
+  selfserveCsvText: string,
+  parsedStripe: ParsedStripeMrr,
+  startDate: string,
+  endDate: string,
+): string[][] {
   const { rows } = parseDelimitedRows(selfserveCsvText);
   if (rows.length < 1) throw new Error("Current selfserve-all-subs file is empty.");
 
@@ -307,6 +367,14 @@ function mergeIntoSelfserveAllSubsCsv(selfserveCsvText: string, parsedStripe: Pa
   const signedUpIdx = findHeaderIndex(normalizedHeader, ["Signed up", "signed_up"]);
   const initialSubIdx = findHeaderIndex(normalizedHeader, ["Initial Subscription $", "initial_subscription"]);
   const emailIdx = findHeaderIndex(normalizedHeader, ["Email", "Customer Email"]);
+  const monthColumnIndexes = header
+    .map((cell, idx) => ({ idx, month: parseMonthKey(String(cell || "").trim()) }))
+    .filter((entry): entry is { idx: number; month: string } => entry.month !== null)
+    .map((entry) => entry.idx);
+  const firstMonthColumnIdx = monthColumnIndexes.length ? Math.min(...monthColumnIndexes) : -1;
+  const lastMonthColumnIdx = monthColumnIndexes.length ? Math.max(...monthColumnIndexes) : -1;
+  const firstMonthPattern = sampleDatePattern(rows, firstMonthIdx);
+  const signedUpPattern = sampleDatePattern(rows, signedUpIdx);
 
   const stripeByCustomer = new Map(parsedStripe.rows.map((row) => [row.customerId, row]));
   const seenCustomerIds = new Set<string>();
@@ -334,12 +402,29 @@ function mergeIntoSelfserveAllSubsCsv(selfserveCsvText: string, parsedStripe: Pa
 
   for (const stripeRow of parsedStripe.rows) {
     if (seenCustomerIds.has(stripeRow.customerId)) continue;
+    if (!isMonthWithinSelectedRange(stripeRow.firstMonthOfMrr, startDate, endDate)) continue;
+
     const newRow = new Array(header.length).fill("");
     newRow[customerIdIdx] = stripeRow.customerId;
+    for (const idx of monthColumnIndexes) {
+      const monthHeader = parseMonthKey(String(header[idx] || "").trim());
+      if (monthHeader && monthHeader < monthColumn) newRow[idx] = "0";
+    }
     newRow[monthColumnIdx] = stripeRow.mrr;
-    if (firstMonthIdx >= 0) newRow[firstMonthIdx] = stripeRow.firstMonthOfMrr;
-    if (signedUpIdx >= 0) newRow[signedUpIdx] = stripeRow.signedUp;
-    if (initialSubIdx >= 0) newRow[initialSubIdx] = "";
+    if (firstMonthIdx >= 0) {
+      newRow[firstMonthIdx] = formatDateLikeSample(
+        `${stripeRow.firstMonthOfMrr}-01`,
+        firstMonthPattern,
+        true,
+      );
+    }
+    if (signedUpIdx >= 0) newRow[signedUpIdx] = formatDateLikeSample(stripeRow.signedUp, signedUpPattern, false);
+    if (initialSubIdx >= 0 && firstMonthColumnIdx >= 0 && lastMonthColumnIdx >= firstMonthColumnIdx) {
+      const rowNumber = outputRows.length + 1;
+      const startRef = `${toColumnA1(firstMonthColumnIdx)}${rowNumber}`;
+      const endRef = `${toColumnA1(lastMonthColumnIdx)}${rowNumber}`;
+      newRow[initialSubIdx] = `=IFERROR(INDEX(FILTER(${startRef}:${endRef},${startRef}:${endRef}<>0),1),0)`;
+    }
     if (emailIdx >= 0) newRow[emailIdx] = stripeRow.email;
     outputRows.push(newRow);
   }
@@ -461,8 +546,8 @@ export default function ModelUpdatePage() {
       if (!stripeFile) throw new Error("Upload Stripe MRR per customer file first.");
       if (!currentSelfserveAllSubsFile) throw new Error("Upload current selfserve-all-subs file.");
       const parsedStripe = parseStripeMrrPerCustomerCsv(await stripeFile.text());
-      const merged = mergeIntoSelfserveAllSubsCsv(await currentSelfserveAllSubsFile.text(), parsedStripe);
-      downloadCsv(`selfserve-all-subs-${parsedStripe.monthColumn}.csv`, merged);
+      const merged = mergeIntoSelfserveAllSubsCsv(await currentSelfserveAllSubsFile.text(), parsedStripe, startDate, endDate);
+      downloadCsv(`selfserve-all-subs-month-${parsedStripe.monthColumn}.csv`, merged);
       setTransformSuccess(`Downloaded merged selfserve-all-subs CSV for ${parsedStripe.monthColumn}.`);
     } catch (e: unknown) {
       setTransformError(e instanceof Error ? e.message : "Failed to build merged selfserve-all-subs CSV.");
