@@ -24,6 +24,14 @@ type AnalyticsResponse = {
   googleAnalytics: AnalyticsBlock;
 };
 
+type MrrChangeTypeTotals = {
+  newTotal: number;
+  reactivationTotal: number;
+  expansionTotal: number;
+  contractionTotal: number;
+  churnTotal: number;
+};
+
 type UploadFieldKey =
   | "stripeMrrPerCustomer"
   | "stripeMrrChanges"
@@ -159,6 +167,35 @@ function normalizeCustomerIdToken(value: string) {
   return String(value || "").trim().toLowerCase();
 }
 
+function normalizeEventType(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s-]+/g, "");
+}
+
+function parseEventTimestampMs(rawValue: string) {
+  const value = String(rawValue || "").trim();
+  if (!value) return NaN;
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if (m) {
+    const year = Number(m[1]);
+    const month = Number(m[2]);
+    const day = Number(m[3]);
+    const hour = Number(m[4]);
+    const minute = Number(m[5]);
+    const second = Number(m[6] || "0");
+    return Date.UTC(year, month - 1, day, hour, minute, second, 0);
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function isoDayFromTimestampMs(ms: number) {
+  if (!Number.isFinite(ms)) return "";
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
 function csvEscape(value: string | number | null | undefined) {
   const str = value == null ? "" : String(value);
   if (/[",\n]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
@@ -176,6 +213,17 @@ function downloadCsv(filename: string, rows: string[][]) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+function roundTo(value: number, digits = 6) {
+  const factor = 10 ** digits;
+  return Math.round((Number(value) || 0) * factor) / factor;
+}
+
+function formatAmountForCsv(value: number) {
+  const n = roundTo(value, 6);
+  if (Math.abs(n) <= 1e-9) return "0";
+  return String(n);
 }
 
 type StripeMrrCustomerRow = {
@@ -283,6 +331,232 @@ function extractWorkspaceIdsFromSalesAssistCsv(text: string) {
   }
 
   return Array.from(out).sort((a, b) => a.localeCompare(b));
+}
+
+type ParsedMrrChangeRow = {
+  eventTimestampRaw: string;
+  eventTypeRaw: string;
+  customerId: string;
+  currency: string;
+  amount: number;
+  timestampMs: number;
+  dayKey: string;
+  sign: 1 | -1;
+};
+
+function parseMrrChangesCsv(text: string): ParsedMrrChangeRow[] {
+  const { rows } = parseDelimitedRows(text);
+  if (rows.length < 2) {
+    throw new Error("Stripe MRR changes file must include header and at least one data row.");
+  }
+
+  const headerNorm = rows[0].map((cell) => normalizeHeader(cell));
+  const eventTimestampIdx = findHeaderIndex(headerNorm, ["event_timestamp", "event timestamp"]);
+  const eventTypeIdx = findHeaderIndex(headerNorm, ["event_type", "event type"]);
+  const customerIdIdx = findHeaderIndex(headerNorm, ["customer_id", "customer id"]);
+  const currencyIdx = findHeaderIndex(headerNorm, ["currency"]);
+  const mrrChangeIdx = findHeaderIndex(headerNorm, ["mrr_change", "mrr change"]);
+
+  if (eventTimestampIdx < 0) throw new Error("MRR changes file missing event_timestamp column.");
+  if (eventTypeIdx < 0) throw new Error("MRR changes file missing event_type column.");
+  if (customerIdIdx < 0) throw new Error("MRR changes file missing customer_id column.");
+  if (currencyIdx < 0) throw new Error("MRR changes file missing currency column.");
+  if (mrrChangeIdx < 0) throw new Error("MRR changes file missing mrr_change column.");
+
+  const out: ParsedMrrChangeRow[] = [];
+  for (let i = 1; i < rows.length; i += 1) {
+    const line = rows[i];
+    const eventTimestampRaw = String(line[eventTimestampIdx] || "").trim();
+    const eventTypeRaw = String(line[eventTypeIdx] || "").trim();
+    const customerId = String(line[customerIdIdx] || "").trim();
+    const currency = String(line[currencyIdx] || "").trim().toLowerCase();
+    const amount = parseMoneyLike(String(line[mrrChangeIdx] || "0"));
+    const timestampMs = parseEventTimestampMs(eventTimestampRaw);
+    if (!eventTimestampRaw || !eventTypeRaw || !customerId || !currency || !Number.isFinite(timestampMs)) {
+      continue;
+    }
+    const normalizedType = normalizeEventType(eventTypeRaw);
+    const sign: 1 | -1 =
+      amount < 0
+        ? -1
+        : amount > 0
+          ? 1
+          : normalizedType === "downgrade" || normalizedType === "contraction" || normalizedType === "churn"
+            ? -1
+            : 1;
+    out.push({
+      eventTimestampRaw,
+      eventTypeRaw,
+      customerId,
+      currency,
+      amount,
+      timestampMs,
+      dayKey: isoDayFromTimestampMs(timestampMs),
+      sign,
+    });
+  }
+
+  out.sort((a, b) => {
+    if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
+    if (a.customerId !== b.customerId) return a.customerId.localeCompare(b.customerId);
+    if (a.currency !== b.currency) return a.currency.localeCompare(b.currency);
+    return a.eventTypeRaw.localeCompare(b.eventTypeRaw);
+  });
+  return out;
+}
+
+function computeMrrChangeTotals(rows: ParsedMrrChangeRow[]): MrrChangeTypeTotals {
+  const totals: MrrChangeTypeTotals = {
+    newTotal: 0,
+    reactivationTotal: 0,
+    expansionTotal: 0,
+    contractionTotal: 0,
+    churnTotal: 0,
+  };
+  for (const row of rows) {
+    const t = normalizeEventType(row.eventTypeRaw);
+    const amount = Math.abs(Number(row.amount || 0));
+    if (amount <= 1e-9) continue;
+    if (t === "new") totals.newTotal += amount;
+    else if (t === "reactivation") totals.reactivationTotal += amount;
+    else if (t === "upgrade" || t === "expansion") totals.expansionTotal += amount;
+    else if (t === "downgrade" || t === "contraction") totals.contractionTotal += amount;
+    else if (t === "churn") totals.churnTotal += amount;
+  }
+  return {
+    newTotal: roundTo(totals.newTotal, 6),
+    reactivationTotal: roundTo(totals.reactivationTotal, 6),
+    expansionTotal: roundTo(totals.expansionTotal, 6),
+    contractionTotal: roundTo(totals.contractionTotal, 6),
+    churnTotal: roundTo(totals.churnTotal, 6),
+  };
+}
+
+function applyMrrChangeCleanupRules(sourceRows: ParsedMrrChangeRow[]) {
+  const rows = sourceRows.map((row) => ({ ...row }));
+  const removed = new Array(rows.length).fill(false);
+  const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+  const EPSILON = 1e-9;
+  const byCustomerCurrency = new Map<string, number[]>();
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const key = `${normalizeCustomerIdToken(rows[i].customerId)}|${rows[i].currency}`;
+    if (!byCustomerCurrency.has(key)) byCustomerCurrency.set(key, []);
+    byCustomerCurrency.get(key)?.push(i);
+  }
+
+  for (const indexes of byCustomerCurrency.values()) {
+    for (let p = 0; p < indexes.length; p += 1) {
+      const i = indexes[p];
+      if (removed[i]) continue;
+      const first = rows[i];
+      const firstType = normalizeEventType(first.eventTypeRaw);
+      const counterpart = firstType === "upgrade" ? "downgrade" : firstType === "new" ? "churn" : "";
+      if (!counterpart) continue;
+      const targetAmount = Math.abs(first.amount);
+
+      for (let q = p + 1; q < indexes.length; q += 1) {
+        const j = indexes[q];
+        if (removed[j]) continue;
+        const second = rows[j];
+        const diffMs = second.timestampMs - first.timestampMs;
+        if (diffMs < 0) continue;
+        if (diffMs > SEVEN_DAYS_MS) break;
+        const secondType = normalizeEventType(second.eventTypeRaw);
+        if (secondType !== counterpart) continue;
+        if (Math.abs(Math.abs(second.amount) - targetAmount) > EPSILON) continue;
+        removed[i] = true;
+        removed[j] = true;
+        break;
+      }
+    }
+  }
+
+  const remainingIndexes = rows.map((_, idx) => idx).filter((idx) => !removed[idx]);
+  const adjustedRows = remainingIndexes.map((idx) => rows[idx]);
+  const removedAdjusted = new Array(adjustedRows.length).fill(false);
+  const byCustomerCurrencyDay = new Map<string, number[]>();
+  for (let i = 0; i < adjustedRows.length; i += 1) {
+    const row = adjustedRows[i];
+    const key = `${normalizeCustomerIdToken(row.customerId)}|${row.currency}|${row.dayKey}`;
+    if (!byCustomerCurrencyDay.has(key)) byCustomerCurrencyDay.set(key, []);
+    byCustomerCurrencyDay.get(key)?.push(i);
+  }
+
+  for (const indexes of byCustomerCurrencyDay.values()) {
+    indexes.sort((a, b) => adjustedRows[a].timestampMs - adjustedRows[b].timestampMs);
+    const pendingDowngrades: number[] = [];
+
+    for (const idx of indexes) {
+      if (removedAdjusted[idx]) continue;
+      const row = adjustedRows[idx];
+      const t = normalizeEventType(row.eventTypeRaw);
+      if (t === "downgrade") {
+        pendingDowngrades.push(idx);
+        continue;
+      }
+      if (t !== "upgrade") continue;
+
+      let upgradeRemaining = Math.abs(row.amount);
+      while (upgradeRemaining > EPSILON && pendingDowngrades.length) {
+        const dIdx = pendingDowngrades[pendingDowngrades.length - 1];
+        if (removedAdjusted[dIdx]) {
+          pendingDowngrades.pop();
+          continue;
+        }
+        const downRow = adjustedRows[dIdx];
+        const downgradeRemaining = Math.abs(downRow.amount);
+        if (downgradeRemaining <= EPSILON) {
+          removedAdjusted[dIdx] = true;
+          pendingDowngrades.pop();
+          continue;
+        }
+        if (downgradeRemaining > upgradeRemaining + EPSILON) {
+          downRow.amount = downRow.sign * roundTo(downgradeRemaining - upgradeRemaining, 6);
+          upgradeRemaining = 0;
+          break;
+        }
+        if (upgradeRemaining > downgradeRemaining + EPSILON) {
+          upgradeRemaining = roundTo(upgradeRemaining - downgradeRemaining, 6);
+          removedAdjusted[dIdx] = true;
+          pendingDowngrades.pop();
+          continue;
+        }
+        removedAdjusted[dIdx] = true;
+        pendingDowngrades.pop();
+        upgradeRemaining = 0;
+      }
+
+      if (upgradeRemaining <= EPSILON) {
+        removedAdjusted[idx] = true;
+      } else {
+        row.amount = row.sign * upgradeRemaining;
+      }
+    }
+  }
+
+  const finalRows = adjustedRows.filter((_, idx) => !removedAdjusted[idx] && Math.abs(adjustedRows[idx].amount) > 1e-9);
+  finalRows.sort((a, b) => {
+    if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
+    if (a.customerId !== b.customerId) return a.customerId.localeCompare(b.customerId);
+    return a.eventTypeRaw.localeCompare(b.eventTypeRaw);
+  });
+  return finalRows;
+}
+
+function mrrChangeRowsToCsvRows(rows: ParsedMrrChangeRow[]) {
+  const header = ["event_timestamp", "event_type", "customer_id", "currency", "mrr_change"];
+  const out: string[][] = [header];
+  for (const row of rows) {
+    out.push([
+      row.eventTimestampRaw,
+      row.eventTypeRaw,
+      row.customerId,
+      row.currency,
+      formatAmountForCsv(row.amount),
+    ]);
+  }
+  return out;
 }
 
 function buildReformattedStripeRows(parsed: ParsedStripeMrr) {
@@ -610,6 +884,7 @@ export default function ModelUpdatePage() {
   const [currentSelfserveAllSubsFile, setCurrentSelfserveAllSubsFile] = useState<File | null>(null);
   const [transformError, setTransformError] = useState<string | null>(null);
   const [transformSuccess, setTransformSuccess] = useState<string | null>(null);
+  const [mrrChangesTotals, setMrrChangesTotals] = useState<MrrChangeTypeTotals | null>(null);
 
   const missingFields = UPLOAD_FIELDS.filter((field) => !files[field.key]);
 
@@ -623,6 +898,11 @@ export default function ModelUpdatePage() {
     setError(null);
     setReadyMessage(null);
     if (field === "stripeMrrPerCustomer") {
+      setTransformError(null);
+      setTransformSuccess(null);
+    }
+    if (field === "stripeMrrChanges") {
+      setMrrChangesTotals(null);
       setTransformError(null);
       setTransformSuccess(null);
     }
@@ -768,6 +1048,25 @@ export default function ModelUpdatePage() {
       );
     } catch (e: unknown) {
       setTransformError(e instanceof Error ? e.message : "Failed to build selfserve-all-merged CSV.");
+    }
+  }
+
+  async function processMrrChangesAndDownload() {
+    setTransformError(null);
+    setTransformSuccess(null);
+    setMrrChangesTotals(null);
+    try {
+      const mrrFile = files.stripeMrrChanges;
+      if (!mrrFile) throw new Error("Upload Stripe MRR changes file first.");
+      const parsed = parseMrrChangesCsv(await mrrFile.text());
+      const cleaned = applyMrrChangeCleanupRules(parsed);
+      const totals = computeMrrChangeTotals(cleaned);
+      setMrrChangesTotals(totals);
+      const csvRows = mrrChangeRowsToCsvRows(cleaned);
+      downloadCsv("stripe-mrr-changes-cleaned.csv", csvRows);
+      setTransformSuccess(`Downloaded cleaned MRR changes CSV. Rows before: ${parsed.length}, after: ${cleaned.length}.`);
+    } catch (e: unknown) {
+      setTransformError(e instanceof Error ? e.message : "Failed to process MRR changes file.");
     }
   }
 
@@ -929,6 +1228,9 @@ export default function ModelUpdatePage() {
               <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={() => void downloadSelfserveAllMergedCsv()}>
                 Download selfserve-all-merged CSV
               </button>
+              <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={() => void processMrrChangesAndDownload()}>
+                Process MRR changes CSV
+              </button>
             </div>
           </div>
         </div>
@@ -942,6 +1244,30 @@ export default function ModelUpdatePage() {
           <p className="stripe-ui__panel-subtitle" style={{ color: "#86efac", marginTop: "0.75rem", marginBottom: 0 }}>
             {transformSuccess}
           </p>
+        ) : null}
+        {mrrChangesTotals ? (
+          <div className="stripe-ui__stats-grid" style={{ marginTop: "0.9rem" }}>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">New</p>
+              <p className="stripe-ui__stat-value">{formatNumber(mrrChangesTotals.newTotal)}</p>
+            </div>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">Reactivation</p>
+              <p className="stripe-ui__stat-value">{formatNumber(mrrChangesTotals.reactivationTotal)}</p>
+            </div>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">Expansion</p>
+              <p className="stripe-ui__stat-value">{formatNumber(mrrChangesTotals.expansionTotal)}</p>
+            </div>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">Contraction</p>
+              <p className="stripe-ui__stat-value">{formatNumber(mrrChangesTotals.contractionTotal)}</p>
+            </div>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">Churn</p>
+              <p className="stripe-ui__stat-value">{formatNumber(mrrChangesTotals.churnTotal)}</p>
+            </div>
+          </div>
         ) : null}
       </section>
 
