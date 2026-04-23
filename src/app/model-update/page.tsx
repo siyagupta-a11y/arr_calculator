@@ -510,9 +510,25 @@ function signedUpSortScore(value: string) {
 
 function mergeSelfserveRowsByEmail(rows: string[][]): string[][] {
   if (!rows.length) throw new Error("No rows to merge by email.");
-  const header = rows[0];
-  const headerIndex = new Map<string, number>();
-  for (let i = 0; i < header.length; i += 1) headerIndex.set(header[i], i);
+  const sourceHeader = rows[0];
+  const sourceHeaderNormalized = sourceHeader.map((value) => normalizeHeader(value));
+  const sourceIndexByKey = new Map<string, number>();
+  for (let i = 0; i < sourceHeader.length; i += 1) {
+    sourceIndexByKey.set(sourceHeader[i], i);
+  }
+  const baseColumns = [
+    "Customer ID",
+    "First Month of MRR",
+    "Signed up",
+    "Initial Subscription $",
+    "Email",
+    "New Enterprise",
+    "Sales-Assist",
+    "Opp name",
+    "Employee Count",
+  ];
+  const monthColumns = sourceHeader.filter((key) => /^\d{4}-\d{2}$/.test(String(key || "").trim()));
+  const outputHeader = [...baseColumns, ...monthColumns];
 
   const emailColumn = "Email";
   const customerIdColumn = "Customer ID";
@@ -521,25 +537,32 @@ function mergeSelfserveRowsByEmail(rows: string[][]): string[][] {
   const initialSubColumn = "Initial Subscription $";
   const newEnterpriseColumn = "New Enterprise";
   const salesAssistColumn = "Sales-Assist";
-  const monthColumns = header.filter((key) => /^20\d{2}-\d{2}$/.test(String(key || "").trim()));
+  const oppNameColumn = "Opp name";
+  const employeeCountColumn = "Employee Count";
+  const resolveSourceColumnValue = (row: string[], outputKey: string) => {
+    const exactIdx = sourceIndexByKey.get(outputKey);
+    if (typeof exactIdx === "number" && exactIdx >= 0) return String(row[exactIdx] || "").trim();
+    const normalized = normalizeHeader(outputKey);
+    const idx = sourceHeaderNormalized.findIndex((item) => item === normalized);
+    if (idx >= 0) return String(row[idx] || "").trim();
+    return "";
+  };
 
   const grouped = new Map<string, string[][]>();
   for (let i = 1; i < rows.length; i += 1) {
     const row = rows[i];
-    const emailIdx = headerIndex.get(emailColumn) ?? -1;
-    const emailValue = emailIdx >= 0 ? String(row[emailIdx] || "").trim() : "";
+    const emailValue = resolveSourceColumnValue(row, emailColumn);
     const groupKey = normalizeEmailToken(emailValue) || `(blank-email-${i})`;
     if (!grouped.has(groupKey)) grouped.set(groupKey, []);
     grouped.get(groupKey)?.push(row);
   }
 
-  const outRows: string[][] = [header];
+  const outRows: string[][] = [outputHeader];
   for (const group of grouped.values()) {
     const flattened: Record<string, string> = {};
     for (const row of group) {
-      for (let c = 0; c < header.length; c += 1) {
-        const key = header[c];
-        const value = String(row[c] || "").trim();
+      for (const key of outputHeader) {
+        const value = resolveSourceColumnValue(row, key);
         if (!key) continue;
         if (/^20/.test(key) && value) {
           const prev = asNumberOrZero(flattened[key] || "0");
@@ -551,27 +574,24 @@ function mergeSelfserveRowsByEmail(rows: string[][]): string[][] {
     }
 
     let earliest = group[0];
-    const signedUpIdx = headerIndex.get(signedUpColumn) ?? -1;
-    if (signedUpIdx >= 0) {
-      for (const candidate of group) {
-        const candScore = signedUpSortScore(String(candidate[signedUpIdx] || ""));
-        const earlyScore = signedUpSortScore(String(earliest[signedUpIdx] || ""));
-        if (candScore < earlyScore) earliest = candidate;
-      }
+    for (const candidate of group) {
+      const candScore = signedUpSortScore(resolveSourceColumnValue(candidate, signedUpColumn));
+      const earlyScore = signedUpSortScore(resolveSourceColumnValue(earliest, signedUpColumn));
+      if (candScore < earlyScore) earliest = candidate;
     }
 
-    const earliestCustomerIdIdx = headerIndex.get(customerIdColumn) ?? -1;
-    flattened[customerIdColumn] =
-      earliestCustomerIdIdx >= 0 ? String(earliest[earliestCustomerIdIdx] || "").trim() : flattened[customerIdColumn] || "";
+    flattened[customerIdColumn] = resolveSourceColumnValue(earliest, customerIdColumn) || flattened[customerIdColumn] || "";
     flattened[firstMonthColumn] = "";
     flattened[initialSubColumn] = "";
     flattened[newEnterpriseColumn] = flattened[newEnterpriseColumn] || "";
     flattened[salesAssistColumn] = flattened[salesAssistColumn] || "";
+    flattened[oppNameColumn] = flattened[oppNameColumn] || "";
+    flattened[employeeCountColumn] = flattened[employeeCountColumn] || "";
     for (const month of monthColumns) {
       if (!flattened[month]) flattened[month] = "";
     }
 
-    outRows.push(header.map((key) => flattened[key] || ""));
+    outRows.push(outputHeader.map((key) => flattened[key] || ""));
   }
 
   return outRows;
