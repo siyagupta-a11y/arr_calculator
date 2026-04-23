@@ -91,6 +91,262 @@ function formatBytes(value: number) {
   return `${mb.toFixed(1)} MB`;
 }
 
+function normalizeHeader(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function parseDelimitedLine(line: string, delimiter: "," | "\t") {
+  const cells: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    const next = line[i + 1];
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (char === delimiter && !inQuotes) {
+      cells.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  cells.push(current);
+  return cells.map((cell) => cell.trim());
+}
+
+function detectDelimiter(line: string): "," | "\t" {
+  const commaCount = (line.match(/,/g) || []).length;
+  const tabCount = (line.match(/\t/g) || []).length;
+  return tabCount > commaCount ? "\t" : ",";
+}
+
+function parseDelimitedRows(text: string) {
+  const nonEmptyLines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!nonEmptyLines.length) {
+    throw new Error("CSV is empty.");
+  }
+  const delimiter = detectDelimiter(nonEmptyLines[0]);
+  const rows = nonEmptyLines.map((line) => parseDelimitedLine(line, delimiter));
+  return { rows, delimiter };
+}
+
+function parseMoneyLike(value: string) {
+  const raw = String(value || "").trim();
+  if (!raw) return 0;
+  const negativeParens = raw.startsWith("(") && raw.endsWith(")");
+  const cleaned = raw.replace(/[$,\s()]/g, "");
+  const parsed = Number(cleaned);
+  if (!Number.isFinite(parsed)) return 0;
+  return negativeParens ? -parsed : parsed;
+}
+
+function csvEscape(value: string | number | null | undefined) {
+  const str = value == null ? "" : String(value);
+  if (/[",\n]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
+  return str;
+}
+
+function downloadCsv(filename: string, rows: string[][]) {
+  const lines = rows.map((row) => row.map((cell) => csvEscape(cell)).join(","));
+  const blob = new Blob([`${lines.join("\n")}\n`], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+type StripeMrrCustomerRow = {
+  customerId: string;
+  email: string;
+  signedUp: string;
+  firstMonthOfMrr: string;
+  mrr: string;
+};
+
+type ParsedStripeMrr = {
+  monthColumn: string;
+  rows: StripeMrrCustomerRow[];
+};
+
+function parseStripeMrrPerCustomerCsv(text: string): ParsedStripeMrr {
+  const { rows } = parseDelimitedRows(text);
+  if (rows.length < 2) {
+    throw new Error("Stripe MRR per customer file must include header and at least one data row.");
+  }
+  const header = rows[0];
+  const normalizedHeader = header.map((cell) => normalizeHeader(cell));
+  const customerIdIdx = normalizedHeader.findIndex((h) => h === "customerid");
+  const customerEmailIdx = normalizedHeader.findIndex((h) => h === "customeremail");
+  const customerStartDateIdx = normalizedHeader.findIndex((h) => h === "customerstartdate");
+
+  if (customerIdIdx < 0) throw new Error("Stripe MRR file missing required column: Customer ID.");
+  if (customerEmailIdx < 0) throw new Error("Stripe MRR file missing required column: Customer Email.");
+  if (customerStartDateIdx < 0) throw new Error("Stripe MRR file missing required column: Customer Start Date.");
+
+  let monthColumnIdx = -1;
+  for (let i = normalizedHeader.length - 1; i >= 0; i -= 1) {
+    if (/^\d{4}\d{2}$/.test(normalizedHeader[i])) {
+      monthColumnIdx = i;
+      break;
+    }
+  }
+  if (monthColumnIdx < 0) {
+    throw new Error("Stripe MRR file missing month column (expected header like YYYY-MM).");
+  }
+  const monthColumn = String(header[monthColumnIdx] || "").trim();
+
+  const byCustomerId = new Map<string, StripeMrrCustomerRow>();
+  for (let i = 1; i < rows.length; i += 1) {
+    const line = rows[i];
+    const customerId = String(line[customerIdIdx] || "").trim();
+    if (!customerId) continue;
+    const email = String(line[customerEmailIdx] || "").trim();
+    const signedUp = String(line[customerStartDateIdx] || "").trim();
+    const firstMonthOfMrr = /^\d{4}-\d{2}-\d{2}$/.test(signedUp) ? signedUp.slice(0, 7) : "";
+    const mrrNumber = parseMoneyLike(String(line[monthColumnIdx] || ""));
+    const existing = byCustomerId.get(customerId);
+    if (!existing) {
+      byCustomerId.set(customerId, {
+        customerId,
+        email,
+        signedUp,
+        firstMonthOfMrr,
+        mrr: String(mrrNumber),
+      });
+      continue;
+    }
+    const mergedMrr = parseMoneyLike(existing.mrr) + mrrNumber;
+    byCustomerId.set(customerId, {
+      ...existing,
+      email: existing.email || email,
+      signedUp: existing.signedUp || signedUp,
+      firstMonthOfMrr: existing.firstMonthOfMrr || firstMonthOfMrr,
+      mrr: String(mergedMrr),
+    });
+  }
+
+  return {
+    monthColumn,
+    rows: Array.from(byCustomerId.values()).sort((a, b) => a.customerId.localeCompare(b.customerId)),
+  };
+}
+
+function buildReformattedStripeRows(parsed: ParsedStripeMrr) {
+  const header = [
+    "Customer ID",
+    "First Month of MRR",
+    "Signed up",
+    "Initial Subscription $",
+    "Email",
+    "New Enterprise",
+    "Sales-Assist",
+    "Opp name",
+    "Employee Count",
+    parsed.monthColumn,
+  ];
+  const body = parsed.rows.map((row) => [
+    row.customerId,
+    row.firstMonthOfMrr,
+    row.signedUp,
+    "",
+    row.email,
+    "",
+    "",
+    "",
+    "",
+    row.mrr,
+  ]);
+  return [header, ...body];
+}
+
+function findHeaderIndex(normalizedHeader: string[], aliases: string[]) {
+  const aliasSet = new Set(aliases.map((alias) => normalizeHeader(alias)));
+  for (let i = 0; i < normalizedHeader.length; i += 1) {
+    if (aliasSet.has(normalizedHeader[i])) return i;
+  }
+  return -1;
+}
+
+function mergeIntoSelfserveAllSubsCsv(selfserveCsvText: string, parsedStripe: ParsedStripeMrr): string[][] {
+  const { rows } = parseDelimitedRows(selfserveCsvText);
+  if (rows.length < 1) throw new Error("Current selfserve-all-subs file is empty.");
+
+  const header = [...rows[0]];
+  const normalizedHeader = header.map((cell) => normalizeHeader(cell));
+  const customerIdIdx = findHeaderIndex(normalizedHeader, ["Customer ID", "customer_id", "customerid"]);
+  if (customerIdIdx < 0) {
+    throw new Error("Current selfserve-all-subs file missing Customer ID column.");
+  }
+  const monthColumn = parsedStripe.monthColumn;
+  let monthColumnIdx = header.findIndex((h) => normalizeHeader(h) === normalizeHeader(monthColumn));
+  if (monthColumnIdx < 0) {
+    header.push(monthColumn);
+    monthColumnIdx = header.length - 1;
+  }
+
+  const firstMonthIdx = findHeaderIndex(normalizedHeader, ["First Month of MRR"]);
+  const signedUpIdx = findHeaderIndex(normalizedHeader, ["Signed up", "signed_up"]);
+  const initialSubIdx = findHeaderIndex(normalizedHeader, ["Initial Subscription $", "initial_subscription"]);
+  const emailIdx = findHeaderIndex(normalizedHeader, ["Email", "Customer Email"]);
+
+  const stripeByCustomer = new Map(parsedStripe.rows.map((row) => [row.customerId, row]));
+  const seenCustomerIds = new Set<string>();
+  const outputRows: string[][] = [header];
+
+  for (let i = 1; i < rows.length; i += 1) {
+    const row = [...rows[i]];
+    while (row.length < header.length) row.push("");
+    const customerId = String(row[customerIdIdx] || "").trim();
+    if (!customerId) {
+      outputRows.push(row);
+      continue;
+    }
+    const stripeMatch = stripeByCustomer.get(customerId);
+    if (stripeMatch) {
+      row[monthColumnIdx] = stripeMatch.mrr;
+      if (firstMonthIdx >= 0 && !String(row[firstMonthIdx] || "").trim()) row[firstMonthIdx] = stripeMatch.firstMonthOfMrr;
+      if (signedUpIdx >= 0 && !String(row[signedUpIdx] || "").trim()) row[signedUpIdx] = stripeMatch.signedUp;
+      if (initialSubIdx >= 0 && !String(row[initialSubIdx] || "").trim()) row[initialSubIdx] = "";
+      if (emailIdx >= 0 && !String(row[emailIdx] || "").trim()) row[emailIdx] = stripeMatch.email;
+      seenCustomerIds.add(customerId);
+    }
+    outputRows.push(row);
+  }
+
+  for (const stripeRow of parsedStripe.rows) {
+    if (seenCustomerIds.has(stripeRow.customerId)) continue;
+    const newRow = new Array(header.length).fill("");
+    newRow[customerIdIdx] = stripeRow.customerId;
+    newRow[monthColumnIdx] = stripeRow.mrr;
+    if (firstMonthIdx >= 0) newRow[firstMonthIdx] = stripeRow.firstMonthOfMrr;
+    if (signedUpIdx >= 0) newRow[signedUpIdx] = stripeRow.signedUp;
+    if (initialSubIdx >= 0) newRow[initialSubIdx] = "";
+    if (emailIdx >= 0) newRow[emailIdx] = stripeRow.email;
+    outputRows.push(newRow);
+  }
+
+  return outputRows;
+}
+
 export default function ModelUpdatePage() {
   const defaults = useMemo(() => defaultDateRange(), []);
   const [startDate, setStartDate] = useState(defaults.startDate);
@@ -101,6 +357,9 @@ export default function ModelUpdatePage() {
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [analyticsData, setAnalyticsData] = useState<AnalyticsResponse | null>(null);
+  const [currentSelfserveAllSubsFile, setCurrentSelfserveAllSubsFile] = useState<File | null>(null);
+  const [transformError, setTransformError] = useState<string | null>(null);
+  const [transformSuccess, setTransformSuccess] = useState<string | null>(null);
 
   const missingFields = UPLOAD_FIELDS.filter((field) => !files[field.key]);
 
@@ -113,6 +372,16 @@ export default function ModelUpdatePage() {
     });
     setError(null);
     setReadyMessage(null);
+    if (field === "stripeMrrPerCustomer") {
+      setTransformError(null);
+      setTransformSuccess(null);
+    }
+  }
+
+  function onSelfserveFileChange(file: File | null) {
+    setCurrentSelfserveAllSubsFile(file);
+    setTransformError(null);
+    setTransformSuccess(null);
   }
 
   function validateInputs() {
@@ -166,6 +435,37 @@ export default function ModelUpdatePage() {
       setAnalyticsError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setAnalyticsLoading(false);
+    }
+  }
+
+  async function downloadReformattedStripeMrrCsv() {
+    setTransformError(null);
+    setTransformSuccess(null);
+    try {
+      const stripeFile = files.stripeMrrPerCustomer;
+      if (!stripeFile) throw new Error("Upload Stripe MRR per customer file first.");
+      const parsed = parseStripeMrrPerCustomerCsv(await stripeFile.text());
+      const csvRows = buildReformattedStripeRows(parsed);
+      downloadCsv(`stripe-mrr-per-customer-reformatted-${parsed.monthColumn}.csv`, csvRows);
+      setTransformSuccess(`Downloaded reformatted Stripe MRR CSV for ${parsed.monthColumn} (${parsed.rows.length} customers).`);
+    } catch (e: unknown) {
+      setTransformError(e instanceof Error ? e.message : "Failed to reformat Stripe MRR CSV.");
+    }
+  }
+
+  async function downloadMergedSelfserveAllSubsCsv() {
+    setTransformError(null);
+    setTransformSuccess(null);
+    try {
+      const stripeFile = files.stripeMrrPerCustomer;
+      if (!stripeFile) throw new Error("Upload Stripe MRR per customer file first.");
+      if (!currentSelfserveAllSubsFile) throw new Error("Upload current selfserve-all-subs file.");
+      const parsedStripe = parseStripeMrrPerCustomerCsv(await stripeFile.text());
+      const merged = mergeIntoSelfserveAllSubsCsv(await currentSelfserveAllSubsFile.text(), parsedStripe);
+      downloadCsv(`selfserve-all-subs-${parsedStripe.monthColumn}.csv`, merged);
+      setTransformSuccess(`Downloaded merged selfserve-all-subs CSV for ${parsedStripe.monthColumn}.`);
+    } catch (e: unknown) {
+      setTransformError(e instanceof Error ? e.message : "Failed to build merged selfserve-all-subs CSV.");
     }
   }
 
@@ -293,6 +593,54 @@ export default function ModelUpdatePage() {
       </section>
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+        <h2 className="stripe-ui__panel-title">Selfserve All Subs Month Builder</h2>
+        <p className="stripe-ui__panel-subtitle">
+          Uses uploaded Stripe MRR per customer CSV, reformats it, and optionally merges it into current selfserve-all-subs by Customer ID.
+        </p>
+        <div className="stripe-ui__control-grid" style={{ gridTemplateColumns: "repeat(2, minmax(220px, 1fr))" }}>
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label" htmlFor="model-update-selfserve-all-subs-file">
+              Current selfserve-all-subs file (CSV)
+            </label>
+            <input
+              id="model-update-selfserve-all-subs-file"
+              className="stripe-ui__control"
+              type="file"
+              accept=".csv,text/csv,.txt,text/plain"
+              onChange={(e) => onSelfserveFileChange(e.target.files?.[0] || null)}
+            />
+            <div className="stripe-ui__hint">
+              {currentSelfserveAllSubsFile
+                ? `${currentSelfserveAllSubsFile.name} (${formatBytes(currentSelfserveAllSubsFile.size)})`
+                : "Optional for merge. Required for selfserve-all-subs output."}
+            </div>
+          </div>
+          <div className="stripe-ui__field">
+            <label className="stripe-ui__field-label">Build files</label>
+            <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
+              <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={() => void downloadReformattedStripeMrrCsv()}>
+                Download reformatted Stripe MRR CSV
+              </button>
+              <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={() => void downloadMergedSelfserveAllSubsCsv()}>
+                Download selfserve-all-subs-month CSV
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {transformError ? (
+          <p className="stripe-ui__panel-subtitle" style={{ color: "#fca5a5", marginTop: "0.75rem", marginBottom: 0 }}>
+            {transformError}
+          </p>
+        ) : null}
+        {transformSuccess ? (
+          <p className="stripe-ui__panel-subtitle" style={{ color: "#86efac", marginTop: "0.75rem", marginBottom: 0 }}>
+            {transformSuccess}
+          </p>
+        ) : null}
+      </section>
+
+      <section className="stripe-ui__panel ui-reveal ui-reveal-3">
         <h2 className="stripe-ui__panel-title">Analytics (Mixpanel + Google Analytics)</h2>
         <p className="stripe-ui__panel-subtitle">
           Mixpanel metrics are shown for the selected range (DAU/WAU/MAU on last day, plus monthly totals).
