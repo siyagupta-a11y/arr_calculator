@@ -12,7 +12,15 @@ type AnalyticsBlock = {
 type AnalyticsResponse = {
   startDate: string;
   endDate: string;
-  mixpanel: AnalyticsBlock;
+  mixpanelMetrics: {
+    dauLastDay: AnalyticsBlock;
+    wauLastDay: AnalyticsBlock;
+    mauLastDay: AnalyticsBlock;
+    signupsInMonth: AnalyticsBlock;
+    productionMessagesInMonth: AnalyticsBlock;
+    highVolumeWorkspacesInMonth: AnalyticsBlock;
+    activeBuilders10of30: AnalyticsBlock;
+  };
   googleAnalytics: AnalyticsBlock;
 };
 
@@ -287,12 +295,12 @@ export default function ModelUpdatePage() {
       <section className="stripe-ui__panel ui-reveal ui-reveal-2">
         <h2 className="stripe-ui__panel-title">Analytics (Mixpanel + Google Analytics)</h2>
         <p className="stripe-ui__panel-subtitle">
-          Yes, this page can pull numbers. Configure backend endpoints for each provider and click fetch.
+          Mixpanel metrics are shown for the selected range (DAU/WAU/MAU on last day, plus monthly totals).
         </p>
         <div className="stripe-ui__control-grid" style={{ gridTemplateColumns: "repeat(3, minmax(180px, 1fr))" }}>
           <div className="stripe-ui__field">
-            <label className="stripe-ui__field-label">Mixpanel endpoint env</label>
-            <div className="stripe-ui__hint">`MODEL_UPDATE_MIXPANEL_ENDPOINT`</div>
+            <label className="stripe-ui__field-label">Mixpanel endpoint env(s)</label>
+            <div className="stripe-ui__hint">`MODEL_UPDATE_MIXPANEL_ENDPOINT` or metric-specific endpoint vars</div>
           </div>
           <div className="stripe-ui__field">
             <label className="stripe-ui__field-label">Google Analytics endpoint env</label>
@@ -320,15 +328,77 @@ export default function ModelUpdatePage() {
         )}
 
         {analyticsData && (
-          <div className="stripe-ui__stats-grid" style={{ marginTop: "0.9rem" }}>
+          <div className="stripe-ui__stats-grid" style={{ marginTop: "0.9rem", marginBottom: "0.9rem" }}>
             <div className="stripe-ui__stat">
-              <p className="stripe-ui__stat-label">Mixpanel</p>
+              <p className="stripe-ui__stat-label">DAU (last day)</p>
               <p className="stripe-ui__stat-value">
-                {analyticsData.mixpanel.value != null ? formatNumber(analyticsData.mixpanel.value) : "—"}
+                {analyticsData.mixpanelMetrics.dauLastDay.value != null ? formatNumber(analyticsData.mixpanelMetrics.dauLastDay.value) : "—"}
               </p>
               <p className="stripe-ui__hint">
-                {analyticsData.mixpanel.status}
-                {analyticsData.mixpanel.details ? `: ${analyticsData.mixpanel.details}` : ""}
+                {analyticsData.mixpanelMetrics.dauLastDay.status}
+                {analyticsData.mixpanelMetrics.dauLastDay.details ? `: ${analyticsData.mixpanelMetrics.dauLastDay.details}` : ""}
+              </p>
+            </div>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">WAU (last day)</p>
+              <p className="stripe-ui__stat-value">
+                {analyticsData.mixpanelMetrics.wauLastDay.value != null ? formatNumber(analyticsData.mixpanelMetrics.wauLastDay.value) : "—"}
+              </p>
+              <p className="stripe-ui__hint">
+                {analyticsData.mixpanelMetrics.wauLastDay.status}
+                {analyticsData.mixpanelMetrics.wauLastDay.details ? `: ${analyticsData.mixpanelMetrics.wauLastDay.details}` : ""}
+              </p>
+            </div>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">MAU (last day)</p>
+              <p className="stripe-ui__stat-value">
+                {analyticsData.mixpanelMetrics.mauLastDay.value != null ? formatNumber(analyticsData.mixpanelMetrics.mauLastDay.value) : "—"}
+              </p>
+              <p className="stripe-ui__hint">
+                {analyticsData.mixpanelMetrics.mauLastDay.status}
+                {analyticsData.mixpanelMetrics.mauLastDay.details ? `: ${analyticsData.mixpanelMetrics.mauLastDay.details}` : ""}
+              </p>
+            </div>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">Signups (month)</p>
+              <p className="stripe-ui__stat-value">
+                {analyticsData.mixpanelMetrics.signupsInMonth.value != null ? formatNumber(analyticsData.mixpanelMetrics.signupsInMonth.value) : "—"}
+              </p>
+              <p className="stripe-ui__hint">
+                {analyticsData.mixpanelMetrics.signupsInMonth.status}
+                {analyticsData.mixpanelMetrics.signupsInMonth.details ? `: ${analyticsData.mixpanelMetrics.signupsInMonth.details}` : ""}
+              </p>
+            </div>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">Production messages (month)</p>
+              <p className="stripe-ui__stat-value">
+                {analyticsData.mixpanelMetrics.productionMessagesInMonth.value != null ? formatNumber(analyticsData.mixpanelMetrics.productionMessagesInMonth.value) : "—"}
+              </p>
+              <p className="stripe-ui__hint">
+                {analyticsData.mixpanelMetrics.productionMessagesInMonth.status}
+                {analyticsData.mixpanelMetrics.productionMessagesInMonth.details ? `: ${analyticsData.mixpanelMetrics.productionMessagesInMonth.details}` : ""}
+              </p>
+            </div>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">High Volume Workspaces (1k incoming)</p>
+              <p className="stripe-ui__stat-value">
+                {analyticsData.mixpanelMetrics.highVolumeWorkspacesInMonth.value != null ? formatNumber(analyticsData.mixpanelMetrics.highVolumeWorkspacesInMonth.value) : "—"}
+              </p>
+              <p className="stripe-ui__hint">
+                {analyticsData.mixpanelMetrics.highVolumeWorkspacesInMonth.status}
+                {analyticsData.mixpanelMetrics.highVolumeWorkspacesInMonth.details
+                  ? `: ${analyticsData.mixpanelMetrics.highVolumeWorkspacesInMonth.details}`
+                  : ""}
+              </p>
+            </div>
+            <div className="stripe-ui__stat">
+              <p className="stripe-ui__stat-label">Active Builders (10 of 30 days)</p>
+              <p className="stripe-ui__stat-value">
+                {analyticsData.mixpanelMetrics.activeBuilders10of30.value != null ? formatNumber(analyticsData.mixpanelMetrics.activeBuilders10of30.value) : "—"}
+              </p>
+              <p className="stripe-ui__hint">
+                {analyticsData.mixpanelMetrics.activeBuilders10of30.status}
+                {analyticsData.mixpanelMetrics.activeBuilders10of30.details ? `: ${analyticsData.mixpanelMetrics.activeBuilders10of30.details}` : ""}
               </p>
             </div>
             <div className="stripe-ui__stat">

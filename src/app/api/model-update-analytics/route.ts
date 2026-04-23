@@ -14,6 +14,16 @@ type ProviderResult = {
   details?: string;
 };
 
+type MixpanelMetricsResult = {
+  dauLastDay: ProviderResult;
+  wauLastDay: ProviderResult;
+  mauLastDay: ProviderResult;
+  signupsInMonth: ProviderResult;
+  productionMessagesInMonth: ProviderResult;
+  highVolumeWorkspacesInMonth: ProviderResult;
+  activeBuilders10of30: ProviderResult;
+};
+
 function isIsoDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
 }
@@ -63,10 +73,10 @@ function findFirstNumber(value: unknown): number | null {
 async function fetchProviderMetric(
   endpointEnv: string,
   tokenEnv: string,
-  startDate: string,
-  endDate: string,
+  queryParams: Record<string, string>,
+  fallbackEndpoint?: string,
 ): Promise<ProviderResult> {
-  const endpoint = String(process.env[endpointEnv] || "").trim();
+  const endpoint = String(process.env[endpointEnv] || "").trim() || String(fallbackEndpoint || "").trim();
   if (!endpoint) {
     return {
       status: "not_configured",
@@ -77,8 +87,9 @@ async function fetchProviderMetric(
 
   const token = String(process.env[tokenEnv] || "").trim();
   const url = new URL(endpoint);
-  url.searchParams.set("start_date", startDate);
-  url.searchParams.set("end_date", endDate);
+  for (const [key, value] of Object.entries(queryParams)) {
+    url.searchParams.set(key, value);
+  }
 
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -127,26 +138,88 @@ async function fetchProviderMetric(
   }
 }
 
+function toMonthStartIso(dateText: string) {
+  return `${dateText.slice(0, 7)}-01`;
+}
+
+function toMonthEndIso(dateText: string) {
+  const [yearRaw, monthRaw] = dateText.slice(0, 7).split("-");
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return dateText;
+  const d = new Date(Date.UTC(year, month, 0, 0, 0, 0, 0));
+  return d.toISOString().slice(0, 10);
+}
+
+async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise<MixpanelMetricsResult> {
+  const baseEndpoint = String(process.env.MODEL_UPDATE_MIXPANEL_ENDPOINT || "").trim();
+  const tokenEnv = "MODEL_UPDATE_MIXPANEL_BEARER_TOKEN";
+  const monthStart = toMonthStartIso(endDate);
+  const monthEnd = toMonthEndIso(endDate);
+  const baseParams = {
+    start_date: startDate,
+    end_date: endDate,
+    last_day: endDate,
+    month_start: monthStart,
+    month_end: monthEnd,
+  };
+
+  const withMetric = (metric: string) => ({ ...baseParams, metric });
+
+  const [dauLastDay, wauLastDay, mauLastDay, signupsInMonth, productionMessagesInMonth, highVolumeWorkspacesInMonth, activeBuilders10of30] =
+    await Promise.all([
+      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_DAU_ENDPOINT", tokenEnv, withMetric("dau_last_day"), baseEndpoint),
+      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_WAU_ENDPOINT", tokenEnv, withMetric("wau_last_day"), baseEndpoint),
+      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_MAU_ENDPOINT", tokenEnv, withMetric("mau_last_day"), baseEndpoint),
+      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_SIGNUPS_ENDPOINT", tokenEnv, withMetric("signups_in_month"), baseEndpoint),
+      fetchProviderMetric(
+        "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_ENDPOINT",
+        tokenEnv,
+        withMetric("production_messages_in_month"),
+        baseEndpoint,
+      ),
+      fetchProviderMetric(
+        "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_ENDPOINT",
+        tokenEnv,
+        withMetric("high_volume_workspaces_1k_incoming"),
+        baseEndpoint,
+      ),
+      fetchProviderMetric(
+        "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_ENDPOINT",
+        tokenEnv,
+        withMetric("active_builders_10_of_30"),
+        baseEndpoint,
+      ),
+    ]);
+
+  return {
+    dauLastDay,
+    wauLastDay,
+    mauLastDay,
+    signupsInMonth,
+    productionMessagesInMonth,
+    highVolumeWorkspacesInMonth,
+    activeBuilders10of30,
+  };
+}
+
 async function runReport(startDate: string, endDate: string) {
-  const [mixpanel, googleAnalytics] = await Promise.all([
-    fetchProviderMetric(
-      "MODEL_UPDATE_MIXPANEL_ENDPOINT",
-      "MODEL_UPDATE_MIXPANEL_BEARER_TOKEN",
-      startDate,
-      endDate,
-    ),
+  const [mixpanelMetrics, googleAnalytics] = await Promise.all([
+    fetchMixpanelMetrics(startDate, endDate),
     fetchProviderMetric(
       "MODEL_UPDATE_GA_ENDPOINT",
       "MODEL_UPDATE_GA_BEARER_TOKEN",
-      startDate,
-      endDate,
+      {
+        start_date: startDate,
+        end_date: endDate,
+      },
     ),
   ]);
 
   return {
     startDate,
     endDate,
-    mixpanel,
+    mixpanelMetrics,
     googleAnalytics,
   };
 }
