@@ -6,7 +6,8 @@ import {
   type CombinedAllSubsCombineMode,
 } from "@/lib/combinedAllSubsReport";
 
-export type TofuGroupBy = "month" | "plan";
+export type TofuGroupBy = "month" | "plan" | "segment";
+export type TofuSegment = "salesled" | "selfserve" | "sales_assist";
 
 export type TofuRequest = {
   startDate: string;
@@ -34,6 +35,7 @@ export type TofuResponse = {
   targetCurrency: string;
   rows: TofuMonthRow[];
   planRows?: TofuPlanRow[];
+  segmentRows?: TofuSegmentRow[];
 };
 
 export type TofuPlanRow = {
@@ -46,6 +48,18 @@ export type TofuPlanRow = {
   contractionArr: number;
   churnArr: number;
   netPlanChangeArr: number;
+  endingArr: number;
+};
+
+export type TofuSegmentRow = {
+  periodKey: string;
+  periodLabel: string;
+  segment: TofuSegment;
+  beginningArr: number;
+  newArr: number;
+  expansionArr: number;
+  contractionArr: number;
+  churnArr: number;
   endingArr: number;
 };
 
@@ -108,7 +122,10 @@ function round2(value: number) {
 }
 
 function normalizeTofuGroupBy(value: string | undefined): TofuGroupBy {
-  return String(value || "").trim().toLowerCase() === "plan" ? "plan" : "month";
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "plan") return "plan";
+  if (normalized === "segment") return "segment";
+  return "month";
 }
 
 const PLAN_ORDER: CombinedAllSubsPlan[] = [
@@ -119,6 +136,8 @@ const PLAN_ORDER: CombinedAllSubsPlan[] = [
   "pay_as_you_go",
   "free",
 ];
+
+const SEGMENT_ORDER: TofuSegment[] = ["salesled", "selfserve", "sales_assist"];
 
 function parseIsoDateOnly(value: string) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
@@ -177,7 +196,7 @@ async function loadExpandedTofuSource(request: TofuRequest): Promise<{
     includePlanData: normalizeTofuGroupBy(request.groupBy) === "plan",
     planGrain: "monthly",
     groupedMatchStrategy: normalizeTofuGroupBy(request.groupBy) === "plan" ? "workspace_only" : "full",
-    includeSalesAssist: false,
+    includeSalesAssist: normalizeTofuGroupBy(request.groupBy) === "segment",
   });
 
   const allPeriods = (expanded.periods || []).map((period) => ({
@@ -201,6 +220,14 @@ function planAtPeriod(
 ): CombinedAllSubsPlan {
   const fallback = (row.plansByPeriod?.[periodKey] || "").trim();
   return (fallback || "free") as CombinedAllSubsPlan;
+}
+
+function segmentAtPeriod(row: CombinedAllSubsRow, periodKey: string): TofuSegment {
+  if (row.source === "hubspot_account") return "salesled";
+  const assistValue = String(row.salesAssistByPeriod?.[periodKey] || row.salesAssist || "no")
+    .trim()
+    .toLowerCase();
+  return assistValue === "yes" ? "sales_assist" : "selfserve";
 }
 
 function contributionForMetric(metric: TofuDetailMetric, previousArr: number, currentArr: number) {
@@ -229,6 +256,120 @@ export async function generateTofuReport(request: TofuRequest): Promise<TofuResp
 
   const { expanded, periods, allPeriodKeys } = await loadExpandedTofuSource(request);
   const groupBy = normalizeTofuGroupBy(request.groupBy);
+
+  if (groupBy === "segment") {
+    const segmentRows: TofuSegmentRow[] = [];
+
+    for (const [idx, period] of periods.entries()) {
+      const selectedPrevKey = idx > 0 ? periods[idx - 1].key : "";
+      const prevKey = selectedPrevKey || previousPeriodKeyFor(period.key, periods, allPeriodKeys);
+
+      const segmentBuckets = new Map<
+        TofuSegment,
+        {
+          beginningArr: number;
+          newArr: number;
+          expansionArr: number;
+          contractionArr: number;
+          churnArr: number;
+          endingArr: number;
+        }
+      >();
+
+      const ensureBucket = (segment: TofuSegment) => {
+        if (!segmentBuckets.has(segment)) {
+          segmentBuckets.set(segment, {
+            beginningArr: 0,
+            newArr: 0,
+            expansionArr: 0,
+            contractionArr: 0,
+            churnArr: 0,
+            endingArr: 0,
+          });
+        }
+        return segmentBuckets.get(segment)!;
+      };
+
+      for (const row of expanded.rows || []) {
+        const curr = round2(Number(row.valuesByPeriod[period.key] || 0));
+        const prev = round2(prevKey ? Number(row.valuesByPeriod[prevKey] || 0) : 0);
+        const prevHas = Math.abs(prev) > 1e-9;
+        const currHas = Math.abs(curr) > 1e-9;
+        const prevSegment = prevHas ? segmentAtPeriod(row, prevKey) : "selfserve";
+        const currSegment = currHas ? segmentAtPeriod(row, period.key) : "selfserve";
+
+        if (prevHas) {
+          const bucket = ensureBucket(prevSegment);
+          bucket.beginningArr = round2(bucket.beginningArr + prev);
+        }
+        if (currHas) {
+          const bucket = ensureBucket(currSegment);
+          bucket.endingArr = round2(bucket.endingArr + curr);
+        }
+
+        if (!prevHas && currHas) {
+          const bucket = ensureBucket(currSegment);
+          bucket.newArr = round2(bucket.newArr + curr);
+          continue;
+        }
+
+        if (prevHas && !currHas) {
+          const bucket = ensureBucket(prevSegment);
+          bucket.churnArr = round2(bucket.churnArr - prev);
+          continue;
+        }
+
+        if (prevHas && currHas) {
+          if (prevSegment === currSegment) {
+            const diff = round2(curr - prev);
+            const bucket = ensureBucket(currSegment);
+            if (diff > 0) bucket.expansionArr = round2(bucket.expansionArr + diff);
+            else if (diff < 0) bucket.contractionArr = round2(bucket.contractionArr + diff);
+          } else {
+            const oldBucket = ensureBucket(prevSegment);
+            oldBucket.churnArr = round2(oldBucket.churnArr - prev);
+            const newBucket = ensureBucket(currSegment);
+            newBucket.expansionArr = round2(newBucket.expansionArr + curr);
+          }
+        }
+      }
+
+      for (const segment of SEGMENT_ORDER) {
+        const bucket = segmentBuckets.get(segment);
+        if (!bucket) continue;
+        const hasAnyValue =
+          Math.abs(bucket.beginningArr) > 1e-9 ||
+          Math.abs(bucket.newArr) > 1e-9 ||
+          Math.abs(bucket.expansionArr) > 1e-9 ||
+          Math.abs(bucket.contractionArr) > 1e-9 ||
+          Math.abs(bucket.churnArr) > 1e-9 ||
+          Math.abs(bucket.endingArr) > 1e-9;
+        if (!hasAnyValue) continue;
+
+        segmentRows.push({
+          periodKey: period.key,
+          periodLabel: period.label,
+          segment,
+          beginningArr: bucket.beginningArr,
+          newArr: bucket.newArr,
+          expansionArr: bucket.expansionArr,
+          contractionArr: bucket.contractionArr,
+          churnArr: bucket.churnArr,
+          endingArr: bucket.endingArr,
+        });
+      }
+    }
+
+    return {
+      startDate: request.startDate,
+      endDate: request.endDate,
+      combineMode: expanded.combineMode,
+      groupBy,
+      targetCurrency: expanded.targetCurrency,
+      rows: [],
+      segmentRows,
+    };
+  }
 
   if (groupBy === "plan") {
     const planRows: TofuPlanRow[] = [];

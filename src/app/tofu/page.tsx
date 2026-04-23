@@ -4,9 +4,10 @@ import Link from "next/link";
 import React, { useMemo, useState } from "react";
 
 type CombineMode = "grouped" | "simple";
-type TofuGroupBy = "month" | "plan";
+type TofuGroupBy = "month" | "plan" | "segment";
 type TofuDetailMetric = "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "endingArr";
 type CombinedPlan = "enterprise" | "managed" | "team" | "plus" | "pay_as_you_go" | "free";
+type TofuSegment = "salesled" | "selfserve" | "sales_assist";
 
 type TofuMonthRow = {
   periodKey: string;
@@ -40,6 +41,19 @@ type TofuResponse = {
   targetCurrency: string;
   rows: TofuMonthRow[];
   planRows?: TofuPlanRow[];
+  segmentRows?: TofuSegmentRow[];
+};
+
+type TofuSegmentRow = {
+  periodKey: string;
+  periodLabel: string;
+  segment: TofuSegment;
+  beginningArr: number;
+  newArr: number;
+  expansionArr: number;
+  contractionArr: number;
+  churnArr: number;
+  endingArr: number;
 };
 
 type TofuDetailRow = {
@@ -92,6 +106,12 @@ const PLAN_LABELS: Record<CombinedPlan, string> = {
   free: "Free",
 };
 
+const SEGMENT_LABELS: Record<TofuSegment, string> = {
+  salesled: "Sales-led",
+  selfserve: "Self-serve",
+  sales_assist: "Sales assist",
+};
+
 function defaultDateRange() {
   const end = new Date();
   const start = new Date(end.getFullYear() - 1, end.getMonth(), 1);
@@ -123,6 +143,10 @@ function sumField(rows: TofuMonthRow[], key: keyof TofuMonthRow) {
 }
 
 function sumPlanField(rows: TofuPlanRow[], key: keyof TofuPlanRow) {
+  return rows.reduce((sum, row) => sum + Number(row[key] || 0), 0);
+}
+
+function sumSegmentField(rows: TofuSegmentRow[], key: keyof TofuSegmentRow) {
   return rows.reduce((sum, row) => sum + Number(row[key] || 0), 0);
 }
 
@@ -243,9 +267,15 @@ export default function TofuPage() {
   const effectiveGroupBy = data?.groupBy || groupBy;
   const rows = data?.rows || [];
   const planRows = data?.planRows || [];
+  const segmentRows = data?.segmentRows || [];
   const planPeriodOrder = Array.from(
     new Map(
       planRows.map((row) => [row.periodKey, row.periodLabel]),
+    ).entries(),
+  ).map(([key, label]) => ({ key, label }));
+  const segmentPeriodOrder = Array.from(
+    new Map(
+      segmentRows.map((row) => [row.periodKey, row.periodLabel]),
     ).entries(),
   ).map(([key, label]) => ({ key, label }));
   const planBridgeMetrics: Array<{
@@ -261,6 +291,20 @@ export default function TofuPage() {
     { key: "contractionArr", label: "Contraction ARR" },
     { key: "churnArr", label: "Churn ARR" },
     { key: "netPlanChangeArr", label: "Net Upgrade/Downgrade to Different Plan" },
+    { key: "endingArr", label: "Ending ARR" },
+  ];
+  const segmentBridgeMetrics: Array<{
+    key: keyof Pick<
+      TofuSegmentRow,
+      "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "endingArr"
+    >;
+    label: string;
+  }> = [
+    { key: "beginningArr", label: "Beginning ARR" },
+    { key: "newArr", label: "New ARR" },
+    { key: "expansionArr", label: "Expansion ARR" },
+    { key: "contractionArr", label: "Contraction ARR" },
+    { key: "churnArr", label: "Churn ARR" },
     { key: "endingArr", label: "Ending ARR" },
   ];
   const planBridgeRows = (["enterprise", "managed", "team", "plus", "pay_as_you_go", "free"] as CombinedPlan[])
@@ -282,6 +326,25 @@ export default function TofuPage() {
       })),
     )
     .filter((row) => planPeriodOrder.some((period) => Math.abs(Number(row.valuesByPeriod[period.key] || 0)) > 1e-9));
+  const segmentBridgeRows = (["salesled", "selfserve", "sales_assist"] as TofuSegment[])
+    .flatMap((segment) =>
+      segmentBridgeMetrics.map((metric) => ({
+        segment,
+        metric: metric.label,
+        metricKey: metric.key,
+        valuesByPeriod: Object.fromEntries(
+          segmentPeriodOrder.map((period) => [
+            period.key,
+            round2(
+              segmentRows
+                .filter((row) => row.segment === segment && row.periodKey === period.key)
+                .reduce((sum, row) => sum + Number(row[metric.key] || 0), 0),
+            ),
+          ]),
+        ) as Record<string, number>,
+      })),
+    )
+    .filter((row) => segmentPeriodOrder.some((period) => Math.abs(Number(row.valuesByPeriod[period.key] || 0)) > 1e-9));
   const latestEndingArr =
     effectiveGroupBy === "plan"
       ? (() => {
@@ -293,9 +356,19 @@ export default function TofuPage() {
               .reduce((sum, row) => sum + Number(row.endingArr || 0), 0),
           );
         })()
-      : rows.length
-        ? rows[rows.length - 1].endingArr
-        : 0;
+      : effectiveGroupBy === "segment"
+        ? (() => {
+            if (!segmentRows.length) return 0;
+            const latestKey = segmentRows[segmentRows.length - 1].periodKey;
+            return round2(
+              segmentRows
+                .filter((row) => row.periodKey === latestKey)
+                .reduce((sum, row) => sum + Number(row.endingArr || 0), 0),
+            );
+          })()
+        : rows.length
+          ? rows[rows.length - 1].endingArr
+          : 0;
 
   function exportDetailCsv(payload: TofuDetailResponse) {
     const filename = `tofu-detail-${payload.detailMetric}-${payload.detailPeriodKey}-${payload.combineMode}.csv`;
@@ -356,6 +429,21 @@ export default function TofuPage() {
       return;
     }
 
+    if (effectiveGroupBy === "segment") {
+      const header = ["segment", "bridge_metric", ...segmentPeriodOrder.map((period) => period.key)];
+      const csvRows = segmentBridgeRows.map((row) => [
+        SEGMENT_LABELS[row.segment] || row.segment,
+        row.metric,
+        ...segmentPeriodOrder.map((period) => Number(row.valuesByPeriod[period.key] || 0)),
+      ]);
+      downloadCsv(
+        `tofu-segment-bridge-${effectiveCombineMode}-${csvTimestamp()}.csv`,
+        header,
+        csvRows,
+      );
+      return;
+    }
+
     const header = [
       "period_key",
       "period_label",
@@ -407,7 +495,8 @@ export default function TofuPage() {
             <h1 className="stripe-ui__title">TOFU</h1>
             <p className="stripe-ui__subtitle">
               Monthly ARR bridge based on Combined All Subs. Choose Grouped mode to use contact-based matching, or
-              Simple mode to use the non-grouped HubSpot+Stripe table. Group by Plan adds plan-level bridge lines.
+              Simple mode to use the non-grouped HubSpot+Stripe table. Group by Plan adds plan-level bridge lines,
+              and Group by Segment splits into sales-led, self-serve, and sales assist.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -495,6 +584,7 @@ export default function TofuPage() {
             >
               <option value="month">Month</option>
               <option value="plan">Plan</option>
+              <option value="segment">Segment (sales-led / self-serve / sales assist)</option>
             </select>
           </div>
         </div>
@@ -504,7 +594,7 @@ export default function TofuPage() {
         <section className="stripe-ui__panel stripe-ui__loading-panel ui-reveal ui-reveal-2" aria-live="polite" aria-busy="true">
           <h2 className="stripe-ui__panel-title">Loading report...</h2>
           <p className="stripe-ui__panel-subtitle">
-            Computing {groupBy === "plan" ? "plan-level" : "monthly"} TOFU bridge from Combined All Subs.
+            Computing {groupBy === "plan" ? "plan-level" : groupBy === "segment" ? "segment-level" : "monthly"} TOFU bridge from Combined All Subs.
           </p>
           <div className="stripe-ui__skeleton-grid">
             <div className="stripe-ui__skeleton-row" />
@@ -530,20 +620,30 @@ export default function TofuPage() {
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
             <div className="stripe-ui__stats">
               <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">{effectiveGroupBy === "plan" ? "Plan rows" : "Months"}</p>
-                <p className="stripe-ui__stat-value">{effectiveGroupBy === "plan" ? planRows.length : rows.length}</p>
+                <p className="stripe-ui__stat-label">
+                  {effectiveGroupBy === "plan" ? "Plan rows" : effectiveGroupBy === "segment" ? "Segment rows" : "Months"}
+                </p>
+                <p className="stripe-ui__stat-value">
+                  {effectiveGroupBy === "plan" ? planRows.length : effectiveGroupBy === "segment" ? segmentRows.length : rows.length}
+                </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Mode</p>
                 <p className="stripe-ui__stat-value">
-                  {effectiveCombineMode === "grouped" ? "Grouped" : "Simple"} / {effectiveGroupBy === "plan" ? "Plan" : "Month"}
+                  {effectiveCombineMode === "grouped" ? "Grouped" : "Simple"} / {
+                    effectiveGroupBy === "plan" ? "Plan" : effectiveGroupBy === "segment" ? "Segment" : "Month"
+                  }
                 </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Total New ARR</p>
                 <p className="stripe-ui__stat-value">
                   {formatMoney(
-                    effectiveGroupBy === "plan" ? sumPlanField(planRows, "newArr") : sumField(rows, "newArr"),
+                    effectiveGroupBy === "plan"
+                      ? sumPlanField(planRows, "newArr")
+                      : effectiveGroupBy === "segment"
+                        ? sumSegmentField(segmentRows, "newArr")
+                        : sumField(rows, "newArr"),
                     currency,
                   )}
                 </p>
@@ -552,7 +652,11 @@ export default function TofuPage() {
                 <p className="stripe-ui__stat-label">Total Churn ARR</p>
                 <p className="stripe-ui__stat-value">
                   {formatMoney(
-                    effectiveGroupBy === "plan" ? sumPlanField(planRows, "churnArr") : sumField(rows, "churnArr"),
+                    effectiveGroupBy === "plan"
+                      ? sumPlanField(planRows, "churnArr")
+                      : effectiveGroupBy === "segment"
+                        ? sumSegmentField(segmentRows, "churnArr")
+                        : sumField(rows, "churnArr"),
                     currency,
                   )}
                 </p>
@@ -567,13 +671,23 @@ export default function TofuPage() {
           <section className="stripe-ui__panel ui-reveal ui-reveal-3">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
               <h2 className="stripe-ui__panel-title" style={{ marginBottom: 0 }}>
-                {effectiveGroupBy === "plan" ? "TOFU ARR bridge by plan" : "Monthly TOFU ARR bridge"}
+                {effectiveGroupBy === "plan"
+                  ? "TOFU ARR bridge by plan"
+                  : effectiveGroupBy === "segment"
+                    ? "TOFU ARR bridge by segment"
+                    : "Monthly TOFU ARR bridge"}
               </h2>
               <button
                 type="button"
                 className="stripe-ui__btn stripe-ui__btn--secondary"
                 onClick={exportMainTableCsv}
-                disabled={effectiveGroupBy === "plan" ? planBridgeRows.length === 0 : rows.length === 0}
+                disabled={
+                  effectiveGroupBy === "plan"
+                    ? planBridgeRows.length === 0
+                    : effectiveGroupBy === "segment"
+                      ? segmentBridgeRows.length === 0
+                      : rows.length === 0
+                }
               >
                 Export table CSV
               </button>
@@ -582,6 +696,11 @@ export default function TofuPage() {
               <p className="stripe-ui__panel-subtitle">
                 For plan switches, ARR is removed from the previous plan as Net upgrade/downgrade and added to the
                 new plan as Expansion ARR.
+              </p>
+            ) : effectiveGroupBy === "segment" ? (
+              <p className="stripe-ui__panel-subtitle">
+                Sales assist is monthly-evolving. When customers move between segments, ARR is removed from the
+                previous segment as Churn and added to the new segment as Expansion.
               </p>
             ) : (
               <>
@@ -634,6 +753,45 @@ export default function TofuPage() {
                   </table>
                 </div>
               </>
+            ) : effectiveGroupBy === "segment" ? (
+              <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
+                <table className="stripe-ui__table" aria-label="TOFU ARR bridge by segment across months">
+                  <thead>
+                    <tr>
+                      <th>Segment</th>
+                      <th>Bridge Metric</th>
+                      {segmentPeriodOrder.map((period) => (
+                        <th key={`segment-bridge-head:${period.key}`} className="stripe-ui__num">
+                          {period.label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {segmentBridgeRows.map((row) => {
+                      const metricIdx = segmentBridgeMetrics.findIndex((metric) => metric.key === row.metricKey);
+                      return (
+                        <tr key={`segment-bridge:${row.segment}:${row.metricKey}`}>
+                          {metricIdx === 0 ? (
+                            <td rowSpan={segmentBridgeMetrics.length}>{SEGMENT_LABELS[row.segment] || row.segment}</td>
+                          ) : null}
+                          <td>{row.metric}</td>
+                          {segmentPeriodOrder.map((period) => (
+                            <td
+                              key={`segment-bridge:${row.segment}:${row.metricKey}:${period.key}`}
+                              className={`stripe-ui__num ${
+                                Number(row.valuesByPeriod[period.key] || 0) < 0 ? "stripe-ui__money--negative" : ""
+                              }`}
+                            >
+                              {formatMoney(Number(row.valuesByPeriod[period.key] || 0), currency)}
+                            </td>
+                          ))}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             ) : (
               <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
                 <table className="stripe-ui__table" aria-label="TOFU monthly ARR bridge table">
