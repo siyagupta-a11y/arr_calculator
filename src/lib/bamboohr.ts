@@ -15,6 +15,7 @@ type BambooEmployeeRecord = {
   employmentStatus: string;
   employmentType: string;
   payType: string;
+  salary: string;
   fullTimeEquivalent: number | null;
 };
 
@@ -32,6 +33,18 @@ type BambooEmploymentStatusTimelineRow = {
 export type BambooHeadcountSnapshot = {
   count: number;
   employeeNames: string[];
+};
+
+export type BambooNewHireRow = {
+  department: string;
+  jobTitle: string;
+  type: string;
+  qc: boolean;
+  greySkyBaseline: string;
+  categorization: string;
+  name: string;
+  startDate: string;
+  salary: string;
 };
 
 function clean(value: string | undefined | null) {
@@ -161,6 +174,16 @@ function normalizeEmployeeRow(input: unknown): BambooEmployeeRecord | null {
   ]);
   const employmentType = firstString(row, ["employmentType", "type", "employment type", "employee type"]);
   const payType = firstString(row, ["payType", "pay type"]);
+  const salary = firstString(row, [
+    "payRate",
+    "pay rate",
+    "salary",
+    "annualSalary",
+    "annual salary",
+    "baseSalary",
+    "base salary",
+    "compensation",
+  ]);
   const fullTimeEquivalent = parseNumber(
     firstValue(row, ["fullTimeEquivalent", "FTE", "fte", "full time equivalent"]),
   );
@@ -185,6 +208,7 @@ function normalizeEmployeeRow(input: unknown): BambooEmployeeRecord | null {
     employmentStatus,
     employmentType,
     payType,
+    salary,
     fullTimeEquivalent,
   };
 }
@@ -354,6 +378,10 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
         "fullTimeEquivalent",
         "FTE",
         "payType",
+        "payRate",
+        "salary",
+        "annualSalary",
+        "baseSalary",
         "displayName",
       ],
     },
@@ -367,6 +395,10 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
         "dateOfTermination",
         "FTE",
         "payType",
+        "payRate",
+        "salary",
+        "annualSalary",
+        "baseSalary",
         "displayName",
       ],
     },
@@ -426,6 +458,8 @@ async function fetchEmployeeRoster(): Promise<BambooEmployeeRecord[]> {
         department: clean(extra.department) || row.department,
         division: clean(extra.division) || row.division,
         location: clean(extra.location) || row.location,
+        payType: clean(extra.payType) || row.payType,
+        salary: clean(extra.salary) || row.salary,
         rawText: `${row.rawText} ${extra.rawText}`.trim(),
       };
     });
@@ -575,4 +609,45 @@ export async function queryBambooHrFullTimeRosterByDate(dates: string[]): Promis
     });
   }
   return out;
+}
+
+function isBasedInQuebec(employee: BambooEmployeeRecord) {
+  const location = normalizeLoose(employee.location);
+  const raw = normalizeLoose(employee.rawText);
+  if (location.includes("quebec") || location.includes("québec") || location.includes("montreal")) return true;
+  if (raw.includes("quebec") || raw.includes("québec") || raw.includes("montreal")) return true;
+  if (/(^|[^a-z])qc([^a-z]|$)/.test(location)) return true;
+  return false;
+}
+
+export async function queryBambooHrNewHiresByDateRange(startDate: string, endDate: string): Promise<BambooNewHireRow[]> {
+  const start = parseIsoDateOnly(startDate);
+  const end = parseIsoDateOnly(endDate);
+  if (!start || !end) throw new Error("Invalid startDate/endDate");
+  if (end.getTime() < start.getTime()) throw new Error("endDate must be >= startDate");
+
+  const employees = await fetchEmployeeRoster();
+  const hires: BambooNewHireRow[] = [];
+  for (const employee of employees) {
+    const hireDate = parseIsoDateOnly(employee.hireDate);
+    if (!hireDate) continue;
+    if (hireDate.getTime() < start.getTime() || hireDate.getTime() > end.getTime()) continue;
+    hires.push({
+      department: clean(employee.department),
+      jobTitle: clean(employee.jobTitle),
+      type: "",
+      qc: isBasedInQuebec(employee),
+      greySkyBaseline: "",
+      categorization: "",
+      name: employeeDisplayName(employee),
+      startDate: toIsoDateOnly(hireDate),
+      salary: clean(employee.salary),
+    });
+  }
+
+  hires.sort((a, b) => {
+    if (a.startDate !== b.startDate) return a.startDate.localeCompare(b.startDate);
+    return a.name.localeCompare(b.name);
+  });
+  return hires;
 }

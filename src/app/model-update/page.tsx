@@ -32,6 +32,18 @@ type MrrChangeTypeTotals = {
   churnTotal: number;
 };
 
+type NewHireRow = {
+  department: string;
+  jobTitle: string;
+  type: string;
+  qc: boolean;
+  greySkyBaseline: string;
+  categorization: string;
+  name: string;
+  startDate: string;
+  salary: string;
+};
+
 type UploadFieldKey =
   | "stripeMrrPerCustomer"
   | "stripeMrrChanges"
@@ -559,6 +571,36 @@ function mrrChangeRowsToCsvRows(rows: ParsedMrrChangeRow[]) {
   return out;
 }
 
+const NEW_HIRES_COLUMNS = [
+  "Department",
+  "Job Title",
+  "Type",
+  "QC?",
+  "Grey Sky=2 Baseline=1",
+  "Categorization sales or non sales (for commission)",
+  "Name",
+  "Start Date",
+  "salary",
+] as const;
+
+function newHiresToCsvRows(rows: NewHireRow[]) {
+  const out: string[][] = [Array.from(NEW_HIRES_COLUMNS)];
+  for (const row of rows) {
+    out.push([
+      row.department || "",
+      row.jobTitle || "",
+      row.type || "",
+      row.qc ? "true" : "false",
+      row.greySkyBaseline || "",
+      row.categorization || "",
+      row.name || "",
+      row.startDate || "",
+      row.salary || "",
+    ]);
+  }
+  return out;
+}
+
 function buildReformattedStripeRows(parsed: ParsedStripeMrr) {
   const header = [
     "Customer ID",
@@ -885,6 +927,9 @@ export default function ModelUpdatePage() {
   const [transformError, setTransformError] = useState<string | null>(null);
   const [transformSuccess, setTransformSuccess] = useState<string | null>(null);
   const [mrrChangesTotals, setMrrChangesTotals] = useState<MrrChangeTypeTotals | null>(null);
+  const [newHires, setNewHires] = useState<NewHireRow[]>([]);
+  const [newHiresLoading, setNewHiresLoading] = useState(false);
+  const [newHiresError, setNewHiresError] = useState<string | null>(null);
 
   const missingFields = UPLOAD_FIELDS.filter((field) => !files[field.key]);
 
@@ -1068,6 +1113,39 @@ export default function ModelUpdatePage() {
     } catch (e: unknown) {
       setTransformError(e instanceof Error ? e.message : "Failed to process MRR changes file.");
     }
+  }
+
+  async function loadNewHires() {
+    setNewHiresLoading(true);
+    setNewHiresError(null);
+    try {
+      const res = await fetch("/api/model-update-new-hires", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startDate, endDate }),
+      });
+      const text = await res.text();
+      const json = text ? (JSON.parse(text) as { rows?: NewHireRow[]; error?: string }) : {};
+      if (!res.ok) {
+        throw new Error(json.error || `Failed to load new hires (${res.status})`);
+      }
+      const rows = Array.isArray(json.rows) ? json.rows : [];
+      setNewHires(rows);
+    } catch (e: unknown) {
+      setNewHiresError(e instanceof Error ? e.message : "Failed to load new hires.");
+      setNewHires([]);
+    } finally {
+      setNewHiresLoading(false);
+    }
+  }
+
+  function downloadNewHiresCsv() {
+    if (!newHires.length) {
+      setNewHiresError("Load new hires first to download CSV.");
+      return;
+    }
+    setNewHiresError(null);
+    downloadCsv(`model-update-new-hires-${startDate}-to-${endDate}.csv`, newHiresToCsvRows(newHires));
   }
 
   return (
@@ -1272,6 +1350,54 @@ export default function ModelUpdatePage() {
       </section>
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-3">
+        <h2 className="stripe-ui__panel-title">New Hires (BambooHR)</h2>
+        <p className="stripe-ui__panel-subtitle">
+          Loads hires with start date inside the selected range, and exports in the required finance template columns.
+        </p>
+        <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", marginBottom: "0.9rem" }}>
+          <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={() => void loadNewHires()} disabled={newHiresLoading}>
+            {newHiresLoading ? "Loading..." : "Load New Hires"}
+          </button>
+          <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={downloadNewHiresCsv} disabled={!newHires.length}>
+            Download New Hires CSV
+          </button>
+        </div>
+        {newHiresError ? (
+          <p className="stripe-ui__panel-subtitle" style={{ color: "#fca5a5", marginTop: "0.75rem", marginBottom: 0 }}>
+            {newHiresError}
+          </p>
+        ) : null}
+        {newHires.length ? (
+          <div className="stripe-ui__table-wrap">
+            <table className="stripe-ui__table" aria-label="New hires">
+              <thead>
+                <tr>
+                  {NEW_HIRES_COLUMNS.map((column) => (
+                    <th key={column}>{column}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {newHires.map((row, idx) => (
+                  <tr key={`${row.name}-${row.startDate}-${idx}`}>
+                    <td>{row.department}</td>
+                    <td>{row.jobTitle}</td>
+                    <td>{row.type}</td>
+                    <td>{row.qc ? "true" : "false"}</td>
+                    <td>{row.greySkyBaseline}</td>
+                    <td>{row.categorization}</td>
+                    <td>{row.name}</td>
+                    <td>{row.startDate}</td>
+                    <td>{row.salary}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="stripe-ui__panel ui-reveal ui-reveal-4">
         <h2 className="stripe-ui__panel-title">Analytics (Mixpanel + Google Analytics)</h2>
         <p className="stripe-ui__panel-subtitle">
           Mixpanel metrics are shown for the selected range (DAU/WAU/MAU on last day, plus monthly totals).
