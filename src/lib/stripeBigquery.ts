@@ -220,6 +220,17 @@ export type StripeThroughMrrSalesAssistExportResult = {
   rows: StripeThroughMrrSalesAssistExportCandidateRow[];
 };
 
+export type StripeCustomerWorkspaceCustomerMapping = {
+  workspaceId: string;
+  customerId: string;
+};
+
+export type StripeCustomerIdsByWorkspaceResult = {
+  workspaceIds: string[];
+  customerIds: string[];
+  mappings: StripeCustomerWorkspaceCustomerMapping[];
+};
+
 export type StripeThroughMrrCustomerPlan = "enterprise" | "managed" | "team" | "plus" | "pay_as_you_go" | "free";
 
 export type StripeThroughMrrCustomerPlanRow = {
@@ -4253,6 +4264,69 @@ ORDER BY mbg.current_month_end_mrr DESC, cn.customer_key ASC
       previousMonthEndMrr: asNumber(row.previous_month_end_mrr),
       currentMonthEndMrr: asNumber(row.current_month_end_mrr),
     })),
+  };
+}
+
+export async function queryStripeCustomerIdsByWorkspaceIdsFromBigQuery(
+  workspaceIds: string[],
+  options?: StripeBigQueryOptions,
+): Promise<StripeCustomerIdsByWorkspaceResult> {
+  const normalizedWorkspaceIds = Array.from(
+    new Set(
+      (workspaceIds || [])
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+  if (!normalizedWorkspaceIds.length) {
+    return {
+      workspaceIds: [],
+      customerIds: [],
+      mappings: [],
+    };
+  }
+
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const customersMetadataTable = getStripeCustomersMetadataTable(profile);
+  const workspaceIdsSql = normalizedWorkspaceIds.map((id) => `'${escapeSqlString(id)}'`).join(", ");
+
+  const query = `
+WITH requested_workspace_ids AS (
+  SELECT workspace_id
+  FROM UNNEST([${workspaceIdsSql}]) AS workspace_id
+)
+SELECT
+  LOWER(COALESCE(NULLIF(TRIM(CAST(m.value AS STRING)), ''), '')) AS workspace_id,
+  COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '') AS customer_id
+FROM \`${customersMetadataTable}\` m
+WHERE
+  LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
+  AND LOWER(COALESCE(NULLIF(TRIM(CAST(m.value AS STRING)), ''), '')) IN (
+    SELECT workspace_id FROM requested_workspace_ids
+  )
+  AND COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '') <> ''
+GROUP BY workspace_id, customer_id
+ORDER BY workspace_id ASC, customer_id ASC
+`;
+
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, []);
+  const mappings: StripeCustomerWorkspaceCustomerMapping[] = rows
+    .map((row) => ({
+      workspaceId: asString(row.workspace_id).trim().toLowerCase(),
+      customerId: asString(row.customer_id).trim(),
+    }))
+    .filter((row) => row.workspaceId && row.customerId);
+  const customerIds = Array.from(new Set(mappings.map((row) => row.customerId))).sort((a, b) => a.localeCompare(b));
+
+  return {
+    workspaceIds: normalizedWorkspaceIds,
+    customerIds,
+    mappings,
   };
 }
 

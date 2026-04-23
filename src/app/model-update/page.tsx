@@ -155,6 +155,10 @@ function parseMoneyLike(value: string) {
   return negativeParens ? -parsed : parsed;
 }
 
+function normalizeCustomerIdToken(value: string) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function csvEscape(value: string | number | null | undefined) {
   const str = value == null ? "" : String(value);
   if (/[",\n]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
@@ -248,6 +252,37 @@ function parseStripeMrrPerCustomerCsv(text: string): ParsedStripeMrr {
     monthColumn,
     rows: Array.from(byCustomerId.values()).sort((a, b) => a.customerId.localeCompare(b.customerId)),
   };
+}
+
+function extractWorkspaceIdsFromSalesAssistCsv(text: string) {
+  const { rows } = parseDelimitedRows(text);
+  if (!rows.length) return [];
+  const headerNorm = rows[0].map((cell) => normalizeHeader(cell));
+  const workspaceIdIdx = findHeaderIndex(headerNorm, [
+    "What is the primary workspace ID?",
+    "Primary workspace ID",
+    "workspace_id",
+    "workspace id",
+    "workspaceid",
+  ]);
+  const startRow = workspaceIdIdx >= 0 ? 1 : 0;
+  const out = new Set<string>();
+
+  for (let i = startRow; i < rows.length; i += 1) {
+    const source = workspaceIdIdx >= 0 ? String(rows[i]?.[workspaceIdIdx] || "").trim() : rows[i].join(" ").trim();
+    if (!source) continue;
+    const strictMatches = source.match(/wkspace_[a-z0-9]+/gi);
+    if (strictMatches?.length) {
+      for (const match of strictMatches) out.add(match.trim().toLowerCase());
+      continue;
+    }
+    const tokens = source.split(/[,\s|;\n\r\t]+/).map((token) => token.trim()).filter(Boolean);
+    for (const token of tokens) {
+      if (token.toLowerCase().startsWith("wkspace_")) out.add(token.toLowerCase());
+    }
+  }
+
+  return Array.from(out).sort((a, b) => a.localeCompare(b));
 }
 
 function buildReformattedStripeRows(parsed: ParsedStripeMrr) {
@@ -346,6 +381,7 @@ function mergeIntoSelfserveAllSubsCsv(
   parsedStripe: ParsedStripeMrr,
   startDate: string,
   endDate: string,
+  salesAssistCustomerIds: Set<string>,
 ): string[][] {
   const { rows } = parseDelimitedRows(selfserveCsvText);
   if (rows.length < 1) throw new Error("Current selfserve-all-subs file is empty.");
@@ -355,6 +391,11 @@ function mergeIntoSelfserveAllSubsCsv(
   const customerIdIdx = findHeaderIndex(normalizedHeader, ["Customer ID", "customer_id", "customerid"]);
   if (customerIdIdx < 0) {
     throw new Error("Current selfserve-all-subs file missing Customer ID column.");
+  }
+  let salesAssistIdx = findHeaderIndex(normalizedHeader, ["Sales-Assist", "Sales Assist", "sales_assist", "salesassist"]);
+  if (salesAssistIdx < 0) {
+    header.push("Sales-Assist");
+    salesAssistIdx = header.length - 1;
   }
   const monthColumn = parsedStripe.monthColumn;
   let monthColumnIdx = header.findIndex((h) => normalizeHeader(h) === normalizeHeader(monthColumn));
@@ -387,6 +428,9 @@ function mergeIntoSelfserveAllSubsCsv(
     if (!customerId) {
       outputRows.push(row);
       continue;
+    }
+    if (salesAssistIdx >= 0 && salesAssistCustomerIds.has(normalizeCustomerIdToken(customerId))) {
+      row[salesAssistIdx] = "yes";
     }
     const stripeMatch = stripeByCustomer.get(customerId);
     if (stripeMatch) {
@@ -424,6 +468,9 @@ function mergeIntoSelfserveAllSubsCsv(
       const startRef = `${toColumnA1(firstMonthColumnIdx)}${rowNumber}`;
       const endRef = `${toColumnA1(lastMonthColumnIdx)}${rowNumber}`;
       newRow[initialSubIdx] = `=IFERROR(INDEX(FILTER(${startRef}:${endRef},${startRef}:${endRef}<>0),1),0)`;
+    }
+    if (salesAssistIdx >= 0 && salesAssistCustomerIds.has(normalizeCustomerIdToken(stripeRow.customerId))) {
+      newRow[salesAssistIdx] = "yes";
     }
     if (emailIdx >= 0) newRow[emailIdx] = stripeRow.email;
     outputRows.push(newRow);
@@ -545,10 +592,38 @@ export default function ModelUpdatePage() {
       const stripeFile = files.stripeMrrPerCustomer;
       if (!stripeFile) throw new Error("Upload Stripe MRR per customer file first.");
       if (!currentSelfserveAllSubsFile) throw new Error("Upload current selfserve-all-subs file.");
+      const salesAssistFile = files.salesAssistWorkspaceIds;
+      if (!salesAssistFile) throw new Error("Upload sales assist workspace IDs file first.");
       const parsedStripe = parseStripeMrrPerCustomerCsv(await stripeFile.text());
-      const merged = mergeIntoSelfserveAllSubsCsv(await currentSelfserveAllSubsFile.text(), parsedStripe, startDate, endDate);
+      const workspaceIds = extractWorkspaceIdsFromSalesAssistCsv(await salesAssistFile.text());
+      const salesAssistCustomerIds = new Set<string>();
+      if (workspaceIds.length) {
+        const res = await fetch("/api/model-update-sales-assist-customers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspaceIds }),
+        });
+        const text = await res.text();
+        const json = text ? (JSON.parse(text) as { customerIds?: string[]; error?: string }) : {};
+        if (!res.ok) {
+          throw new Error(json.error || `Failed to map workspace IDs (${res.status})`);
+        }
+        for (const customerId of Array.isArray(json.customerIds) ? json.customerIds : []) {
+          const normalized = normalizeCustomerIdToken(customerId);
+          if (normalized) salesAssistCustomerIds.add(normalized);
+        }
+      }
+      const merged = mergeIntoSelfserveAllSubsCsv(
+        await currentSelfserveAllSubsFile.text(),
+        parsedStripe,
+        startDate,
+        endDate,
+        salesAssistCustomerIds,
+      );
       downloadCsv(`selfserve-all-subs-month-${parsedStripe.monthColumn}.csv`, merged);
-      setTransformSuccess(`Downloaded merged selfserve-all-subs CSV for ${parsedStripe.monthColumn}.`);
+      setTransformSuccess(
+        `Downloaded merged selfserve-all-subs CSV for ${parsedStripe.monthColumn}. Sales-assist customers marked: ${salesAssistCustomerIds.size}.`,
+      );
     } catch (e: unknown) {
       setTransformError(e instanceof Error ? e.message : "Failed to build merged selfserve-all-subs CSV.");
     }
