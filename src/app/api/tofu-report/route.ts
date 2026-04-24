@@ -16,6 +16,7 @@ const CACHE_TTL_MS = readTtlMs("API_TOFU_REPORT_CACHE_TTL_MS", 60_000);
 type TofuApiRequest = Partial<TofuRequest> & {
   detailPeriodKey?: string;
   detailMetric?: string;
+  detailSegment?: string;
 };
 
 function validateAndRun(body: TofuApiRequest) {
@@ -28,11 +29,15 @@ function validateAndRun(body: TofuApiRequest) {
 
   const detailPeriodKey = String(body.detailPeriodKey || "").trim();
   const detailMetric = String(body.detailMetric || "").trim();
+  const detailSegment = String(body.detailSegment || "").trim();
   if (detailPeriodKey && detailMetric) {
     const detailPayload: TofuDetailRequest = {
       ...basePayload,
       detailPeriodKey,
       detailMetric: detailMetric as TofuDetailMetric,
+      detailSegment: detailSegment
+        ? (detailSegment as TofuDetailRequest["detailSegment"])
+        : undefined,
     };
     const key = `api:tofu-report:detail:${stableStringify(detailPayload)}`;
     return getOrSetCache(key, CACHE_TTL_MS, () => generateTofuDetailReport(detailPayload));
@@ -53,7 +58,8 @@ export async function POST(req: Request) {
       message.includes("Invalid startDate/endDate") ||
       message.includes("endDate must be >= startDate") ||
       message.includes("Invalid detail metric") ||
-      message.includes("Invalid detail period")
+      message.includes("Invalid detail period") ||
+      message.includes("Invalid detail segment")
         ? 400
         : 500;
     return NextResponse.json({ error: message }, { status });
@@ -71,6 +77,7 @@ export async function GET(req: Request) {
         groupBy: String(searchParams.get("groupBy") || "month") as TofuRequest["groupBy"],
         detailPeriodKey: searchParams.get("detailPeriodKey") || "",
         detailMetric: searchParams.get("detailMetric") || "",
+        detailSegment: searchParams.get("detailSegment") || "",
       }),
     );
   } catch (error: unknown) {
@@ -79,7 +86,8 @@ export async function GET(req: Request) {
       message.includes("Invalid startDate/endDate") ||
       message.includes("endDate must be >= startDate") ||
       message.includes("Invalid detail metric") ||
-      message.includes("Invalid detail period")
+      message.includes("Invalid detail period") ||
+      message.includes("Invalid detail segment")
         ? 400
         : 500;
     return NextResponse.json({ error: message }, { status });

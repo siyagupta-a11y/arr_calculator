@@ -74,6 +74,7 @@ export type TofuDetailMetric =
 export type TofuDetailRequest = TofuRequest & {
   detailPeriodKey: string;
   detailMetric: TofuDetailMetric;
+  detailSegment?: TofuSegment;
 };
 
 export type TofuDetailRow = {
@@ -95,6 +96,9 @@ export type TofuDetailResponse = {
   endDate: string;
   combineMode: CombinedAllSubsCombineMode;
   targetCurrency: string;
+  detailGroupBy: TofuGroupBy;
+  detailSegment?: TofuSegment;
+  detailSegmentLabel?: string;
   detailPeriodKey: string;
   detailPeriodLabel: string;
   detailPreviousPeriodKey: string;
@@ -138,6 +142,11 @@ const PLAN_ORDER: CombinedAllSubsPlan[] = [
 ];
 
 const SEGMENT_ORDER: TofuSegment[] = ["salesled", "selfserve", "sales_assist"];
+const SEGMENT_LABELS: Record<TofuSegment, string> = {
+  salesled: "Sales-led",
+  selfserve: "Self-serve",
+  sales_assist: "Sales assist",
+};
 
 function parseIsoDateOnly(value: string) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
@@ -241,6 +250,40 @@ function contributionForMetric(metric: TofuDetailMetric, previousArr: number, cu
   if (metric === "churnArr") return prevHas && !currHas ? -previousArr : null;
   if (metric === "expansionArr") return prevHas && currHas && delta > 0 ? delta : null;
   if (metric === "contractionArr") return prevHas && currHas && delta < 0 ? delta : null;
+  return null;
+}
+
+function contributionForSegmentMetric(
+  metric: TofuDetailMetric,
+  segment: TofuSegment,
+  previousArr: number,
+  currentArr: number,
+  previousSegment: TofuSegment,
+  currentSegment: TofuSegment,
+) {
+  const prevHas = Math.abs(previousArr) > 1e-9;
+  const currHas = Math.abs(currentArr) > 1e-9;
+  const delta = round2(currentArr - previousArr);
+  const inPrevSegment = prevHas && previousSegment === segment;
+  const inCurrSegment = currHas && currentSegment === segment;
+
+  if (metric === "beginningArr") return inPrevSegment ? previousArr : null;
+  if (metric === "endingArr") return inCurrSegment ? currentArr : null;
+  if (metric === "newArr") return !prevHas && inCurrSegment ? currentArr : null;
+  if (metric === "churnArr") {
+    if (inPrevSegment && !currHas) return -previousArr;
+    if (inPrevSegment && currHas && previousSegment !== currentSegment) return -previousArr;
+    return null;
+  }
+  if (metric === "expansionArr") {
+    if (inPrevSegment && inCurrSegment && delta > 0) return delta;
+    if (!inPrevSegment && inCurrSegment && prevHas && currHas && previousSegment !== currentSegment) return currentArr;
+    return null;
+  }
+  if (metric === "contractionArr") {
+    if (inPrevSegment && inCurrSegment && delta < 0) return delta;
+    return null;
+  }
   return null;
 }
 
@@ -566,6 +609,12 @@ export async function generateTofuDetailReport(request: TofuDetailRequest): Prom
   if (!TOFU_DETAIL_METRICS.has(request.detailMetric)) {
     throw new Error("Invalid detail metric");
   }
+  const groupBy = normalizeTofuGroupBy(request.groupBy);
+  const detailSegmentRaw = String(request.detailSegment || "").trim().toLowerCase();
+  const detailSegment = (SEGMENT_ORDER.find((segment) => segment === detailSegmentRaw) || "") as TofuSegment | "";
+  if (groupBy === "segment" && !detailSegment) {
+    throw new Error("Invalid detail segment");
+  }
 
   const { expanded, periods, allPeriodKeys } = await loadExpandedTofuSource(request);
   const detailPeriodKey = String(request.detailPeriodKey || "").trim();
@@ -581,7 +630,17 @@ export async function generateTofuDetailReport(request: TofuDetailRequest): Prom
   for (const row of expanded.rows || []) {
     const previousArr = previousPeriodKey ? arrAtPeriod(row, previousPeriodKey) : 0;
     const currentArr = arrAtPeriod(row, period.key);
-    const contributionArr = contributionForMetric(request.detailMetric, previousArr, currentArr);
+    const contributionArr =
+      groupBy === "segment" && detailSegment
+        ? contributionForSegmentMetric(
+            request.detailMetric,
+            detailSegment,
+            previousArr,
+            currentArr,
+            previousPeriodKey ? segmentAtPeriod(row, previousPeriodKey) : "selfserve",
+            segmentAtPeriod(row, period.key),
+          )
+        : contributionForMetric(request.detailMetric, previousArr, currentArr);
     if (contributionArr == null) continue;
 
     const deltaArr = round2(currentArr - previousArr);
@@ -616,6 +675,9 @@ export async function generateTofuDetailReport(request: TofuDetailRequest): Prom
     endDate: request.endDate,
     combineMode: expanded.combineMode,
     targetCurrency: expanded.targetCurrency,
+    detailGroupBy: groupBy,
+    detailSegment: groupBy === "segment" && detailSegment ? detailSegment : undefined,
+    detailSegmentLabel: groupBy === "segment" && detailSegment ? SEGMENT_LABELS[detailSegment] : undefined,
     detailPeriodKey: period.key,
     detailPeriodLabel: period.label,
     detailPreviousPeriodKey: previousPeriodKey,

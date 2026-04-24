@@ -75,6 +75,9 @@ type TofuDetailResponse = {
   endDate: string;
   combineMode: CombineMode;
   targetCurrency: string;
+  detailGroupBy: TofuGroupBy;
+  detailSegment?: TofuSegment;
+  detailSegmentLabel?: string;
   detailPeriodKey: string;
   detailPeriodLabel: string;
   detailPreviousPeriodKey: string;
@@ -235,7 +238,7 @@ export default function TofuPage() {
     }
   }
 
-  async function openDetail(periodKey: string, metric: TofuDetailMetric) {
+  async function openDetail(periodKey: string, metric: TofuDetailMetric, segment?: TofuSegment) {
     setDetailLoading(true);
     setDetailError(null);
     setDetailData(null);
@@ -248,8 +251,10 @@ export default function TofuPage() {
           startDate,
           endDate,
           combineMode: effectiveCombineMode,
+          groupBy: effectiveGroupBy,
           detailPeriodKey: periodKey,
           detailMetric: metric,
+          detailSegment: segment || "",
         }),
       });
       const json = await parseApiResponse(res);
@@ -373,6 +378,8 @@ export default function TofuPage() {
   function exportDetailCsv(payload: TofuDetailResponse) {
     const filename = `tofu-detail-${payload.detailMetric}-${payload.detailPeriodKey}-${payload.combineMode}.csv`;
     const header = [
+      "group_by",
+      "segment",
       "period_key",
       "period_label",
       "previous_period_key",
@@ -391,6 +398,8 @@ export default function TofuPage() {
       "contribution_mrr",
     ];
     const csvRows = payload.rows.map((row) => [
+      payload.detailGroupBy || "month",
+      payload.detailSegmentLabel || "",
       payload.detailPeriodKey,
       payload.detailPeriodLabel,
       payload.detailPreviousPeriodKey,
@@ -480,6 +489,27 @@ export default function TofuPage() {
         onClick={() => void openDetail(row.periodKey, metric)}
         disabled={detailLoading}
         title={`Show ${METRIC_LABELS[metric]} contributors for ${row.periodLabel}`}
+      >
+        {formatMoney(value, currency)}
+      </button>
+    );
+  }
+
+  function renderSegmentDrillCell(
+    segment: TofuSegment,
+    periodKey: string,
+    periodLabel: string,
+    metric: TofuDetailMetric,
+    value: number,
+  ) {
+    return (
+      <button
+        type="button"
+        className="stripe-ui__btn stripe-ui__btn--ghost"
+        style={{ minHeight: 0, height: "auto", padding: 0, width: "100%", justifyContent: "flex-end" }}
+        onClick={() => void openDetail(periodKey, metric, segment)}
+        disabled={detailLoading}
+        title={`Show ${METRIC_LABELS[metric]} contributors for ${SEGMENT_LABELS[segment]} in ${periodLabel}`}
       >
         {formatMoney(value, currency)}
       </button>
@@ -783,7 +813,13 @@ export default function TofuPage() {
                                 Number(row.valuesByPeriod[period.key] || 0) < 0 ? "stripe-ui__money--negative" : ""
                               }`}
                             >
-                              {formatMoney(Number(row.valuesByPeriod[period.key] || 0), currency)}
+                              {renderSegmentDrillCell(
+                                row.segment,
+                                period.key,
+                                period.label,
+                                row.metricKey as TofuDetailMetric,
+                                Number(row.valuesByPeriod[period.key] || 0),
+                              )}
                             </td>
                           ))}
                         </tr>
@@ -827,22 +863,25 @@ export default function TofuPage() {
               </div>
             )}
 
-            {effectiveGroupBy === "month" && detailLoading && (
+            {(effectiveGroupBy === "month" || effectiveGroupBy === "segment") && detailLoading && (
               <div style={{ marginTop: "0.8rem" }} className="stripe-ui__panel-subtitle">
                 Loading detail rows...
               </div>
             )}
 
-            {effectiveGroupBy === "month" && detailError && (
+            {(effectiveGroupBy === "month" || effectiveGroupBy === "segment") && detailError && (
               <div className="stripe-ui__error" style={{ marginTop: "0.8rem" }} role="alert" aria-live="assertive">
                 {detailError}
               </div>
             )}
 
-            {effectiveGroupBy === "month" && detailData && !detailLoading && !detailError && (
+            {(effectiveGroupBy === "month" || effectiveGroupBy === "segment") && detailData && !detailLoading && !detailError && (
               <div style={{ marginTop: "1rem" }}>
                 <h3 className="stripe-ui__panel-title" style={{ fontSize: "1rem" }}>
                   {METRIC_LABELS[detailData.detailMetric]} detail - {detailData.detailPeriodLabel}
+                  {detailData.detailGroupBy === "segment" && detailData.detailSegmentLabel
+                    ? ` (${detailData.detailSegmentLabel})`
+                    : ""}
                 </h3>
                 <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginBottom: "0.5rem" }}>
                   <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
