@@ -44,6 +44,30 @@ type NewHireRow = {
   salary: string;
 };
 
+type UnmatchedTransactionalDealRow = {
+  dealId: string;
+  dealName: string;
+  closeDateUtc: string;
+  workspaceId: string;
+  primaryCompanyId: string;
+  unmatchedReason: "missing_workspace_id" | "no_stripe_customer_mapping";
+};
+
+type UnmatchedTransactionalDealsResponse = {
+  startDate: string;
+  endDate: string;
+  stageIds: string[];
+  workspacePropertyCandidates: string[];
+  summary: {
+    totalTransactionalDeals: number;
+    matchedDeals: number;
+    unmatchedDeals: number;
+    missingWorkspaceIdDeals: number;
+    noStripeMappingDeals: number;
+  };
+  rows: UnmatchedTransactionalDealRow[];
+};
+
 type UploadFieldKey =
   | "stripeMrrPerCustomer"
   | "stripeMrrChanges"
@@ -177,6 +201,11 @@ function parseMoneyLike(value: string) {
 
 function normalizeCustomerIdToken(value: string) {
   return String(value || "").trim().toLowerCase();
+}
+
+function formatUnmatchedReason(reason: UnmatchedTransactionalDealRow["unmatchedReason"]) {
+  if (reason === "missing_workspace_id") return "Missing workspace ID on deal";
+  return "Workspace ID has no Stripe customer mapping";
 }
 
 function normalizeEventType(value: string) {
@@ -930,6 +959,9 @@ export default function ModelUpdatePage() {
   const [newHires, setNewHires] = useState<NewHireRow[]>([]);
   const [newHiresLoading, setNewHiresLoading] = useState(false);
   const [newHiresError, setNewHiresError] = useState<string | null>(null);
+  const [unmatchedDealsLoading, setUnmatchedDealsLoading] = useState(false);
+  const [unmatchedDealsError, setUnmatchedDealsError] = useState<string | null>(null);
+  const [unmatchedDealsData, setUnmatchedDealsData] = useState<UnmatchedTransactionalDealsResponse | null>(null);
 
   const missingFields = UPLOAD_FIELDS.filter((field) => !files[field.key]);
 
@@ -957,6 +989,18 @@ export default function ModelUpdatePage() {
     setCurrentSelfserveAllSubsFile(file);
     setTransformError(null);
     setTransformSuccess(null);
+  }
+
+  function onStartDateChange(value: string) {
+    setStartDate(value);
+    setUnmatchedDealsError(null);
+    setUnmatchedDealsData(null);
+  }
+
+  function onEndDateChange(value: string) {
+    setEndDate(value);
+    setUnmatchedDealsError(null);
+    setUnmatchedDealsData(null);
   }
 
   function validateInputs() {
@@ -1148,6 +1192,64 @@ export default function ModelUpdatePage() {
     downloadCsv(`model-update-new-hires-${startDate}-to-${endDate}.csv`, newHiresToCsvRows(newHires));
   }
 
+  async function loadUnmatchedTransactionalDeals() {
+    setUnmatchedDealsLoading(true);
+    setUnmatchedDealsError(null);
+    try {
+      const res = await fetch("/api/model-update-unmatched-transactional-deals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startDate, endDate }),
+      });
+      const text = await res.text();
+      const json = text
+        ? (JSON.parse(text) as UnmatchedTransactionalDealsResponse & { error?: string })
+        : null;
+      if (!res.ok) {
+        throw new Error(json?.error || `Failed to load debug deals (${res.status})`);
+      }
+      if (!json || typeof json !== "object") {
+        throw new Error("Invalid debug response");
+      }
+      setUnmatchedDealsData(json);
+    } catch (e: unknown) {
+      setUnmatchedDealsError(e instanceof Error ? e.message : "Failed to load unmatched transactional deals.");
+      setUnmatchedDealsData(null);
+    } finally {
+      setUnmatchedDealsLoading(false);
+    }
+  }
+
+  function downloadUnmatchedDealsCsv() {
+    if (!unmatchedDealsData) {
+      setUnmatchedDealsError("Load unmatched transactional deals first.");
+      return;
+    }
+    setUnmatchedDealsError(null);
+    const rows: string[][] = [
+      [
+        "deal_id",
+        "deal_name",
+        "close_date_utc",
+        "workspace_id",
+        "primary_company_id",
+        "unmatched_reason",
+      ],
+      ...unmatchedDealsData.rows.map((row) => [
+        row.dealId,
+        row.dealName,
+        row.closeDateUtc,
+        row.workspaceId,
+        row.primaryCompanyId,
+        formatUnmatchedReason(row.unmatchedReason),
+      ]),
+    ];
+    downloadCsv(
+      `model-update-unmatched-transactional-deals-${unmatchedDealsData.startDate}-to-${unmatchedDealsData.endDate}.csv`,
+      rows,
+    );
+  }
+
   return (
     <div className="stripe-ui">
       <section className="stripe-ui__hero ui-reveal">
@@ -1189,7 +1291,7 @@ export default function ModelUpdatePage() {
               className="stripe-ui__control"
               type="date"
               value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
+              onChange={(e) => onStartDateChange(e.target.value)}
             />
           </div>
           <div className="stripe-ui__field">
@@ -1201,7 +1303,7 @@ export default function ModelUpdatePage() {
               className="stripe-ui__control"
               type="date"
               value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
+              onChange={(e) => onEndDateChange(e.target.value)}
             />
           </div>
           <div className="stripe-ui__field">
@@ -1518,6 +1620,95 @@ export default function ModelUpdatePage() {
             </div>
           </div>
         )}
+      </section>
+
+      <section className="stripe-ui__panel ui-reveal ui-reveal-5">
+        <h2 className="stripe-ui__panel-title">Debug: Unmatched Transactional Closed-Won Deals</h2>
+        <p className="stripe-ui__panel-subtitle">
+          Shows transactional closed-won deals in the selected date range that were not matched to any Stripe customer by workspace ID.
+        </p>
+        <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", marginBottom: "0.9rem" }}>
+          <button
+            className="stripe-ui__btn stripe-ui__btn--primary"
+            onClick={() => void loadUnmatchedTransactionalDeals()}
+            disabled={unmatchedDealsLoading}
+          >
+            {unmatchedDealsLoading ? "Loading..." : "Load unmatched deals"}
+          </button>
+          <button
+            className="stripe-ui__btn stripe-ui__btn--secondary"
+            onClick={downloadUnmatchedDealsCsv}
+            disabled={!unmatchedDealsData}
+          >
+            Download debug CSV
+          </button>
+        </div>
+
+        {unmatchedDealsError ? (
+          <p className="stripe-ui__panel-subtitle" style={{ color: "#fca5a5", marginTop: "0.75rem", marginBottom: 0 }}>
+            {unmatchedDealsError}
+          </p>
+        ) : null}
+
+        {unmatchedDealsData ? (
+          <>
+            <div className="stripe-ui__stats-grid" style={{ marginBottom: "0.9rem" }}>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Total transactional deals</p>
+                <p className="stripe-ui__stat-value">{formatNumber(unmatchedDealsData.summary.totalTransactionalDeals)}</p>
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Matched deals</p>
+                <p className="stripe-ui__stat-value">{formatNumber(unmatchedDealsData.summary.matchedDeals)}</p>
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Unmatched deals</p>
+                <p className="stripe-ui__stat-value">{formatNumber(unmatchedDealsData.summary.unmatchedDeals)}</p>
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Missing workspace ID</p>
+                <p className="stripe-ui__stat-value">{formatNumber(unmatchedDealsData.summary.missingWorkspaceIdDeals)}</p>
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">No Stripe mapping</p>
+                <p className="stripe-ui__stat-value">{formatNumber(unmatchedDealsData.summary.noStripeMappingDeals)}</p>
+              </div>
+            </div>
+
+            {unmatchedDealsData.rows.length ? (
+              <div className="stripe-ui__table-wrap">
+                <table className="stripe-ui__table" aria-label="Unmatched transactional closed-won deals">
+                  <thead>
+                    <tr>
+                      <th>Deal ID</th>
+                      <th>Deal name</th>
+                      <th>Close date (UTC)</th>
+                      <th>Workspace ID</th>
+                      <th>Primary company ID</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {unmatchedDealsData.rows.map((row) => (
+                      <tr key={row.dealId}>
+                        <td>{row.dealId}</td>
+                        <td>{row.dealName || "—"}</td>
+                        <td>{row.closeDateUtc || "—"}</td>
+                        <td>{row.workspaceId || "—"}</td>
+                        <td>{row.primaryCompanyId || "—"}</td>
+                        <td>{formatUnmatchedReason(row.unmatchedReason)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                No unmatched transactional closed-won deals found for the selected date range.
+              </p>
+            )}
+          </>
+        ) : null}
       </section>
     </div>
   );
