@@ -1,6 +1,6 @@
 import {
   fetchCompanyIdsForContactEmails,
-  fetchDealStageIdToLabelMap,
+  fetchSalesAssistDealMatches,
   fetchDealsInStage,
 } from "@/lib/hubspot";
 import { generateReport } from "@/lib/report";
@@ -204,13 +204,6 @@ function normalizeWorkspaceId(value: string) {
   return String(value || "").trim().toLowerCase();
 }
 
-function normalizeStageLabelKey(value: string) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
-}
-
 function isUnknownPropertyError(error: unknown) {
   if (!(error instanceof Error)) return false;
   const message = String(error.message || "").toLowerCase();
@@ -264,38 +257,7 @@ type SalesAssistWorkspaceEvent = {
   kind: SalesAssistEventKind;
 };
 
-async function resolveDealStageIdsByLabelOrEnv(
-  idsEnvName: string,
-  fallbackLabelEnvName: string,
-  fallbackLabelDefault: string,
-) {
-  const configured = Array.from(
-    new Set(
-      String(process.env[idsEnvName] || "")
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean),
-    ),
-  );
-  if (configured.length) return configured;
-
-  const normalizedLabel = normalizeStageLabelKey(
-    String(process.env[fallbackLabelEnvName] || fallbackLabelDefault),
-  );
-  if (!normalizedLabel) return [];
-
-  const stageIdToLabel = await fetchDealStageIdToLabelMap();
-  return Array.from(stageIdToLabel.entries())
-    .filter(([, label]) => normalizeStageLabelKey(label || "") === normalizedLabel)
-    .map(([stageId]) => stageId);
-}
-
 async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string, SalesAssistWorkspaceEvent[]>> {
-  const transactionalStageIds = await resolveDealStageIdsByLabelOrEnv(
-    "HUBSPOT_TRANSACTIONAL_STAGE_ID",
-    "HUBSPOT_TRANSACTIONAL_STAGE_LABEL",
-    "Closed Won (Transactional Pipeline)",
-  );
   const salesPipelineStageIds = Array.from(
     new Set(
       String(process.env.INCLUDED_DEALSTAGE || "")
@@ -304,11 +266,6 @@ async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string
         .filter(Boolean),
     ),
   );
-
-  const stageGroups: Array<{ stageIds: string[]; kind: SalesAssistEventKind }> = [
-    { stageIds: transactionalStageIds, kind: "on" },
-    { stageIds: salesPipelineStageIds, kind: "off" },
-  ];
 
   const workspaceProp = String(process.env.DEAL_WORKSPACE_ID_PROP || "workspace_id").trim() || "workspace_id";
   const workspacePropCandidates = Array.from(
@@ -325,35 +282,42 @@ async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string
   );
 
   const out = new Map<string, SalesAssistWorkspaceEvent[]>();
-  for (const group of stageGroups) {
-    for (const stageId of group.stageIds) {
-      let deals: Awaited<ReturnType<typeof fetchDealsInStage>> = [];
-      let fetched = false;
-      for (const workspaceField of workspacePropCandidates) {
-        try {
-          deals = await fetchDealsInStage([workspaceField, "closedate"], stageId);
-          fetched = true;
-          break;
-        } catch (error) {
-          if (isUnknownPropertyError(error)) continue;
-          throw error;
-        }
-      }
-      if (!fetched) continue;
+  const onMatches = await fetchSalesAssistDealMatches();
+  for (const match of onMatches) {
+    const workspaceId = normalizeWorkspaceId(match.workspaceId);
+    const atMs = Number(match.closedAtMs);
+    if (!workspaceId || !Number.isFinite(atMs)) continue;
+    if (!out.has(workspaceId)) out.set(workspaceId, []);
+    out.get(workspaceId)?.push({ atMs, kind: "on" });
+  }
 
-      for (const deal of deals || []) {
-        const properties = (deal.properties || {}) as Record<string, unknown>;
-        const workspaceId = normalizeWorkspaceId(
-          workspacePropCandidates
-            .map((key) => String(properties[key] ?? "").trim())
-            .find((value) => !!value) || "",
-        );
-        if (!workspaceId) continue;
-        const atMs = parseHubspotTimestampMs(properties.closedate);
-        if (!Number.isFinite(atMs)) continue;
-        if (!out.has(workspaceId)) out.set(workspaceId, []);
-        out.get(workspaceId)?.push({ atMs, kind: group.kind });
+  for (const stageId of salesPipelineStageIds) {
+    let deals: Awaited<ReturnType<typeof fetchDealsInStage>> = [];
+    let fetched = false;
+    for (const workspaceField of workspacePropCandidates) {
+      try {
+        deals = await fetchDealsInStage([workspaceField, "closedate"], stageId);
+        fetched = true;
+        break;
+      } catch (error) {
+        if (isUnknownPropertyError(error)) continue;
+        throw error;
       }
+    }
+    if (!fetched) continue;
+
+    for (const deal of deals || []) {
+      const properties = (deal.properties || {}) as Record<string, unknown>;
+      const workspaceId = normalizeWorkspaceId(
+        workspacePropCandidates
+          .map((key) => String(properties[key] ?? "").trim())
+          .find((value) => !!value) || "",
+      );
+      if (!workspaceId) continue;
+      const atMs = parseHubspotTimestampMs(properties.closedate);
+      if (!Number.isFinite(atMs)) continue;
+      if (!out.has(workspaceId)) out.set(workspaceId, []);
+      out.get(workspaceId)?.push({ atMs, kind: "off" });
     }
   }
 

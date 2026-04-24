@@ -1,5 +1,5 @@
 import { createSign } from "node:crypto";
-import { fetchWorkspaceIdsForDealStageLabel } from "@/lib/hubspot";
+import { fetchSalesAssistWorkspaceIds } from "@/lib/hubspot";
 import {
   canonicalCountryLabel,
   canonicalTerritoryLabel,
@@ -3661,7 +3661,7 @@ FROM filtered_group_totals`;
   let transactionalWorkspaceIds = new Set<string>();
   if (detailMode === "grouped" && groupBy === "email") {
     try {
-      const fetchedWorkspaceIds = await fetchWorkspaceIdsForDealStageLabel();
+      const fetchedWorkspaceIds = await fetchSalesAssistWorkspaceIds();
       transactionalWorkspaceIds = new Set(
         Array.from(fetchedWorkspaceIds)
           .map((workspaceId) => normalizeWorkspaceIdToken(workspaceId))
@@ -3669,7 +3669,7 @@ FROM filtered_group_totals`;
       );
     } catch (error) {
       console.warn(
-        `Stripe through MRR: failed to fetch transactional workspace ids: ${
+        `Stripe through MRR: failed to fetch sales-assist workspace ids: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

@@ -21,6 +21,7 @@ type CacheEntry<T> = { value: T; expiresAt: number };
 const DEALS_CACHE = new Map<string, CacheEntry<HubspotDeal[]>>();
 const DEAL_STAGE_LABELS_CACHE = new Map<string, CacheEntry<Array<[string, string]>>>();
 const DEAL_STAGE_WORKSPACE_IDS_CACHE = new Map<string, CacheEntry<string[]>>();
+const SALES_ASSIST_DEALS_CACHE = new Map<string, CacheEntry<SalesAssistDealMatch[]>>();
 const DEAL_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
 const COMPANY_CONTACT_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
 const CONTACT_COMPANY_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
@@ -28,6 +29,18 @@ const CONTACT_EMAIL_SEARCH_CACHE = new Map<string, CacheEntry<string[]>>();
 const COMPANY_CACHE = new Map<string, CacheEntry<HubspotCompany>>();
 const CONTACT_CACHE = new Map<string, CacheEntry<HubspotContact>>();
 const LINE_ITEM_CACHE = new Map<string, CacheEntry<HubspotLineItem>>();
+
+export type SalesAssistDealMatchType = "transactional_closed_won" | "closed_lost_selfserve";
+
+export type SalesAssistDealMatch = {
+  dealId: string;
+  stageId: string;
+  matchType: SalesAssistDealMatchType;
+  workspaceId: string;
+  closedAtMs: number;
+  dealName: string;
+  primaryCompanyId: string;
+};
 
 function getToken() {
   const t = process.env.HUBSPOT_PRIVATE_APP_TOKEN;
@@ -72,11 +85,37 @@ function normalizeWorkspaceId(value: string) {
   return String(value || "").trim();
 }
 
+function normalizeWorkspaceIdToken(value: string) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function normalizeStageLabelKey(value: string) {
   return String(value || "")
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "");
+}
+
+function normalizeLossReasonKey(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function parseHubspotTimestampMs(rawValue: unknown) {
+  const value = String(rawValue || "").trim();
+  if (!value) return NaN;
+  if (/^\d+$/.test(value)) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      if (numeric > 1_000_000_000_000) return numeric;
+      if (numeric > 1_000_000_000) return numeric * 1000;
+      return numeric * 1000;
+    }
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : NaN;
 }
 
 function firstNonEmptyProperty(properties: Record<string, unknown>, candidates: string[]) {
@@ -341,6 +380,250 @@ export async function fetchDealStageIdToLabelMap() {
 
   writeCache(DEAL_STAGE_LABELS_CACHE, cacheKey, Array.from(out.entries()));
   return out;
+}
+
+function parseCsvSet(raw: string) {
+  return Array.from(
+    new Set(
+      String(raw || "")
+        .split(/[,\n\r|;]+/)
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function buildWorkspacePropCandidates() {
+  const workspaceProp = String(process.env.DEAL_WORKSPACE_ID_PROP || "workspace_id").trim() || "workspace_id";
+  return Array.from(
+    new Set(
+      [
+        workspaceProp,
+        workspaceProp.endsWith("__c") ? workspaceProp.slice(0, -3) : `${workspaceProp}__c`,
+        "workspace_id",
+        "workspace_id__c",
+      ]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function buildClosedLostReasonPropCandidates() {
+  const configured = String(process.env.HUBSPOT_CLOSED_LOST_REASON_PROP || "").trim();
+  return Array.from(
+    new Set(
+      [
+        configured,
+        configured ? (configured.endsWith("__c") ? configured.slice(0, -3) : `${configured}__c`) : "",
+        "closed_lost_reason",
+        "closed_lost_reason__c",
+        "closedlostreason",
+      ]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function buildSalesAssistClosedLostReasonKeys() {
+  const configuredRaw =
+    String(process.env.HUBSPOT_SALES_ASSIST_CLOSED_LOST_REASONS || "").trim() ||
+    "Going self-serve Team,Going self-serve Plus";
+  const keys = parseCsvSet(configuredRaw)
+    .map((value) => normalizeLossReasonKey(value))
+    .filter(Boolean);
+  return new Set(keys);
+}
+
+async function resolveStageIdsByLabelOrEnv(
+  idsEnvName: string,
+  fallbackLabelEnvName: string,
+  fallbackLabelDefault: string,
+) {
+  const configured = parseCsvSet(String(process.env[idsEnvName] || ""));
+  if (configured.length) return configured;
+
+  const normalizedLabel = normalizeStageLabelKey(
+    String(process.env[fallbackLabelEnvName] || fallbackLabelDefault),
+  );
+  if (!normalizedLabel) return [];
+
+  const stageIdToLabel = await fetchDealStageIdToLabelMap();
+  return Array.from(stageIdToLabel.entries())
+    .filter(([, label]) => normalizeStageLabelKey(label || "") === normalizedLabel)
+    .map(([stageId]) => stageId);
+}
+
+async function resolveClosedLostStageIds() {
+  const configured = parseCsvSet(String(process.env.HUBSPOT_TRANSACTIONAL_CLOSED_LOST_STAGE_ID || ""));
+  if (configured.length) return configured;
+
+  const explicitLabel = normalizeStageLabelKey(
+    String(process.env.HUBSPOT_TRANSACTIONAL_CLOSED_LOST_STAGE_LABEL || "Closed Lost (Transactional Pipeline)"),
+  );
+  const stageIdToLabel = await fetchDealStageIdToLabelMap();
+  const exact = Array.from(stageIdToLabel.entries())
+    .filter(([, label]) => normalizeStageLabelKey(label || "") === explicitLabel)
+    .map(([stageId]) => stageId);
+  if (exact.length) return exact;
+
+  const transactionalClosedLost = Array.from(stageIdToLabel.entries())
+    .filter(([, label]) => {
+      const normalized = normalizeStageLabelKey(label || "");
+      return normalized.includes("closedlost") && normalized.includes("transactionalpipeline");
+    })
+    .map(([stageId]) => stageId);
+  if (transactionalClosedLost.length) return transactionalClosedLost;
+
+  return Array.from(stageIdToLabel.entries())
+    .filter(([, label]) => normalizeStageLabelKey(label || "").includes("closedlost"))
+    .map(([stageId]) => stageId);
+}
+
+async function fetchDealsForStageWithWorkspaceCandidates(
+  stageId: string,
+  workspacePropCandidates: string[],
+  extraProps: string[],
+  dateRange?: { startDate: string; endDate: string },
+) {
+  for (const workspaceField of workspacePropCandidates) {
+    const props = Array.from(new Set([workspaceField, ...extraProps].filter(Boolean)));
+    try {
+      if (dateRange) {
+        return await fetchDealsInStageClosedBetween(props, stageId, dateRange.startDate, dateRange.endDate);
+      }
+      return await fetchDealsInStage(props, stageId);
+    } catch (error) {
+      if (isUnknownPropertyError(error)) continue;
+      throw error;
+    }
+  }
+  return [];
+}
+
+async function fetchDealsForStageWithWorkspaceAndReasonCandidates(
+  stageId: string,
+  workspacePropCandidates: string[],
+  closedLostReasonPropCandidates: string[],
+  dateRange?: { startDate: string; endDate: string },
+) {
+  for (const reasonField of closedLostReasonPropCandidates) {
+    const deals = await fetchDealsForStageWithWorkspaceCandidates(
+      stageId,
+      workspacePropCandidates,
+      ["closedate", "dealname", "hs_primary_associated_company", reasonField],
+      dateRange,
+    );
+    if (deals.length) return deals;
+  }
+  return [];
+}
+
+async function fetchSalesAssistDealMatchesInternal(dateRange?: { startDate: string; endDate: string }) {
+  const transactionalStageIds = await resolveStageIdsByLabelOrEnv(
+    "HUBSPOT_TRANSACTIONAL_STAGE_ID",
+    "HUBSPOT_TRANSACTIONAL_STAGE_LABEL",
+    "Closed Won (Transactional Pipeline)",
+  );
+  const closedLostStageIds = await resolveClosedLostStageIds();
+  const workspacePropCandidates = buildWorkspacePropCandidates();
+  const closedLostReasonPropCandidates = buildClosedLostReasonPropCandidates();
+  const allowedClosedLostReasons = buildSalesAssistClosedLostReasonKeys();
+
+  const out = new Map<string, SalesAssistDealMatch>();
+
+  for (const stageId of transactionalStageIds) {
+    const deals = await fetchDealsForStageWithWorkspaceCandidates(
+      stageId,
+      workspacePropCandidates,
+      ["closedate", "dealname", "hs_primary_associated_company"],
+      dateRange,
+    );
+    for (const deal of deals || []) {
+      const properties = (deal.properties || {}) as Record<string, unknown>;
+      const workspaceId = normalizeWorkspaceId(firstNonEmptyProperty(properties, workspacePropCandidates));
+      const closedAtMs = parseHubspotTimestampMs(properties.closedate);
+      if (!Number.isFinite(closedAtMs)) continue;
+      const dealId = String(deal.id || "").trim();
+      if (!dealId) continue;
+      const key = `won:${dealId}`;
+      if (out.has(key)) continue;
+      out.set(key, {
+        dealId,
+        stageId,
+        matchType: "transactional_closed_won",
+        workspaceId,
+        closedAtMs,
+        dealName: String(properties.dealname || "").trim(),
+        primaryCompanyId: String(properties.hs_primary_associated_company || "").trim(),
+      });
+    }
+  }
+
+  for (const stageId of closedLostStageIds) {
+    const deals = await fetchDealsForStageWithWorkspaceAndReasonCandidates(
+      stageId,
+      workspacePropCandidates,
+      closedLostReasonPropCandidates,
+      dateRange,
+    );
+    for (const deal of deals || []) {
+      const properties = (deal.properties || {}) as Record<string, unknown>;
+      const workspaceId = normalizeWorkspaceId(firstNonEmptyProperty(properties, workspacePropCandidates));
+      const closedAtMs = parseHubspotTimestampMs(properties.closedate);
+      const closedLostReason = firstNonEmptyProperty(properties, closedLostReasonPropCandidates);
+      const closedLostReasonKey = normalizeLossReasonKey(closedLostReason);
+      if (!Number.isFinite(closedAtMs)) continue;
+      if (!closedLostReasonKey || !allowedClosedLostReasons.has(closedLostReasonKey)) continue;
+      const dealId = String(deal.id || "").trim();
+      if (!dealId) continue;
+      const key = `lost:${dealId}`;
+      if (out.has(key)) continue;
+      out.set(key, {
+        dealId,
+        stageId,
+        matchType: "closed_lost_selfserve",
+        workspaceId,
+        closedAtMs,
+        dealName: String(properties.dealname || "").trim(),
+        primaryCompanyId: String(properties.hs_primary_associated_company || "").trim(),
+      });
+    }
+  }
+
+  return Array.from(out.values()).sort((a, b) => {
+    if (a.closedAtMs !== b.closedAtMs) return a.closedAtMs - b.closedAtMs;
+    return a.dealId.localeCompare(b.dealId);
+  });
+}
+
+export async function fetchSalesAssistDealMatches(dateRange?: { startDate: string; endDate: string }) {
+  const rangeKey = dateRange ? `${dateRange.startDate}:${dateRange.endDate}` : "all";
+  const cacheKey = [
+    `range:${rangeKey}`,
+    `transactional_stage_id:${String(process.env.HUBSPOT_TRANSACTIONAL_STAGE_ID || "")}`,
+    `transactional_stage_label:${String(process.env.HUBSPOT_TRANSACTIONAL_STAGE_LABEL || "")}`,
+    `transactional_closed_lost_stage_id:${String(process.env.HUBSPOT_TRANSACTIONAL_CLOSED_LOST_STAGE_ID || "")}`,
+    `transactional_closed_lost_stage_label:${String(process.env.HUBSPOT_TRANSACTIONAL_CLOSED_LOST_STAGE_LABEL || "")}`,
+    `closed_lost_reason_prop:${String(process.env.HUBSPOT_CLOSED_LOST_REASON_PROP || "")}`,
+    `closed_lost_reason_values:${String(process.env.HUBSPOT_SALES_ASSIST_CLOSED_LOST_REASONS || "")}`,
+    `deal_workspace_prop:${String(process.env.DEAL_WORKSPACE_ID_PROP || "")}`,
+  ].join("|");
+  const cached = readCache(SALES_ASSIST_DEALS_CACHE, cacheKey);
+  if (cached) return cached;
+  const matches = await fetchSalesAssistDealMatchesInternal(dateRange);
+  writeCache(SALES_ASSIST_DEALS_CACHE, cacheKey, matches);
+  return matches;
+}
+
+export async function fetchSalesAssistWorkspaceIds() {
+  const matches = await fetchSalesAssistDealMatches();
+  return new Set(
+    matches
+      .map((match) => normalizeWorkspaceIdToken(match.workspaceId))
+      .filter(Boolean),
+  );
 }
 
 export async function fetchWorkspaceIdsForDealStageLabel(

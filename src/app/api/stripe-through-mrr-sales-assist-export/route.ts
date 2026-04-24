@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { fetchWorkspaceIdsForDealStageLabel } from "@/lib/hubspot";
+import { fetchSalesAssistWorkspaceIds } from "@/lib/hubspot";
 import {
   queryStripeThroughMrrSalesAssistExportFromBigQuery,
   type StripeBigQueryProfile,
@@ -47,7 +47,7 @@ function previousIsoMonth(isoMonth: string) {
 async function buildResponse(detailMonth: string, targetCurrency: string) {
   let transactionalWorkspaceIds = new Set<string>();
   try {
-    const fetched = await fetchWorkspaceIdsForDealStageLabel();
+    const fetched = await fetchSalesAssistWorkspaceIds();
     transactionalWorkspaceIds = new Set(
       Array.from(fetched)
         .map((workspaceId) => normalizeWorkspaceIdToken(workspaceId))
@@ -55,7 +55,7 @@ async function buildResponse(detailMonth: string, targetCurrency: string) {
     );
   } catch (error) {
     console.warn(
-      `Stripe through MRR sales-assist export: failed to fetch transactional workspace ids: ${
+      `Stripe through MRR sales-assist export: failed to fetch sales-assist workspace ids: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import {
-  fetchDealStageIdToLabelMap,
-  fetchDealsInStageClosedBetween,
+  fetchSalesAssistDealMatches,
 } from "@/lib/hubspot";
 import {
   queryStripeCustomerIdsByWorkspaceIdsFromBigQuery,
@@ -26,6 +25,7 @@ type UnmatchedReason = "missing_workspace_id" | "no_stripe_customer_mapping";
 
 type UnmatchedDealRow = {
   dealId: string;
+  dealMatchType: "transactional_closed_won" | "closed_lost_selfserve";
   dealName: string;
   closeDateUtc: string;
   workspaceId: string;
@@ -64,23 +64,8 @@ function parsePayload(raw: ApiBody) {
   return { startDate, endDate };
 }
 
-function normalizeStageLabelKey(value: string) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
-}
-
 function normalizeWorkspaceId(value: unknown) {
   return String(value || "").trim().toLowerCase();
-}
-
-function firstNonEmptyProperty(properties: Record<string, unknown>, candidates: string[]) {
-  for (const key of candidates) {
-    const value = String(properties[key] || "").trim();
-    if (value) return value;
-  }
-  return "";
 }
 
 function uniqueStrings(values: string[]) {
@@ -103,26 +88,9 @@ function parseHubspotTimestampToIso(value: unknown) {
   return raw;
 }
 
-async function resolveTransactionalStageIds() {
-  const configured = uniqueStrings(
-    String(process.env.HUBSPOT_TRANSACTIONAL_STAGE_ID || "")
-      .split(",")
-      .map((value) => value.trim()),
-  );
-  if (configured.length) return configured;
-
-  const requestedLabel = normalizeStageLabelKey(
-    String(process.env.HUBSPOT_TRANSACTIONAL_STAGE_LABEL || "Closed Won (Transactional Pipeline)"),
-  );
-  if (!requestedLabel) return [];
-  const stageMap = await fetchDealStageIdToLabelMap();
-  return Array.from(stageMap.entries())
-    .filter(([, label]) => normalizeStageLabelKey(label || "") === requestedLabel)
-    .map(([stageId]) => stageId);
-}
-
 async function buildReport(startDate: string, endDate: string): Promise<ReportPayload> {
-  const stageIds = await resolveTransactionalStageIds();
+  const matches = await fetchSalesAssistDealMatches({ startDate, endDate });
+  const stageIds = uniqueStrings(matches.map((match) => String(match.stageId || "").trim()));
   const workspaceProp = String(process.env.DEAL_WORKSPACE_ID_PROP || "workspace_id").trim() || "workspace_id";
   const workspacePropertyCandidates = uniqueStrings(
     [
@@ -132,48 +100,14 @@ async function buildReport(startDate: string, endDate: string): Promise<ReportPa
       "workspace_id__c",
     ].map((value) => String(value || "").trim()),
   );
-  const dealProperties = uniqueStrings([
-    ...workspacePropertyCandidates,
-    "closedate",
-    "dealname",
-    "hs_primary_associated_company",
-  ]);
-
-  const dealsByStage = await Promise.all(
-    stageIds.map((stageId) =>
-      fetchDealsInStageClosedBetween(
-        dealProperties,
-        stageId,
-        startDate,
-        endDate,
-      ),
-    ),
-  );
-
-  const uniqueDealsById = new Map<string, { id: string; properties?: Record<string, unknown> }>();
-  for (const deals of dealsByStage) {
-    for (const deal of deals || []) {
-      const id = String(deal.id || "").trim();
-      if (!id || uniqueDealsById.has(id)) continue;
-      uniqueDealsById.set(id, {
-        id,
-        properties: (deal.properties || {}) as Record<string, unknown>,
-      });
-    }
-  }
-  const uniqueDeals = Array.from(uniqueDealsById.values());
-
-  const preparedDeals = uniqueDeals.map((deal) => {
-    const properties = deal.properties || {};
-    const workspaceId = normalizeWorkspaceId(firstNonEmptyProperty(properties, workspacePropertyCandidates));
-    return {
-      dealId: deal.id,
-      dealName: String(properties.dealname || "").trim(),
-      closeDateUtc: parseHubspotTimestampToIso(properties.closedate),
-      workspaceId,
-      primaryCompanyId: String(properties.hs_primary_associated_company || "").trim(),
-    };
-  });
+  const preparedDeals = matches.map((match) => ({
+    dealId: String(match.dealId || "").trim(),
+    dealMatchType: match.matchType,
+    dealName: String(match.dealName || "").trim(),
+    closeDateUtc: parseHubspotTimestampToIso(match.closedAtMs),
+    workspaceId: normalizeWorkspaceId(match.workspaceId),
+    primaryCompanyId: String(match.primaryCompanyId || "").trim(),
+  }));
 
   const uniqueWorkspaceIds = uniqueStrings(preparedDeals.map((deal) => deal.workspaceId));
   const mappingPayload = await queryStripeCustomerIdsByWorkspaceIdsFromBigQuery(uniqueWorkspaceIds, STRIPE_OPTIONS);
@@ -196,6 +130,7 @@ async function buildReport(startDate: string, endDate: string): Promise<ReportPa
       missingWorkspaceIdDeals += 1;
       rows.push({
         dealId: deal.dealId,
+        dealMatchType: deal.dealMatchType,
         dealName: deal.dealName,
         closeDateUtc: deal.closeDateUtc,
         workspaceId: "",
@@ -210,6 +145,7 @@ async function buildReport(startDate: string, endDate: string): Promise<ReportPa
       noStripeMappingDeals += 1;
       rows.push({
         dealId: deal.dealId,
+        dealMatchType: deal.dealMatchType,
         dealName: deal.dealName,
         closeDateUtc: deal.closeDateUtc,
         workspaceId: deal.workspaceId,
@@ -257,6 +193,9 @@ export async function POST(req: Request) {
       endDate,
       transactionalStageId: String(process.env.HUBSPOT_TRANSACTIONAL_STAGE_ID || ""),
       transactionalStageLabel: String(process.env.HUBSPOT_TRANSACTIONAL_STAGE_LABEL || ""),
+      transactionalClosedLostStageId: String(process.env.HUBSPOT_TRANSACTIONAL_CLOSED_LOST_STAGE_ID || ""),
+      transactionalClosedLostStageLabel: String(process.env.HUBSPOT_TRANSACTIONAL_CLOSED_LOST_STAGE_LABEL || ""),
+      salesAssistClosedLostReasons: String(process.env.HUBSPOT_SALES_ASSIST_CLOSED_LOST_REASONS || ""),
       dealWorkspaceProp: String(process.env.DEAL_WORKSPACE_ID_PROP || ""),
     })}`;
     const payload = await getOrSetCache(key, CACHE_TTL_MS, () => buildReport(startDate, endDate));
@@ -271,4 +210,3 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: message }, { status });
   }
 }
-

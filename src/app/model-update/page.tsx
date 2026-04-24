@@ -46,6 +46,7 @@ type NewHireRow = {
 
 type UnmatchedTransactionalDealRow = {
   dealId: string;
+  dealMatchType: "transactional_closed_won" | "closed_lost_selfserve";
   dealName: string;
   closeDateUtc: string;
   workspaceId: string;
@@ -217,6 +218,11 @@ function normalizeCustomerIdToken(value: string) {
 function formatUnmatchedReason(reason: UnmatchedTransactionalDealRow["unmatchedReason"]) {
   if (reason === "missing_workspace_id") return "Missing workspace ID on deal";
   return "Workspace ID has no Stripe customer mapping";
+}
+
+function formatDealMatchType(value: UnmatchedTransactionalDealRow["dealMatchType"]) {
+  if (value === "closed_lost_selfserve") return "Closed lost (self-serve reason)";
+  return "Transactional closed won";
 }
 
 function normalizeEventType(value: string) {
@@ -1251,7 +1257,7 @@ export default function ModelUpdatePage() {
       }
       setUnmatchedDealsData(json);
     } catch (e: unknown) {
-      setUnmatchedDealsError(e instanceof Error ? e.message : "Failed to load unmatched transactional deals.");
+      setUnmatchedDealsError(e instanceof Error ? e.message : "Failed to load unmatched sales-assist deals.");
       setUnmatchedDealsData(null);
     } finally {
       setUnmatchedDealsLoading(false);
@@ -1260,13 +1266,14 @@ export default function ModelUpdatePage() {
 
   function downloadUnmatchedDealsCsv() {
     if (!unmatchedDealsData) {
-      setUnmatchedDealsError("Load unmatched transactional deals first.");
+      setUnmatchedDealsError("Load unmatched sales-assist deals first.");
       return;
     }
     setUnmatchedDealsError(null);
     const rows: string[][] = [
       [
         "deal_id",
+        "deal_match_type",
         "deal_name",
         "close_date_utc",
         "workspace_id",
@@ -1275,6 +1282,7 @@ export default function ModelUpdatePage() {
       ],
       ...unmatchedDealsData.rows.map((row) => [
         row.dealId,
+        formatDealMatchType(row.dealMatchType),
         row.dealName,
         row.closeDateUtc,
         row.workspaceId,
@@ -1664,9 +1672,10 @@ export default function ModelUpdatePage() {
       </section>
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-5">
-        <h2 className="stripe-ui__panel-title">Debug: Unmatched Transactional Closed-Won Deals</h2>
+        <h2 className="stripe-ui__panel-title">Debug: Unmatched Sales-Assist Deals</h2>
         <p className="stripe-ui__panel-subtitle">
-          Shows transactional closed-won deals in the selected date range that were not matched to any Stripe customer by workspace ID.
+          Shows sales-assist candidate deals (transactional closed won and closed-lost deals with self-serve reasons)
+          in the selected date range that were not matched to any Stripe customer by workspace ID.
         </p>
         <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", marginBottom: "0.9rem" }}>
           <button
@@ -1695,7 +1704,7 @@ export default function ModelUpdatePage() {
           <>
             <div className="stripe-ui__stats-grid" style={{ marginBottom: "0.9rem" }}>
               <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Total transactional deals</p>
+                <p className="stripe-ui__stat-label">Total sales-assist deals</p>
                 <p className="stripe-ui__stat-value">{formatNumber(unmatchedDealsData.summary.totalTransactionalDeals)}</p>
               </div>
               <div className="stripe-ui__stat">
@@ -1718,10 +1727,11 @@ export default function ModelUpdatePage() {
 
             {unmatchedDealsData.rows.length ? (
               <div className="stripe-ui__table-wrap">
-                <table className="stripe-ui__table" aria-label="Unmatched transactional closed-won deals">
+                <table className="stripe-ui__table" aria-label="Unmatched sales-assist deals">
                   <thead>
                     <tr>
                       <th>Deal ID</th>
+                      <th>Deal type</th>
                       <th>Deal name</th>
                       <th>Close date (UTC)</th>
                       <th>Workspace ID</th>
@@ -1733,6 +1743,7 @@ export default function ModelUpdatePage() {
                     {unmatchedDealsData.rows.map((row) => (
                       <tr key={row.dealId}>
                         <td>{row.dealId}</td>
+                        <td>{formatDealMatchType(row.dealMatchType)}</td>
                         <td>{row.dealName || "—"}</td>
                         <td>{row.closeDateUtc || "—"}</td>
                         <td>{row.workspaceId || "—"}</td>
@@ -1745,7 +1756,7 @@ export default function ModelUpdatePage() {
               </div>
             ) : (
               <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-                No unmatched transactional closed-won deals found for the selected date range.
+                No unmatched sales-assist deals found for the selected date range.
               </p>
             )}
           </>
