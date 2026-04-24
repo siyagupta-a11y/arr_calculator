@@ -416,6 +416,8 @@ function buildClosedLostReasonPropCandidates() {
       [
         configured,
         configured ? (configured.endsWith("__c") ? configured.slice(0, -3) : `${configured}__c`) : "",
+        "loss_reason__c",
+        "loss_reason",
         "closed_lost_reason",
         "closed_lost_reason__c",
         "closedlostreason",
@@ -508,6 +510,8 @@ async function fetchDealsForStageWithWorkspaceAndReasonCandidates(
   closedLostReasonPropCandidates: string[],
   dateRange?: { startDate: string; endDate: string },
 ) {
+  const dealsById = new Map<string, HubspotDeal>();
+  let fetchedAny = false;
   for (const reasonField of closedLostReasonPropCandidates) {
     const deals = await fetchDealsForStageWithWorkspaceCandidates(
       stageId,
@@ -515,9 +519,26 @@ async function fetchDealsForStageWithWorkspaceAndReasonCandidates(
       ["closedate", "dealname", "hs_primary_associated_company", reasonField],
       dateRange,
     );
-    if (deals.length) return deals;
+    fetchedAny = true;
+    for (const deal of deals || []) {
+      const dealId = String(deal.id || "").trim();
+      if (!dealId) continue;
+      const previous = dealsById.get(dealId);
+      if (!previous) {
+        dealsById.set(dealId, deal);
+        continue;
+      }
+      dealsById.set(dealId, {
+        ...previous,
+        properties: {
+          ...(previous.properties || {}),
+          ...(deal.properties || {}),
+        },
+      });
+    }
   }
-  return [];
+  if (!fetchedAny) return [];
+  return Array.from(dealsById.values());
 }
 
 async function fetchSalesAssistDealMatchesInternal(dateRange?: { startDate: string; endDate: string }) {
