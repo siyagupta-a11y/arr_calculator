@@ -68,6 +68,17 @@ type UnmatchedTransactionalDealsResponse = {
   rows: UnmatchedTransactionalDealRow[];
 };
 
+type SalesledAllSubsResponse = {
+  startDate: string;
+  endDate: string;
+  header: string[];
+  rows: string[][];
+  summary: {
+    totalRows: number;
+    monthCount: number;
+  };
+};
+
 type UploadFieldKey =
   | "stripeMrrPerCustomer"
   | "stripeMrrChanges"
@@ -1140,6 +1151,33 @@ export default function ModelUpdatePage() {
     }
   }
 
+  async function downloadSalesledAllSubsCsv() {
+    setTransformError(null);
+    setTransformSuccess(null);
+    try {
+      const res = await fetch("/api/model-update-salesled-all-subs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startDate, endDate }),
+      });
+      const text = await res.text();
+      const json = text ? (JSON.parse(text) as SalesledAllSubsResponse & { error?: string }) : null;
+      if (!res.ok) {
+        throw new Error(json?.error || `Failed to build salesled-all-subs CSV (${res.status})`);
+      }
+      if (!json || !Array.isArray(json.header) || !Array.isArray(json.rows)) {
+        throw new Error("Invalid salesled-all-subs response");
+      }
+      const csvRows = [json.header, ...json.rows];
+      downloadCsv(`salesled-all-subs-${json.startDate}-to-${json.endDate}.csv`, csvRows);
+      setTransformSuccess(
+        `Downloaded salesled-all-subs CSV with ${json.summary.totalRows} rows across ${json.summary.monthCount} months.`,
+      );
+    } catch (e: unknown) {
+      setTransformError(e instanceof Error ? e.message : "Failed to build salesled-all-subs CSV.");
+    }
+  }
+
   async function processMrrChangesAndDownload() {
     setTransformError(null);
     setTransformSuccess(null);
@@ -1407,6 +1445,9 @@ export default function ModelUpdatePage() {
               </button>
               <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={() => void downloadSelfserveAllMergedCsv()}>
                 Download selfserve-all-merged CSV
+              </button>
+              <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={() => void downloadSalesledAllSubsCsv()}>
+                Download salesled-all-subs CSV
               </button>
               <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={() => void processMrrChangesAndDownload()}>
                 Process MRR changes CSV
