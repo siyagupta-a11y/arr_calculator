@@ -39,6 +39,7 @@ export type CombinedAllSubsRow = {
   accountName: string;
   salesAssist: "yes" | "no";
   salesAssistByPeriod?: Record<string, "yes" | "no">;
+  deskEarlyAccessByPeriod?: Record<string, "yes" | "no">;
   stripeKeys: string[];
   matchedStripeKeys: string[];
   hubspotValuesByPeriod: Record<string, number>;
@@ -77,6 +78,7 @@ type HubspotAccountAggregate = {
   stripeKeys: Set<string>;
   matchedStripeKeys: Set<string>;
   matchedStripeWorkspaceIds: Set<string>;
+  deskEarlyAccessByPeriod: Record<string, "yes" | "no">;
   hubspotValuesByPeriod: Record<string, number>;
   stripeValuesByPeriod: Record<string, number>;
   valuesByPeriod: Record<string, number>;
@@ -115,6 +117,17 @@ function normalizeGroupedMatchStrategy(value: string | undefined): "full" | "wor
 
 function round2(value: number) {
   return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function isDeskEarlyAccessRow(row: ReportRow) {
+  const tokens = [
+    String(row.lineItemDescription || ""),
+    String(row.deliveryStage || ""),
+    String(row.dealName || ""),
+  ]
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  return tokens.some((value) => value.includes("desk - early access") || value.includes("desk early access"));
 }
 
 const PLAN_RANK: Record<CombinedAllSubsPlan, number> = {
@@ -414,6 +427,7 @@ function buildHubspotAccountMap(report: ReportResponse) {
         stripeKeys: new Set<string>(),
         matchedStripeKeys: new Set<string>(),
         matchedStripeWorkspaceIds: new Set<string>(),
+        deskEarlyAccessByPeriod: {},
         hubspotValuesByPeriod: {},
         stripeValuesByPeriod: {},
         valuesByPeriod: {},
@@ -431,6 +445,10 @@ function buildHubspotAccountMap(report: ReportResponse) {
       const value = round2(Number(row.valuesByPeriod?.[period.key] || 0));
       entry.hubspotValuesByPeriod[period.key] = round2((entry.hubspotValuesByPeriod[period.key] || 0) + value);
       entry.valuesByPeriod[period.key] = round2((entry.valuesByPeriod[period.key] || 0) + value);
+      entry.deskEarlyAccessByPeriod[period.key] = entry.deskEarlyAccessByPeriod[period.key] || "no";
+      if (value > 0 && isDeskEarlyAccessRow(row)) {
+        entry.deskEarlyAccessByPeriod[period.key] = "yes";
+      }
       if (value > 0) {
         const plan = normalizeHubspotPlan(row.plan);
         entry.hubspotPlansByPeriod[period.key] = betterPlan(entry.hubspotPlansByPeriod[period.key], plan);
@@ -845,6 +863,7 @@ export async function generateCombinedAllSubsReport(
       accountName: account.accountName,
       salesAssist: (latestPeriodKey && salesAssistByPeriod[latestPeriodKey]) || "no",
       salesAssistByPeriod,
+      deskEarlyAccessByPeriod: account.deskEarlyAccessByPeriod,
       stripeKeys: Array.from(account.stripeKeys).sort(),
       matchedStripeKeys: Array.from(account.matchedStripeKeys).sort(),
       hubspotValuesByPeriod: account.hubspotValuesByPeriod,

@@ -232,10 +232,17 @@ function planAtPeriod(
 }
 
 function segmentAtPeriod(row: CombinedAllSubsRow, periodKey: string): TofuSegment {
-  if (row.source === "hubspot_account") return "salesled";
   const assistValue = String(row.salesAssistByPeriod?.[periodKey] || row.salesAssist || "no")
     .trim()
     .toLowerCase();
+  const hasDeskEarlyAccess =
+    String(row.deskEarlyAccessByPeriod?.[periodKey] || "no")
+      .trim()
+      .toLowerCase() === "yes";
+  if (row.source === "hubspot_account") {
+    if (assistValue === "yes" && hasDeskEarlyAccess) return "sales_assist";
+    return "salesled";
+  }
   return assistValue === "yes" ? "sales_assist" : "selfserve";
 }
 
