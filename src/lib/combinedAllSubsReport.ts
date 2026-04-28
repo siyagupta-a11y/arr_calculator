@@ -2,6 +2,7 @@ import {
   fetchCompanyIdsForContactEmails,
   fetchSalesAssistDealMatches,
   fetchDealsInStage,
+  fetchDealStageIdToLabelMap,
 } from "@/lib/hubspot";
 import { generateReport } from "@/lib/report";
 import {
@@ -124,6 +125,26 @@ function isDeskEarlyAccessRow(row: ReportRow) {
     String(row.lineItemDescription || ""),
     String(row.deliveryStage || ""),
     String(row.dealName || ""),
+  ]
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  return tokens.some((value) => value.includes("desk - early access") || value.includes("desk early access"));
+}
+
+function normalizeStageLabelKey(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function isDeskEarlyAccessDealProperties(properties: Record<string, unknown>) {
+  const tokens = [
+    String(properties.dealname || ""),
+    String(properties.delivery_stage || ""),
+    String(properties.delivery_stage__c || ""),
+    String(properties.line_item_description || ""),
+    String(properties.line_item_description__c || ""),
   ]
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
@@ -304,12 +325,35 @@ async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string
     out.get(workspaceId)?.push({ atMs, kind: "on" });
   }
 
-  for (const stageId of salesPipelineStageIds) {
+  let salesPipelineClosedWonStageIds = salesPipelineStageIds;
+  try {
+    const stageIdToLabel = await fetchDealStageIdToLabelMap();
+    const filtered = salesPipelineStageIds.filter((stageId) => {
+      const normalized = normalizeStageLabelKey(String(stageIdToLabel.get(stageId) || ""));
+      return normalized.includes("salespipeline") && normalized.includes("closedwon");
+    });
+    if (filtered.length) salesPipelineClosedWonStageIds = filtered;
+  } catch {
+    // Keep configured INCLUDED_DEALSTAGE ids if stage-label lookup is unavailable.
+  }
+
+  for (const stageId of salesPipelineClosedWonStageIds) {
     let deals: Awaited<ReturnType<typeof fetchDealsInStage>> = [];
     let fetched = false;
     for (const workspaceField of workspacePropCandidates) {
       try {
-        deals = await fetchDealsInStage([workspaceField, "closedate"], stageId);
+        deals = await fetchDealsInStage(
+          [
+            workspaceField,
+            "closedate",
+            "dealname",
+            "delivery_stage",
+            "delivery_stage__c",
+            "line_item_description",
+            "line_item_description__c",
+          ],
+          stageId,
+        );
         fetched = true;
         break;
       } catch (error) {
@@ -321,6 +365,7 @@ async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string
 
     for (const deal of deals || []) {
       const properties = (deal.properties || {}) as Record<string, unknown>;
+      if (isDeskEarlyAccessDealProperties(properties)) continue;
       const workspaceId = normalizeWorkspaceId(
         workspacePropCandidates
           .map((key) => String(properties[key] ?? "").trim())
