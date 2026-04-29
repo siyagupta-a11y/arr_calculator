@@ -130,6 +130,17 @@ function computeSegmentRows(data: CombinedAllSubsResponse | null, segment: Segme
   return out.sort((a, b) => a.customerLabel.localeCompare(b.customerLabel));
 }
 
+function buildPeriodTotals(
+  periods: Array<{ key: string; label: string }>,
+  rows: SegmentRow[],
+) {
+  return periods.map((period) => ({
+    key: period.key,
+    label: period.label,
+    total: round2(rows.reduce((sum, row) => sum + Number(row.valuesByPeriod?.[period.key] || 0), 0)),
+  }));
+}
+
 export default function SegmentArrPage({
   segment,
   title,
@@ -198,12 +209,24 @@ export default function SegmentArrPage({
   const currency = data?.targetCurrency || "USD";
   const periodTotals = useMemo(() => {
     const periods = data?.periods || [];
-    return periods.map((period) => ({
-      key: period.key,
-      label: period.label,
-      total: round2(segmentRows.reduce((sum, row) => sum + Number(row.valuesByPeriod?.[period.key] || 0), 0)),
-    }));
+    return buildPeriodTotals(periods, segmentRows);
   }, [data, segmentRows]);
+  const salesledOnlyRows = useMemo(
+    () => segmentRows.filter((row) => row.sourceLabel === "hubspot"),
+    [segmentRows],
+  );
+  const salesAssistRows = useMemo(
+    () => segmentRows.filter((row) => row.sourceLabel === "stripe_sales_assist"),
+    [segmentRows],
+  );
+  const salesledOnlyTotals = useMemo(() => {
+    const periods = data?.periods || [];
+    return buildPeriodTotals(periods, salesledOnlyRows);
+  }, [data, salesledOnlyRows]);
+  const salesAssistTotals = useMemo(() => {
+    const periods = data?.periods || [];
+    return buildPeriodTotals(periods, salesAssistRows);
+  }, [data, salesAssistRows]);
 
   function exportCsv() {
     if (!data) return;
@@ -351,6 +374,66 @@ export default function SegmentArrPage({
                 </tbody>
               </table>
             </div>
+            {segment === "salesled" ? (
+              <div style={{ marginTop: "1rem", display: "grid", gap: "1rem" }}>
+                <div>
+                  <h3 className="stripe-ui__panel-title" style={{ fontSize: "1rem", marginBottom: "0.4rem" }}>
+                    Sales-led totals (HubSpot cloud contracted)
+                  </h3>
+                  <p className="stripe-ui__panel-subtitle" style={{ marginTop: 0 }}>
+                    {salesledOnlyRows.length} rows.
+                  </p>
+                  <div className="stripe-ui__table-wrap">
+                    <table className="stripe-ui__table">
+                      <thead>
+                        <tr>
+                          {salesledOnlyTotals.map((period) => (
+                            <th key={`salesled-total-head-${period.key}`}>{period.label}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          {salesledOnlyTotals.map((period) => (
+                            <td key={`salesled-total-value-${period.key}`} className="stripe-ui__num">
+                              {formatMoney(period.total, currency)}
+                            </td>
+                          ))}
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                <div>
+                  <h3 className="stripe-ui__panel-title" style={{ fontSize: "1rem", marginBottom: "0.4rem" }}>
+                    Sales-assist totals (Stripe)
+                  </h3>
+                  <p className="stripe-ui__panel-subtitle" style={{ marginTop: 0 }}>
+                    {salesAssistRows.length} rows.
+                  </p>
+                  <div className="stripe-ui__table-wrap">
+                    <table className="stripe-ui__table">
+                      <thead>
+                        <tr>
+                          {salesAssistTotals.map((period) => (
+                            <th key={`salesassist-total-head-${period.key}`}>{period.label}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          {salesAssistTotals.map((period) => (
+                            <td key={`salesassist-total-value-${period.key}`} className="stripe-ui__num">
+                              {formatMoney(period.total, currency)}
+                            </td>
+                          ))}
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </section>
 
           <section className="stripe-ui__panel ui-reveal ui-reveal-3">
