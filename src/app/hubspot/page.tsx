@@ -1547,7 +1547,7 @@ export default function Home() {
   const [filterDealType, setFilterDealType] = useState("all");
   const [filterPlan, setFilterPlan] = useState<HubspotPlan | "all">("all");
   const [currencyDisplay, setCurrencyDisplay] = useState<CurrencyDisplay>("normal");
-  const [arrDisplayScope, setArrDisplayScope] = useState<ArrDisplayScope>("all");
+  const [arrDisplayScope, setArrDisplayScope] = useState<ArrDisplayScope>("cloud");
 
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ReportResponse | null>(null);
