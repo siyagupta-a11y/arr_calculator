@@ -1530,7 +1530,7 @@ function DeltaBarChartCard({ title, subtitle, points, valueAccessor, valueFormat
 export default function Home() {
   const [startDate, setStartDate] = useState("2025-01-01");
   const [endDate, setEndDate] = useState("2025-12-31");
-  const [mode, setMode] = useState<ReportMode>("arr");
+  const [mode, setMode] = useState<ReportMode>("contracted");
   const [grain, setGrain] = useState<Grain>("monthly");
   const [chartGroupBy, setChartGroupBy] = useState<ChartGroupField>("none");
   const [selectedBarGroupKeys, setSelectedBarGroupKeys] = useState<string[]>([]);
