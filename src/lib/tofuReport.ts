@@ -5,6 +5,7 @@ import {
   type CombinedAllSubsPlan,
   type CombinedAllSubsCombineMode,
 } from "@/lib/combinedAllSubsReport";
+import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 
 export type TofuGroupBy = "month" | "plan" | "segment";
 export type TofuSegment = "salesled" | "selfserve" | "sales_assist";
@@ -112,6 +113,11 @@ export type TofuDetailResponse = {
   };
 };
 
+const TOFU_EXPANDED_SOURCE_CACHE_TTL_MS = readTtlMs(
+  "API_TOFU_EXPANDED_SOURCE_CACHE_TTL_MS",
+  10 * 60_000,
+);
+
 const TOFU_DETAIL_METRICS = new Set<TofuDetailMetric>([
   "beginningArr",
   "newArr",
@@ -212,16 +218,22 @@ async function loadExpandedTofuSource(request: TofuRequest): Promise<{
       ? minIsoDateOnly(request.startDate, stableHistoryStartDate)
       : request.startDate;
   const prev = monthBeforeRange(sourceStartDate);
-  const expanded = await generateCombinedAllSubsReport({
+  const expandedSourceRequest = {
     startDate: prev?.startDate || sourceStartDate,
     endDate: request.endDate,
     combineMode: request.combineMode,
-    displayMode: "arr",
+    displayMode: "arr" as const,
     includePlanData: groupBy === "plan",
-    planGrain: "monthly",
-    groupedMatchStrategy: groupBy === "plan" ? "workspace_only" : "full",
+    planGrain: "monthly" as const,
+    groupedMatchStrategy: (groupBy === "plan" ? "workspace_only" : "full") as "full" | "workspace_only",
     includeSalesAssist: groupBy === "segment",
-  });
+  };
+  const expandedCacheKey = `tofu:expanded-source:${stableStringify(expandedSourceRequest)}`;
+  const expanded = await getOrSetCache(
+    expandedCacheKey,
+    TOFU_EXPANDED_SOURCE_CACHE_TTL_MS,
+    () => generateCombinedAllSubsReport(expandedSourceRequest),
+  );
 
   const allPeriods = (expanded.periods || []).map((period) => ({
     key: String(period.key || ""),

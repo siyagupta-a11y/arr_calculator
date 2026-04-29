@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 
 type CombineMode = "grouped" | "simple";
 type TofuGroupBy = "month" | "plan" | "segment";
@@ -115,6 +115,37 @@ const SEGMENT_LABELS: Record<TofuSegment, string> = {
   sales_assist: "Sales assist",
 };
 
+const PLAN_BRIDGE_METRICS: Array<{
+  key: keyof Pick<
+    TofuPlanRow,
+    "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "netPlanChangeArr" | "endingArr"
+  >;
+  label: string;
+}> = [
+  { key: "beginningArr", label: "Beginning ARR" },
+  { key: "newArr", label: "New ARR" },
+  { key: "expansionArr", label: "Expansion ARR" },
+  { key: "contractionArr", label: "Contraction ARR" },
+  { key: "churnArr", label: "Churn ARR" },
+  { key: "netPlanChangeArr", label: "Net Upgrade/Downgrade to Different Plan" },
+  { key: "endingArr", label: "Ending ARR" },
+];
+
+const SEGMENT_BRIDGE_METRICS: Array<{
+  key: keyof Pick<
+    TofuSegmentRow,
+    "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "endingArr"
+  >;
+  label: string;
+}> = [
+  { key: "beginningArr", label: "Beginning ARR" },
+  { key: "newArr", label: "New ARR" },
+  { key: "expansionArr", label: "Expansion ARR" },
+  { key: "contractionArr", label: "Contraction ARR" },
+  { key: "churnArr", label: "Churn ARR" },
+  { key: "endingArr", label: "Ending ARR" },
+];
+
 function defaultDateRange() {
   const end = new Date();
   const start = new Date(end.getFullYear() - 1, end.getMonth(), 1);
@@ -216,6 +247,7 @@ export default function TofuPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailData, setDetailData] = useState<TofuDetailResponse | null>(null);
+  const detailCacheRef = useRef<Map<string, TofuDetailResponse>>(new Map());
 
   async function run() {
     setLoading(true);
@@ -239,6 +271,22 @@ export default function TofuPage() {
   }
 
   async function openDetail(periodKey: string, metric: TofuDetailMetric, segment?: TofuSegment) {
+    const detailKey = JSON.stringify({
+      startDate,
+      endDate,
+      combineMode: effectiveCombineMode,
+      groupBy: effectiveGroupBy,
+      detailPeriodKey: periodKey,
+      detailMetric: metric,
+      detailSegment: segment || "",
+    });
+    const cached = detailCacheRef.current.get(detailKey);
+    if (cached) {
+      setDetailError(null);
+      setDetailData(cached);
+      return;
+    }
+
     setDetailLoading(true);
     setDetailError(null);
     setDetailData(null);
@@ -258,7 +306,9 @@ export default function TofuPage() {
         }),
       });
       const json = await parseApiResponse(res);
-      setDetailData(json as TofuDetailResponse);
+      const payload = json as TofuDetailResponse;
+      detailCacheRef.current.set(detailKey, payload);
+      setDetailData(payload);
     } catch (err: unknown) {
       setDetailData(null);
       setDetailError(err instanceof Error ? err.message : "Unknown error");
@@ -270,110 +320,105 @@ export default function TofuPage() {
   const currency = data?.targetCurrency || "USD";
   const effectiveCombineMode = data?.combineMode || combineMode;
   const effectiveGroupBy = data?.groupBy || groupBy;
-  const rows = data?.rows || [];
-  const planRows = data?.planRows || [];
-  const segmentRows = data?.segmentRows || [];
-  const planPeriodOrder = Array.from(
-    new Map(
-      planRows.map((row) => [row.periodKey, row.periodLabel]),
-    ).entries(),
-  ).map(([key, label]) => ({ key, label }));
-  const segmentPeriodOrder = Array.from(
-    new Map(
-      segmentRows.map((row) => [row.periodKey, row.periodLabel]),
-    ).entries(),
-  ).map(([key, label]) => ({ key, label }));
-  const planBridgeMetrics: Array<{
-    key: keyof Pick<
-      TofuPlanRow,
-      "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "netPlanChangeArr" | "endingArr"
-    >;
-    label: string;
-  }> = [
-    { key: "beginningArr", label: "Beginning ARR" },
-    { key: "newArr", label: "New ARR" },
-    { key: "expansionArr", label: "Expansion ARR" },
-    { key: "contractionArr", label: "Contraction ARR" },
-    { key: "churnArr", label: "Churn ARR" },
-    { key: "netPlanChangeArr", label: "Net Upgrade/Downgrade to Different Plan" },
-    { key: "endingArr", label: "Ending ARR" },
-  ];
-  const segmentBridgeMetrics: Array<{
-    key: keyof Pick<
-      TofuSegmentRow,
-      "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "endingArr"
-    >;
-    label: string;
-  }> = [
-    { key: "beginningArr", label: "Beginning ARR" },
-    { key: "newArr", label: "New ARR" },
-    { key: "expansionArr", label: "Expansion ARR" },
-    { key: "contractionArr", label: "Contraction ARR" },
-    { key: "churnArr", label: "Churn ARR" },
-    { key: "endingArr", label: "Ending ARR" },
-  ];
-  const planBridgeRows = (["enterprise", "managed", "team", "plus", "pay_as_you_go", "free"] as CombinedPlan[])
-    .flatMap((plan) =>
-      planBridgeMetrics.map((metric) => ({
-        plan,
-        metric: metric.label,
-        metricKey: metric.key,
-        valuesByPeriod: Object.fromEntries(
-          planPeriodOrder.map((period) => [
-            period.key,
-            round2(
-              planRows
-                .filter((row) => row.plan === plan && row.periodKey === period.key)
-                .reduce((sum, row) => sum + Number(row[metric.key] || 0), 0),
-            ),
-          ]),
-        ) as Record<string, number>,
-      })),
-    )
-    .filter((row) => planPeriodOrder.some((period) => Math.abs(Number(row.valuesByPeriod[period.key] || 0)) > 1e-9));
-  const segmentBridgeRows = (["salesled", "selfserve", "sales_assist"] as TofuSegment[])
-    .flatMap((segment) =>
-      segmentBridgeMetrics.map((metric) => ({
-        segment,
-        metric: metric.label,
-        metricKey: metric.key,
-        valuesByPeriod: Object.fromEntries(
-          segmentPeriodOrder.map((period) => [
-            period.key,
-            round2(
-              segmentRows
-                .filter((row) => row.segment === segment && row.periodKey === period.key)
-                .reduce((sum, row) => sum + Number(row[metric.key] || 0), 0),
-            ),
-          ]),
-        ) as Record<string, number>,
-      })),
-    )
-    .filter((row) => segmentPeriodOrder.some((period) => Math.abs(Number(row.valuesByPeriod[period.key] || 0)) > 1e-9));
-  const latestEndingArr =
-    effectiveGroupBy === "plan"
-      ? (() => {
-          if (!planRows.length) return 0;
-          const latestKey = planRows[planRows.length - 1].periodKey;
-          return round2(
-            planRows
-              .filter((row) => row.periodKey === latestKey)
-              .reduce((sum, row) => sum + Number(row.endingArr || 0), 0),
-          );
-        })()
-      : effectiveGroupBy === "segment"
-        ? (() => {
-            if (!segmentRows.length) return 0;
-            const latestKey = segmentRows[segmentRows.length - 1].periodKey;
-            return round2(
-              segmentRows
-                .filter((row) => row.periodKey === latestKey)
-                .reduce((sum, row) => sum + Number(row.endingArr || 0), 0),
-            );
-          })()
-        : rows.length
-          ? rows[rows.length - 1].endingArr
-          : 0;
+  const rows = useMemo(() => data?.rows || [], [data?.rows]);
+  const planRows = useMemo(() => data?.planRows || [], [data?.planRows]);
+  const segmentRows = useMemo(() => data?.segmentRows || [], [data?.segmentRows]);
+  const planPeriodOrder = useMemo(
+    () =>
+      Array.from(
+        new Map(
+          planRows.map((row) => [row.periodKey, row.periodLabel]),
+        ).entries(),
+      ).map(([key, label]) => ({ key, label })),
+    [planRows],
+  );
+  const segmentPeriodOrder = useMemo(
+    () =>
+      Array.from(
+        new Map(
+          segmentRows.map((row) => [row.periodKey, row.periodLabel]),
+        ).entries(),
+      ).map(([key, label]) => ({ key, label })),
+    [segmentRows],
+  );
+  const planBridgeRows = useMemo(() => {
+    const planBridgeTotals = new Map<string, number>();
+    for (const row of planRows) {
+      for (const metric of PLAN_BRIDGE_METRICS) {
+        const key = `${row.plan}::${metric.key}::${row.periodKey}`;
+        planBridgeTotals.set(key, round2((planBridgeTotals.get(key) || 0) + Number(row[metric.key] || 0)));
+      }
+    }
+    return (["enterprise", "managed", "team", "plus", "pay_as_you_go", "free"] as CombinedPlan[])
+      .flatMap((plan) =>
+        PLAN_BRIDGE_METRICS.map((metric) => ({
+          plan,
+          metric: metric.label,
+          metricKey: metric.key,
+          valuesByPeriod: Object.fromEntries(
+            planPeriodOrder.map((period) => [
+              period.key,
+              round2(planBridgeTotals.get(`${plan}::${metric.key}::${period.key}`) || 0),
+            ]),
+          ) as Record<string, number>,
+        })),
+      )
+      .filter((row) =>
+        planPeriodOrder.some((period) => Math.abs(Number(row.valuesByPeriod[period.key] || 0)) > 1e-9),
+      );
+  }, [planRows, planPeriodOrder]);
+
+  const segmentBridgeRows = useMemo(() => {
+    const segmentBridgeTotals = new Map<string, number>();
+    for (const row of segmentRows) {
+      for (const metric of SEGMENT_BRIDGE_METRICS) {
+        const key = `${row.segment}::${metric.key}::${row.periodKey}`;
+        segmentBridgeTotals.set(
+          key,
+          round2((segmentBridgeTotals.get(key) || 0) + Number(row[metric.key] || 0)),
+        );
+      }
+    }
+    return (["salesled", "selfserve", "sales_assist"] as TofuSegment[])
+      .flatMap((segment) =>
+        SEGMENT_BRIDGE_METRICS.map((metric) => ({
+          segment,
+          metric: metric.label,
+          metricKey: metric.key,
+          valuesByPeriod: Object.fromEntries(
+            segmentPeriodOrder.map((period) => [
+              period.key,
+              round2(segmentBridgeTotals.get(`${segment}::${metric.key}::${period.key}`) || 0),
+            ]),
+          ) as Record<string, number>,
+        })),
+      )
+      .filter((row) =>
+        segmentPeriodOrder.some((period) => Math.abs(Number(row.valuesByPeriod[period.key] || 0)) > 1e-9),
+      );
+  }, [segmentRows, segmentPeriodOrder]);
+
+  const latestEndingArr = useMemo(() => {
+    if (effectiveGroupBy === "plan") {
+      if (!planRows.length) return 0;
+      const latestKey = planRows[planRows.length - 1].periodKey;
+      return round2(
+        planRows
+          .filter((row) => row.periodKey === latestKey)
+          .reduce((sum, row) => sum + Number(row.endingArr || 0), 0),
+      );
+    }
+    if (effectiveGroupBy === "segment") {
+      if (!segmentRows.length) return 0;
+      const latestKey = segmentRows[segmentRows.length - 1].periodKey;
+      return round2(
+        segmentRows
+          .filter((row) => row.periodKey === latestKey)
+          .reduce((sum, row) => sum + Number(row.endingArr || 0), 0),
+      );
+    }
+    return rows.length ? rows[rows.length - 1].endingArr : 0;
+  }, [effectiveGroupBy, planRows, segmentRows, rows]);
 
   function exportDetailCsv(payload: TofuDetailResponse) {
     const filename = `tofu-detail-${payload.detailMetric}-${payload.detailPeriodKey}-${payload.combineMode}.csv`;

@@ -338,11 +338,11 @@ async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string
   }
 
   for (const stageId of salesPipelineClosedWonStageIds) {
-    let deals: Awaited<ReturnType<typeof fetchDealsInStage>> = [];
-    let fetched = false;
+    const dealsById = new Map<string, Awaited<ReturnType<typeof fetchDealsInStage>>[number]>();
+    let fetchedAny = false;
     for (const workspaceField of workspacePropCandidates) {
       try {
-        deals = await fetchDealsInStage(
+        const deals = await fetchDealsInStage(
           [
             workspaceField,
             "closedate",
@@ -354,16 +354,31 @@ async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string
           ],
           stageId,
         );
-        fetched = true;
-        break;
+        fetchedAny = true;
+        for (const deal of deals || []) {
+          const dealId = String(deal.id || "").trim();
+          if (!dealId) continue;
+          const previous = dealsById.get(dealId);
+          if (!previous) {
+            dealsById.set(dealId, deal);
+            continue;
+          }
+          dealsById.set(dealId, {
+            ...previous,
+            properties: {
+              ...(previous.properties || {}),
+              ...(deal.properties || {}),
+            },
+          });
+        }
       } catch (error) {
         if (isUnknownPropertyError(error)) continue;
         throw error;
       }
     }
-    if (!fetched) continue;
+    if (!fetchedAny) continue;
 
-    for (const deal of deals || []) {
+    for (const deal of dealsById.values()) {
       const properties = (deal.properties || {}) as Record<string, unknown>;
       if (isDeskEarlyAccessDealProperties(properties)) continue;
       const workspaceId = normalizeWorkspaceId(

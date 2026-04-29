@@ -11,7 +11,7 @@ import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseC
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-const CACHE_TTL_MS = readTtlMs("API_TOFU_REPORT_CACHE_TTL_MS", 60_000);
+const CACHE_TTL_MS = readTtlMs("API_TOFU_REPORT_CACHE_TTL_MS", 5 * 60_000);
 
 type TofuApiRequest = Partial<TofuRequest> & {
   detailPeriodKey?: string;
