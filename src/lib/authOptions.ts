@@ -1,7 +1,5 @@
-import NextAuth, { type DefaultSession } from "next-auth";
-import Google from "next-auth/providers/google";
-
-type AppRole = "admin" | "viewer";
+import type { NextAuthOptions } from "next-auth";
+import GoogleProvider from "next-auth/providers/google";
 
 function parseCsvLowerSet(raw: string | undefined) {
   return new Set(
@@ -21,11 +19,22 @@ function extractEmailDomain(email: string) {
 const allowedDomains = parseCsvLowerSet(process.env.AUTH_ALLOWED_DOMAINS);
 const adminEmails = parseCsvLowerSet(process.env.AUTH_ADMIN_EMAILS);
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
+const googleClientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
+const googleClientSecret = String(process.env.GOOGLE_CLIENT_SECRET || "").trim();
+const authSecret = String(process.env.AUTH_SECRET || "").trim();
+
+if (!googleClientId || !googleClientSecret || !authSecret) {
+  throw new Error(
+    "Missing SSO env vars. Required: AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET",
+  );
+}
+
+export const authOptions: NextAuthOptions = {
+  secret: authSecret,
   providers: [
-    Google({
-      clientId: process.env.GOOGLE_CLIENT_ID || "",
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
+    GoogleProvider({
+      clientId: googleClientId,
+      clientSecret: googleClientSecret,
       authorization: {
         params: {
           prompt: "select_account",
@@ -66,25 +75,12 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     },
     async session({ session, token }) {
       const role = String(token.role || "viewer") === "admin" ? "admin" : "viewer";
-      session.user = {
-        ...session.user,
+      (session.user as { role?: string } | undefined) = {
+        ...(session.user || {}),
         role,
       };
       return session;
     },
   },
-});
+};
 
-declare module "next-auth" {
-  interface Session {
-    user: {
-      role: AppRole;
-    } & DefaultSession["user"];
-  }
-}
-
-declare module "next-auth/jwt" {
-  interface JWT {
-    role?: AppRole;
-  }
-}

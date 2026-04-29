@@ -1,6 +1,3 @@
-import { auth, signIn } from "@/auth";
-import { redirect } from "next/navigation";
-
 type LoginSearchParams = Promise<{
   callbackUrl?: string;
   error?: string;
@@ -23,14 +20,10 @@ function loginErrorMessage(error: string) {
 }
 
 export default async function LoginPage(props: { searchParams: LoginSearchParams }) {
-  const session = await auth();
   const searchParams = await props.searchParams;
   const callbackUrl = safeCallbackUrl(searchParams.callbackUrl);
   const errorText = loginErrorMessage(String(searchParams.error || ""));
-
-  if (session?.user?.email) {
-    redirect(callbackUrl);
-  }
+  const signInHref = `/api/auth/signin/google?callbackUrl=${encodeURIComponent(callbackUrl)}`;
 
   return (
     <main
@@ -73,29 +66,26 @@ export default async function LoginPage(props: { searchParams: LoginSearchParams
           </p>
         ) : null}
 
-        <form
-          action={async () => {
-            "use server";
-            await signIn("google", { redirectTo: callbackUrl });
+        <a
+          href={signInHref}
+          style={{
+            display: "inline-block",
+            width: "100%",
+            boxSizing: "border-box",
+            textAlign: "center",
+            textDecoration: "none",
+            borderRadius: 10,
+            border: "1px solid #d1d5db",
+            background: "#111827",
+            color: "#ffffff",
+            padding: "10px 12px",
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: "pointer",
           }}
         >
-          <button
-            type="submit"
-            style={{
-              width: "100%",
-              borderRadius: 10,
-              border: "1px solid #d1d5db",
-              background: "#111827",
-              color: "#ffffff",
-              padding: "10px 12px",
-              fontSize: 14,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            Sign in with Google
-          </button>
-        </form>
+          Sign in with Google
+        </a>
       </section>
     </main>
   );

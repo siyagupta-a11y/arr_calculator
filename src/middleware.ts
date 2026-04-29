@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { auth } from "@/auth";
+import { getToken } from "next-auth/jwt";
 
 const PUBLIC_PAGE_PATHS = new Set<string>(["/login", "/privacy-policy", "/eula"]);
 const PUBLIC_API_PATH_PREFIXES = [
@@ -22,12 +22,17 @@ function isPublicApiPath(pathname: string) {
   );
 }
 
-export default auth((request: NextRequest & { auth?: unknown }) => {
+export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
   if (PUBLIC_PAGE_PATHS.has(pathname)) return NextResponse.next();
   if (pathname.startsWith("/api/") && isPublicApiPath(pathname)) return NextResponse.next();
-  if (request.auth) return NextResponse.next();
+
+  const token = await getToken({
+    req: request,
+    secret: process.env.AUTH_SECRET,
+  });
+  if (token) return NextResponse.next();
 
   if (pathname.startsWith("/api/")) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -37,7 +42,7 @@ export default auth((request: NextRequest & { auth?: unknown }) => {
   const callbackUrl = `${request.nextUrl.pathname}${request.nextUrl.search}`;
   loginUrl.searchParams.set("callbackUrl", callbackUrl);
   return NextResponse.redirect(loginUrl);
-});
+}
 
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml).*)"],
