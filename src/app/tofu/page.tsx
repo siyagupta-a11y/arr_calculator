@@ -806,10 +806,10 @@ export default function TofuPage() {
                     </thead>
                     <tbody>
                       {planBridgeRows.map((row) => {
-                        const metricIdx = planBridgeMetrics.findIndex((metric) => metric.key === row.metricKey);
+                        const metricIdx = PLAN_BRIDGE_METRICS.findIndex((metric) => metric.key === row.metricKey);
                         return (
                           <tr key={`plan-bridge:${row.plan}:${row.metricKey}`}>
-                            {metricIdx === 0 ? <td rowSpan={planBridgeMetrics.length}>{PLAN_LABELS[row.plan] || row.plan}</td> : null}
+                            {metricIdx === 0 ? <td rowSpan={PLAN_BRIDGE_METRICS.length}>{PLAN_LABELS[row.plan] || row.plan}</td> : null}
                             <td>{row.metric}</td>
                             {planPeriodOrder.map((period) => (
                               <td
@@ -844,11 +844,11 @@ export default function TofuPage() {
                   </thead>
                   <tbody>
                     {segmentBridgeRows.map((row) => {
-                      const metricIdx = segmentBridgeMetrics.findIndex((metric) => metric.key === row.metricKey);
+                      const metricIdx = SEGMENT_BRIDGE_METRICS.findIndex((metric) => metric.key === row.metricKey);
                       return (
                         <tr key={`segment-bridge:${row.segment}:${row.metricKey}`}>
                           {metricIdx === 0 ? (
-                            <td rowSpan={segmentBridgeMetrics.length}>{SEGMENT_LABELS[row.segment] || row.segment}</td>
+                            <td rowSpan={SEGMENT_BRIDGE_METRICS.length}>{SEGMENT_LABELS[row.segment] || row.segment}</td>
                           ) : null}
                           <td>{row.metric}</td>
                           {segmentPeriodOrder.map((period) => (
