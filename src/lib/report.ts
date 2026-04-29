@@ -102,6 +102,23 @@ function inferDealPlan(liIds: string[], lineItemsById: Map<string, HubspotLineIt
   return "other";
 }
 
+function isDeskEarlyAccessLineItem(properties: Record<string, unknown>) {
+  const searchable = [properties.name, properties.hs_product_name, properties.description, properties.hs_sku]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean)
+    .join(" ");
+  if (!searchable) return false;
+  return searchable.includes("desk - early access") || searchable.includes("desk early access");
+}
+
+function dealHasDeskEarlyAccessLineItem(liIds: string[], lineItemsById: Map<string, HubspotLineItem>) {
+  for (const liId of liIds) {
+    const properties = (lineItemsById.get(liId)?.properties || {}) as Record<string, unknown>;
+    if (isDeskEarlyAccessLineItem(properties)) return true;
+  }
+  return false;
+}
+
 function isCompanyScopesError(err: unknown) {
   if (!(err instanceof Error)) return false;
   const msg = err.message || "";
@@ -455,10 +472,20 @@ export async function generateReport(
 
   const lineItemsById = await batchReadLineItems(Array.from(allLineItemIds), LI_PROPS);
 
+  const includedDealMeta = dealMeta.filter((meta) => {
+    const liIds = dealToLineItemIds.get(meta.dealId) || [];
+    if (!liIds.length) return false;
+    return !dealHasDeskEarlyAccessLineItem(liIds, lineItemsById);
+  });
+
+  if (!includedDealMeta.length) {
+    return { periods: outputPeriods, totalsByPeriod: [], rows: [] };
+  }
+
   const fxByKey = new Map<string, Awaited<ReturnType<typeof getMonthlyAverageFxRateForCloseMonth>>>();
   const fxPromises = new Map<string, Promise<Awaited<ReturnType<typeof getMonthlyAverageFxRateForCloseMonth>>>>();
 
-  for (const m of dealMeta) {
+  for (const m of includedDealMeta) {
     const monthKey = m.closeDate
       ? `${m.closeDate.getFullYear()}-${String(m.closeDate.getMonth() + 1).padStart(2, "0")}`
       : "current";
@@ -476,7 +503,7 @@ export async function generateReport(
 
   const rows: ReportRow[] = [];
 
-  for (const m of dealMeta) {
+  for (const m of includedDealMeta) {
     const {
       dealId,
       dealName,
