@@ -62,6 +62,10 @@ const GROUP_FIELD_LABELS: Record<StripeGroupField, string> = {
   lineItemDescriptionPrefix: "Line Description (before ' - ')",
 };
 
+export function clearStripeReportMemoryCache() {
+  REPORT_CACHE.clear();
+}
+
 function formatDayKey(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }

@@ -30,6 +30,20 @@ const COMPANY_CACHE = new Map<string, CacheEntry<HubspotCompany>>();
 const CONTACT_CACHE = new Map<string, CacheEntry<HubspotContact>>();
 const LINE_ITEM_CACHE = new Map<string, CacheEntry<HubspotLineItem>>();
 
+export function clearHubspotMemoryCache() {
+  DEALS_CACHE.clear();
+  DEAL_STAGE_LABELS_CACHE.clear();
+  DEAL_STAGE_WORKSPACE_IDS_CACHE.clear();
+  SALES_ASSIST_DEALS_CACHE.clear();
+  DEAL_ASSOC_CACHE.clear();
+  COMPANY_CONTACT_ASSOC_CACHE.clear();
+  CONTACT_COMPANY_ASSOC_CACHE.clear();
+  CONTACT_EMAIL_SEARCH_CACHE.clear();
+  COMPANY_CACHE.clear();
+  CONTACT_CACHE.clear();
+  LINE_ITEM_CACHE.clear();
+}
+
 export type SalesAssistDealMatchType = "transactional_closed_won" | "closed_lost_selfserve";
 
 export type SalesAssistDealMatch = {
