@@ -30,6 +30,11 @@ type BambooEmploymentStatusTimelineRow = {
   status: string;
 };
 
+type BambooTimelineValueRow = {
+  effectiveDate: Date;
+  value: string;
+};
+
 export type BambooHeadcountSnapshot = {
   count: number;
   employeeNames: string[];
@@ -45,6 +50,37 @@ export type BambooNewHireRow = {
   name: string;
   startDate: string;
   salary: string;
+};
+
+export type BambooTerminationRow = {
+  department: string;
+  jobTitle: string;
+  name: string;
+  terminationDate: string;
+};
+
+export type BambooSalaryChangeRow = {
+  department: string;
+  jobTitle: string;
+  name: string;
+  effectiveDate: string;
+  oldSalary: string;
+  newSalary: string;
+};
+
+export type BambooDepartmentChangeRow = {
+  jobTitle: string;
+  name: string;
+  effectiveDate: string;
+  oldDepartment: string;
+  newDepartment: string;
+};
+
+export type BambooWorkforceChanges = {
+  newHires: BambooNewHireRow[];
+  terminations: BambooTerminationRow[];
+  salaryChanges: BambooSalaryChangeRow[];
+  departmentChanges: BambooDepartmentChangeRow[];
 };
 
 function clean(value: string | undefined | null) {
@@ -73,6 +109,20 @@ function parseIsoDateOnly(value: string) {
     return null;
   }
   return date;
+}
+
+function parseTimelineDate(value: string) {
+  const exact = parseIsoDateOnly(value);
+  if (exact) return exact;
+  const prefix = /^(\d{4}-\d{2}-\d{2})/.exec(clean(value));
+  if (prefix) {
+    const parsed = parseIsoDateOnly(prefix[1]);
+    if (parsed) return parsed;
+  }
+  const fallback = Date.parse(clean(value));
+  if (!Number.isFinite(fallback)) return null;
+  const d = new Date(fallback);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 }
 
 function toIsoDateOnly(date: Date) {
@@ -299,6 +349,23 @@ function parseEmploymentStatusTimelineRows(payload: unknown): BambooEmploymentSt
     const effectiveDate = parseIsoDateOnly(effectiveDateText);
     if (!effectiveDate || !status) continue;
     parsed.push({ effectiveDate, status });
+  }
+  parsed.sort((a, b) => a.effectiveDate.getTime() - b.effectiveDate.getTime());
+  return parsed;
+}
+
+function parseTimelineValueRows(payload: unknown, valueKeys: string[]): BambooTimelineValueRow[] {
+  const rows = extractRows(payload);
+  const parsed: BambooTimelineValueRow[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const obj = row as Record<string, unknown>;
+    const effectiveDateText = firstString(obj, ["date", "effectiveDate", "effective_date", "startDate", "start_date"]);
+    const effectiveDate = parseTimelineDate(effectiveDateText);
+    if (!effectiveDate) continue;
+    const value = firstString(obj, valueKeys);
+    if (!value) continue;
+    parsed.push({ effectiveDate, value });
   }
   parsed.sort((a, b) => a.effectiveDate.getTime() - b.effectiveDate.getTime());
   return parsed;
@@ -550,6 +617,52 @@ async function fetchEmploymentStatusTimelineByEmployee(
   return out;
 }
 
+async function fetchTimelineValuesByEmployee(
+  employeeIds: string[],
+  tableCandidates: string[],
+  valueKeys: string[],
+): Promise<Map<string, BambooTimelineValueRow[]>> {
+  const { subdomain, authHeader, baseUrls } = resolveBambooClientConfig();
+  const out = new Map<string, BambooTimelineValueRow[]>();
+  const uniqueIds = Array.from(
+    new Set(
+      employeeIds
+        .map((id) => clean(id))
+        .filter(Boolean),
+    ),
+  );
+  const uniqueTables = Array.from(
+    new Set(
+      tableCandidates
+        .map((value) => clean(value))
+        .filter(Boolean),
+    ),
+  );
+  await mapWithConcurrency(uniqueIds, 8, async (employeeId) => {
+    let best: BambooTimelineValueRow[] = [];
+    for (const baseUrl of baseUrls) {
+      for (const tableName of uniqueTables) {
+        const url = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/employees/${encodeURIComponent(employeeId)}/tables/${encodeURIComponent(tableName)}?format=JSON`;
+        try {
+          const payload = await fetchJsonWithRetry(url, {
+            method: "GET",
+            headers: {
+              Authorization: authHeader,
+              Accept: "application/json",
+            },
+          });
+          const parsed = parseTimelineValueRows(payload, valueKeys);
+          if (parsed.length > best.length) best = parsed;
+        } catch {
+          // Try next source.
+        }
+      }
+    }
+    out.set(employeeId, best);
+  });
+  return out;
+}
+
 export async function queryBambooHrFullTimeHeadcountByDate(dates: string[]): Promise<Map<string, number>> {
   const snapshots = await queryBambooHrFullTimeRosterByDate(dates);
   const out = new Map<string, number>();
@@ -650,4 +763,159 @@ export async function queryBambooHrNewHiresByDateRange(startDate: string, endDat
     return a.name.localeCompare(b.name);
   });
   return hires;
+}
+
+function normalizeSalaryLike(value: string) {
+  return clean(value)
+    .replace(/[$,\s]/g, "")
+    .replace(/\((.*)\)/, "-$1");
+}
+
+function salaryValuesEqual(left: string, right: string) {
+  const leftRaw = normalizeSalaryLike(left);
+  const rightRaw = normalizeSalaryLike(right);
+  const leftNumber = Number(leftRaw);
+  const rightNumber = Number(rightRaw);
+  if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+    return Math.abs(leftNumber - rightNumber) <= 1e-9;
+  }
+  return normalizeLoose(left) === normalizeLoose(right);
+}
+
+function textValuesEqual(left: string, right: string) {
+  return normalizeLoose(left) === normalizeLoose(right);
+}
+
+export async function queryBambooHrWorkforceChangesByDateRange(
+  startDate: string,
+  endDate: string,
+): Promise<BambooWorkforceChanges> {
+  const start = parseIsoDateOnly(startDate);
+  const end = parseIsoDateOnly(endDate);
+  if (!start || !end) throw new Error("Invalid startDate/endDate");
+  if (end.getTime() < start.getTime()) throw new Error("endDate must be >= startDate");
+
+  const employees = await fetchEmployeeRoster();
+  const employeesById = new Map<string, BambooEmployeeRecord>();
+  for (const employee of employees) {
+    const employeeId = clean(employee.id);
+    if (!employeeId) continue;
+    employeesById.set(employeeId, employee);
+  }
+
+  const employeeIds = Array.from(employeesById.keys());
+  const salaryTimelineByEmployee = await fetchTimelineValuesByEmployee(
+    employeeIds,
+    ["compensation", "salary", "payRate", "payrate"],
+    [
+      "payRate",
+      "pay rate",
+      "salary",
+      "annualSalary",
+      "annual salary",
+      "baseSalary",
+      "base salary",
+      "amount",
+      "value",
+      "compensation",
+    ],
+  );
+  const departmentTimelineByEmployee = await fetchTimelineValuesByEmployee(
+    employeeIds,
+    ["jobInfo", "jobinfo", "jobInformation", "jobinformation", "employmentInfo", "employmentinfo"],
+    ["department", "dept", "division", "team", "value"],
+  );
+
+  const newHires: BambooNewHireRow[] = [];
+  for (const employee of employeesById.values()) {
+    const hireDate = parseIsoDateOnly(employee.hireDate);
+    if (!hireDate) continue;
+    if (hireDate.getTime() < start.getTime() || hireDate.getTime() > end.getTime()) continue;
+    newHires.push({
+      department: clean(employee.department),
+      jobTitle: clean(employee.jobTitle),
+      type: "",
+      qc: isBasedInQuebec(employee),
+      greySkyBaseline: "",
+      categorization: "",
+      name: employeeDisplayName(employee),
+      startDate: toIsoDateOnly(hireDate),
+      salary: clean(employee.salary),
+    });
+  }
+
+  const terminations: BambooTerminationRow[] = [];
+  for (const employee of employeesById.values()) {
+    const terminationDate = parseIsoDateOnly(employee.terminationDate);
+    if (!terminationDate) continue;
+    if (terminationDate.getTime() < start.getTime() || terminationDate.getTime() > end.getTime()) continue;
+    terminations.push({
+      department: clean(employee.department),
+      jobTitle: clean(employee.jobTitle),
+      name: employeeDisplayName(employee),
+      terminationDate: toIsoDateOnly(terminationDate),
+    });
+  }
+
+  const salaryChanges: BambooSalaryChangeRow[] = [];
+  for (const [employeeId, timeline] of salaryTimelineByEmployee.entries()) {
+    const employee = employeesById.get(employeeId);
+    if (!employee || timeline.length < 2) continue;
+    for (let i = 1; i < timeline.length; i += 1) {
+      const previous = timeline[i - 1];
+      const current = timeline[i];
+      if (current.effectiveDate.getTime() < start.getTime() || current.effectiveDate.getTime() > end.getTime()) continue;
+      if (salaryValuesEqual(previous.value, current.value)) continue;
+      salaryChanges.push({
+        department: clean(employee.department),
+        jobTitle: clean(employee.jobTitle),
+        name: employeeDisplayName(employee),
+        effectiveDate: toIsoDateOnly(current.effectiveDate),
+        oldSalary: clean(previous.value),
+        newSalary: clean(current.value),
+      });
+    }
+  }
+
+  const departmentChanges: BambooDepartmentChangeRow[] = [];
+  for (const [employeeId, timeline] of departmentTimelineByEmployee.entries()) {
+    const employee = employeesById.get(employeeId);
+    if (!employee || timeline.length < 2) continue;
+    for (let i = 1; i < timeline.length; i += 1) {
+      const previous = timeline[i - 1];
+      const current = timeline[i];
+      if (current.effectiveDate.getTime() < start.getTime() || current.effectiveDate.getTime() > end.getTime()) continue;
+      if (textValuesEqual(previous.value, current.value)) continue;
+      departmentChanges.push({
+        jobTitle: clean(employee.jobTitle),
+        name: employeeDisplayName(employee),
+        effectiveDate: toIsoDateOnly(current.effectiveDate),
+        oldDepartment: clean(previous.value),
+        newDepartment: clean(current.value),
+      });
+    }
+  }
+
+  const sortByDateThenName = <T extends { name: string; effectiveDate?: string; terminationDate?: string; startDate?: string }>(
+    rows: T[],
+  ) => {
+    rows.sort((a, b) => {
+      const aDate = a.effectiveDate || a.terminationDate || a.startDate || "";
+      const bDate = b.effectiveDate || b.terminationDate || b.startDate || "";
+      if (aDate !== bDate) return aDate.localeCompare(bDate);
+      return a.name.localeCompare(b.name);
+    });
+  };
+
+  sortByDateThenName(newHires);
+  sortByDateThenName(terminations);
+  sortByDateThenName(salaryChanges);
+  sortByDateThenName(departmentChanges);
+
+  return {
+    newHires,
+    terminations,
+    salaryChanges,
+    departmentChanges,
+  };
 }

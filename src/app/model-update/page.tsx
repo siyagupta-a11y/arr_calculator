@@ -44,6 +44,30 @@ type NewHireRow = {
   salary: string;
 };
 
+type TerminationRow = {
+  department: string;
+  jobTitle: string;
+  name: string;
+  terminationDate: string;
+};
+
+type SalaryChangeRow = {
+  department: string;
+  jobTitle: string;
+  name: string;
+  effectiveDate: string;
+  oldSalary: string;
+  newSalary: string;
+};
+
+type DepartmentChangeRow = {
+  jobTitle: string;
+  name: string;
+  effectiveDate: string;
+  oldDepartment: string;
+  newDepartment: string;
+};
+
 type UnmatchedTransactionalDealRow = {
   dealId: string;
   dealMatchType: "transactional_closed_won" | "closed_lost_selfserve";
@@ -629,6 +653,25 @@ const NEW_HIRES_COLUMNS = [
   "salary",
 ] as const;
 
+const TERMINATIONS_COLUMNS = ["Department", "Job Title", "Name", "Termination Date"] as const;
+
+const SALARY_CHANGES_COLUMNS = [
+  "Department",
+  "Job Title",
+  "Name",
+  "Effective Date",
+  "Old Salary",
+  "New Salary",
+] as const;
+
+const DEPARTMENT_CHANGES_COLUMNS = [
+  "Job Title",
+  "Name",
+  "Effective Date",
+  "Old Department",
+  "New Department",
+] as const;
+
 function newHiresToCsvRows(rows: NewHireRow[]) {
   const out: string[][] = [Array.from(NEW_HIRES_COLUMNS)];
   for (const row of rows) {
@@ -974,6 +1017,9 @@ export default function ModelUpdatePage() {
   const [transformSuccess, setTransformSuccess] = useState<string | null>(null);
   const [mrrChangesTotals, setMrrChangesTotals] = useState<MrrChangeTypeTotals | null>(null);
   const [newHires, setNewHires] = useState<NewHireRow[]>([]);
+  const [terminations, setTerminations] = useState<TerminationRow[]>([]);
+  const [salaryChanges, setSalaryChanges] = useState<SalaryChangeRow[]>([]);
+  const [departmentChanges, setDepartmentChanges] = useState<DepartmentChangeRow[]>([]);
   const [newHiresLoading, setNewHiresLoading] = useState(false);
   const [newHiresError, setNewHiresError] = useState<string | null>(null);
   const [unmatchedDealsLoading, setUnmatchedDealsLoading] = useState(false);
@@ -1213,15 +1259,28 @@ export default function ModelUpdatePage() {
         body: JSON.stringify({ startDate, endDate }),
       });
       const text = await res.text();
-      const json = text ? (JSON.parse(text) as { rows?: NewHireRow[]; error?: string }) : {};
+      const json = text
+        ? (JSON.parse(text) as {
+            newHires?: NewHireRow[];
+            terminations?: TerminationRow[];
+            salaryChanges?: SalaryChangeRow[];
+            departmentChanges?: DepartmentChangeRow[];
+            error?: string;
+          })
+        : {};
       if (!res.ok) {
-        throw new Error(json.error || `Failed to load new hires (${res.status})`);
+        throw new Error(json.error || `Failed to load workforce changes (${res.status})`);
       }
-      const rows = Array.isArray(json.rows) ? json.rows : [];
-      setNewHires(rows);
+      setNewHires(Array.isArray(json.newHires) ? json.newHires : []);
+      setTerminations(Array.isArray(json.terminations) ? json.terminations : []);
+      setSalaryChanges(Array.isArray(json.salaryChanges) ? json.salaryChanges : []);
+      setDepartmentChanges(Array.isArray(json.departmentChanges) ? json.departmentChanges : []);
     } catch (e: unknown) {
-      setNewHiresError(e instanceof Error ? e.message : "Failed to load new hires.");
+      setNewHiresError(e instanceof Error ? e.message : "Failed to load workforce changes.");
       setNewHires([]);
+      setTerminations([]);
+      setSalaryChanges([]);
+      setDepartmentChanges([]);
     } finally {
       setNewHiresLoading(false);
     }
@@ -1503,11 +1562,11 @@ export default function ModelUpdatePage() {
       <section className="stripe-ui__panel ui-reveal ui-reveal-3">
         <h2 className="stripe-ui__panel-title">New Hires (BambooHR)</h2>
         <p className="stripe-ui__panel-subtitle">
-          Loads hires with start date inside the selected range, and exports in the required finance template columns.
+          Loads hires, terminations, salary changes, and department changes inside the selected date range.
         </p>
         <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", marginBottom: "0.9rem" }}>
           <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={() => void loadNewHires()} disabled={newHiresLoading}>
-            {newHiresLoading ? "Loading..." : "Load New Hires"}
+            {newHiresLoading ? "Loading..." : "Load Workforce Changes"}
           </button>
           <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={downloadNewHiresCsv} disabled={!newHires.length}>
             Download New Hires CSV
@@ -1544,6 +1603,96 @@ export default function ModelUpdatePage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        ) : null}
+
+        {terminations.length ? (
+          <div style={{ marginTop: "1rem" }}>
+            <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.6rem", fontSize: "1rem" }}>
+              Terminations (BambooHR)
+            </h3>
+            <div className="stripe-ui__table-wrap">
+              <table className="stripe-ui__table" aria-label="Terminations">
+                <thead>
+                  <tr>
+                    {TERMINATIONS_COLUMNS.map((column) => (
+                      <th key={column}>{column}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {terminations.map((row, idx) => (
+                    <tr key={`${row.name}-${row.terminationDate}-${idx}`}>
+                      <td>{row.department}</td>
+                      <td>{row.jobTitle}</td>
+                      <td>{row.name}</td>
+                      <td>{row.terminationDate}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : null}
+
+        {salaryChanges.length ? (
+          <div style={{ marginTop: "1rem" }}>
+            <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.6rem", fontSize: "1rem" }}>
+              Salary Changes (BambooHR)
+            </h3>
+            <div className="stripe-ui__table-wrap">
+              <table className="stripe-ui__table" aria-label="Salary changes">
+                <thead>
+                  <tr>
+                    {SALARY_CHANGES_COLUMNS.map((column) => (
+                      <th key={column}>{column}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {salaryChanges.map((row, idx) => (
+                    <tr key={`${row.name}-${row.effectiveDate}-${idx}`}>
+                      <td>{row.department}</td>
+                      <td>{row.jobTitle}</td>
+                      <td>{row.name}</td>
+                      <td>{row.effectiveDate}</td>
+                      <td>{row.oldSalary}</td>
+                      <td>{row.newSalary}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : null}
+
+        {departmentChanges.length ? (
+          <div style={{ marginTop: "1rem" }}>
+            <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.6rem", fontSize: "1rem" }}>
+              Department Changes (BambooHR)
+            </h3>
+            <div className="stripe-ui__table-wrap">
+              <table className="stripe-ui__table" aria-label="Department changes">
+                <thead>
+                  <tr>
+                    {DEPARTMENT_CHANGES_COLUMNS.map((column) => (
+                      <th key={column}>{column}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {departmentChanges.map((row, idx) => (
+                    <tr key={`${row.name}-${row.effectiveDate}-${idx}`}>
+                      <td>{row.jobTitle}</td>
+                      <td>{row.name}</td>
+                      <td>{row.effectiveDate}</td>
+                      <td>{row.oldDepartment}</td>
+                      <td>{row.newDepartment}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         ) : null}
       </section>
@@ -1726,34 +1875,41 @@ export default function ModelUpdatePage() {
             </div>
 
             {unmatchedDealsData.rows.length ? (
-              <div className="stripe-ui__table-wrap">
-                <table className="stripe-ui__table" aria-label="Unmatched sales-assist deals">
-                  <thead>
-                    <tr>
-                      <th>Deal ID</th>
-                      <th>Deal type</th>
-                      <th>Deal name</th>
-                      <th>Close date (UTC)</th>
-                      <th>Workspace ID</th>
-                      <th>Primary company ID</th>
-                      <th>Reason</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {unmatchedDealsData.rows.map((row) => (
-                      <tr key={row.dealId}>
-                        <td>{row.dealId}</td>
-                        <td>{formatDealMatchType(row.dealMatchType)}</td>
-                        <td>{row.dealName || "—"}</td>
-                        <td>{row.closeDateUtc || "—"}</td>
-                        <td>{row.workspaceId || "—"}</td>
-                        <td>{row.primaryCompanyId || "—"}</td>
-                        <td>{formatUnmatchedReason(row.unmatchedReason)}</td>
+              <>
+                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.55rem" }}>
+                  <button className="stripe-ui__btn stripe-ui__btn--secondary" onClick={downloadUnmatchedDealsCsv}>
+                    Download table CSV
+                  </button>
+                </div>
+                <div className="stripe-ui__table-wrap">
+                  <table className="stripe-ui__table" aria-label="Unmatched sales-assist deals">
+                    <thead>
+                      <tr>
+                        <th>Deal ID</th>
+                        <th>Deal type</th>
+                        <th>Deal name</th>
+                        <th>Close date (UTC)</th>
+                        <th>Workspace ID</th>
+                        <th>Primary company ID</th>
+                        <th>Reason</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {unmatchedDealsData.rows.map((row) => (
+                        <tr key={row.dealId}>
+                          <td>{row.dealId}</td>
+                          <td>{formatDealMatchType(row.dealMatchType)}</td>
+                          <td>{row.dealName || "—"}</td>
+                          <td>{row.closeDateUtc || "—"}</td>
+                          <td>{row.workspaceId || "—"}</td>
+                          <td>{row.primaryCompanyId || "—"}</td>
+                          <td>{formatUnmatchedReason(row.unmatchedReason)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             ) : (
               <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
                 No unmatched sales-assist deals found for the selected date range.

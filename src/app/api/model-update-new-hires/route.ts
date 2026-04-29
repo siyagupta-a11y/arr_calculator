@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { queryBambooHrNewHiresByDateRange } from "@/lib/bamboohr";
+import { queryBambooHrWorkforceChangesByDateRange } from "@/lib/bamboohr";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
@@ -35,11 +35,11 @@ export async function POST(req: Request) {
     const { startDate, endDate } = parsePayload(body);
 
     const key = `api:model-update-new-hires:${stableStringify({ startDate, endDate })}`;
-    const rows = await getOrSetCache(key, CACHE_TTL_MS, () => queryBambooHrNewHiresByDateRange(startDate, endDate));
+    const result = await getOrSetCache(key, CACHE_TTL_MS, () => queryBambooHrWorkforceChangesByDateRange(startDate, endDate));
     return NextResponse.json({
       startDate,
       endDate,
-      rows,
+      ...result,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -51,4 +51,3 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: message }, { status });
   }
 }
-
