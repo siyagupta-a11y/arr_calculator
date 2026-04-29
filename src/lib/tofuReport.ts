@@ -235,11 +235,8 @@ function segmentAtPeriod(row: CombinedAllSubsRow, periodKey: string): TofuSegmen
   const assistValue = String(row.salesAssistByPeriod?.[periodKey] || row.salesAssist || "no")
     .trim()
     .toLowerCase();
-  const hasDeskEarlyAccessAnyPeriod = Object.values(row.deskEarlyAccessByPeriod || {}).some(
-    (value) => String(value || "").trim().toLowerCase() === "yes",
-  );
   if (row.source === "hubspot_account") {
-    if (assistValue === "yes" && hasDeskEarlyAccessAnyPeriod) return "sales_assist";
+    if (assistValue === "yes") return "sales_assist";
     return "salesled";
   }
   return assistValue === "yes" ? "sales_assist" : "selfserve";
