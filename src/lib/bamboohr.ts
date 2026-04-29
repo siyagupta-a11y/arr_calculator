@@ -35,6 +35,8 @@ type BambooTimelineValueRow = {
   value: string;
 };
 
+type BambooTimelineRowsByEmployee = Map<string, BambooTimelineValueRow[]>;
+
 export type BambooHeadcountSnapshot = {
   count: number;
   employeeNames: string[];
@@ -354,21 +356,27 @@ function parseEmploymentStatusTimelineRows(payload: unknown): BambooEmploymentSt
   return parsed;
 }
 
-function parseTimelineValueRows(payload: unknown, valueKeys: string[]): BambooTimelineValueRow[] {
+function parseTimelineValueRowsByEmployee(payload: unknown, valueKeys: string[]): BambooTimelineRowsByEmployee {
   const rows = extractRows(payload);
-  const parsed: BambooTimelineValueRow[] = [];
+  const out: BambooTimelineRowsByEmployee = new Map();
   for (const row of rows) {
     if (!row || typeof row !== "object") continue;
     const obj = row as Record<string, unknown>;
+    const employeeId = firstString(obj, ["employeeId", "employeeID", "employee_id", "employee id"]);
+    if (!employeeId) continue;
     const effectiveDateText = firstString(obj, ["date", "effectiveDate", "effective_date", "startDate", "start_date"]);
     const effectiveDate = parseTimelineDate(effectiveDateText);
     if (!effectiveDate) continue;
     const value = firstString(obj, valueKeys);
     if (!value) continue;
-    parsed.push({ effectiveDate, value });
+    const normalizedEmployeeId = clean(employeeId);
+    if (!out.has(normalizedEmployeeId)) out.set(normalizedEmployeeId, []);
+    out.get(normalizedEmployeeId)?.push({ effectiveDate, value });
   }
-  parsed.sort((a, b) => a.effectiveDate.getTime() - b.effectiveDate.getTime());
-  return parsed;
+  for (const timeline of out.values()) {
+    timeline.sort((a, b) => a.effectiveDate.getTime() - b.effectiveDate.getTime());
+  }
+  return out;
 }
 
 function pickEmploymentStatusAsOf(
@@ -617,20 +625,11 @@ async function fetchEmploymentStatusTimelineByEmployee(
   return out;
 }
 
-async function fetchTimelineValuesByEmployee(
-  employeeIds: string[],
+async function fetchTimelineValuesForAllEmployees(
   tableCandidates: string[],
   valueKeys: string[],
-): Promise<Map<string, BambooTimelineValueRow[]>> {
+): Promise<BambooTimelineRowsByEmployee> {
   const { subdomain, authHeader, baseUrls } = resolveBambooClientConfig();
-  const out = new Map<string, BambooTimelineValueRow[]>();
-  const uniqueIds = Array.from(
-    new Set(
-      employeeIds
-        .map((id) => clean(id))
-        .filter(Boolean),
-    ),
-  );
   const uniqueTables = Array.from(
     new Set(
       tableCandidates
@@ -638,29 +637,24 @@ async function fetchTimelineValuesByEmployee(
         .filter(Boolean),
     ),
   );
-  await mapWithConcurrency(uniqueIds, 8, async (employeeId) => {
-    let best: BambooTimelineValueRow[] = [];
-    for (const baseUrl of baseUrls) {
-      for (const tableName of uniqueTables) {
-        const url = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/employees/${encodeURIComponent(employeeId)}/tables/${encodeURIComponent(tableName)}?format=JSON`;
-        try {
-          const payload = await fetchJsonWithRetry(url, {
-            method: "GET",
-            headers: {
-              Authorization: authHeader,
-              Accept: "application/json",
-            },
-          });
-          const parsed = parseTimelineValueRows(payload, valueKeys);
-          if (parsed.length > best.length) best = parsed;
-        } catch {
-          // Try next source.
-        }
+  for (const baseUrl of baseUrls) {
+    for (const tableName of uniqueTables) {
+      const url = `${baseUrl}/api/gateway.php/${encodeURIComponent(subdomain)}/v1/employees/all/tables/${encodeURIComponent(tableName)}?format=JSON`;
+      try {
+        const payload = await fetchJsonWithRetry(url, {
+          method: "GET",
+          headers: {
+            Authorization: authHeader,
+            Accept: "application/json",
+          },
+        });
+        return parseTimelineValueRowsByEmployee(payload, valueKeys);
+      } catch {
+        // Try next table/base URL.
       }
     }
-    out.set(employeeId, best);
-  });
-  return out;
+  }
+  return new Map();
 }
 
 export async function queryBambooHrFullTimeHeadcountByDate(dates: string[]): Promise<Map<string, number>> {
@@ -803,9 +797,7 @@ export async function queryBambooHrWorkforceChangesByDateRange(
     employeesById.set(employeeId, employee);
   }
 
-  const employeeIds = Array.from(employeesById.keys());
-  const salaryTimelineByEmployee = await fetchTimelineValuesByEmployee(
-    employeeIds,
+  const salaryTimelineByEmployee = await fetchTimelineValuesForAllEmployees(
     ["compensation", "salary", "payRate", "payrate"],
     [
       "payRate",
@@ -820,8 +812,7 @@ export async function queryBambooHrWorkforceChangesByDateRange(
       "compensation",
     ],
   );
-  const departmentTimelineByEmployee = await fetchTimelineValuesByEmployee(
-    employeeIds,
+  const departmentTimelineByEmployee = await fetchTimelineValuesForAllEmployees(
     ["jobInfo", "jobinfo", "jobInformation", "jobinformation", "employmentInfo", "employmentinfo"],
     ["department", "dept", "division", "team", "value"],
   );
