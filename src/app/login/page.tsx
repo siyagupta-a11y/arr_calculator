@@ -1,3 +1,5 @@
+import GoogleSignInButton from "./GoogleSignInButton";
+
 type LoginSearchParams = Promise<{
   callbackUrl?: string;
   error?: string;
@@ -23,7 +25,6 @@ export default async function LoginPage(props: { searchParams: LoginSearchParams
   const searchParams = await props.searchParams;
   const callbackUrl = safeCallbackUrl(searchParams.callbackUrl);
   const errorText = loginErrorMessage(String(searchParams.error || ""));
-  const signInHref = `/api/auth/signin/google?callbackUrl=${encodeURIComponent(callbackUrl)}`;
 
   return (
     <main
@@ -66,28 +67,8 @@ export default async function LoginPage(props: { searchParams: LoginSearchParams
           </p>
         ) : null}
 
-        <a
-          href={signInHref}
-          style={{
-            display: "inline-block",
-            width: "100%",
-            boxSizing: "border-box",
-            textAlign: "center",
-            textDecoration: "none",
-            borderRadius: 10,
-            border: "1px solid #d1d5db",
-            background: "#111827",
-            color: "#ffffff",
-            padding: "10px 12px",
-            fontSize: 14,
-            fontWeight: 600,
-            cursor: "pointer",
-          }}
-        >
-          Sign in with Google
-        </a>
+        <GoogleSignInButton callbackUrl={callbackUrl} />
       </section>
     </main>
   );
 }
-
