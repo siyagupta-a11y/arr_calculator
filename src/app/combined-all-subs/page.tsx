@@ -427,6 +427,12 @@ export default function CombinedAllSubsPage() {
             <Link href="/model-update" className="stripe-ui__hero-link">
               Open Model Update
             </Link>
+            <Link href="/salesled" className="stripe-ui__hero-link">
+              Open Sales-led
+            </Link>
+            <Link href="/selfserve" className="stripe-ui__hero-link">
+              Open Self Serve
+            </Link>
             <Link href="/access-control" className="stripe-ui__hero-link">
               Open Access Control
             </Link>

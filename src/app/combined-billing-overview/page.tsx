@@ -3127,6 +3127,12 @@ export default function CombinedBillingOverviewPage() {
             <Link href="/ndr-gdr" className="stripe-ui__hero-link">
               Open NDR/GDR
             </Link>
+            <Link href="/salesled" className="stripe-ui__hero-link">
+              Open Sales-led
+            </Link>
+            <Link href="/selfserve" className="stripe-ui__hero-link">
+              Open Self Serve
+            </Link>
           </div>
         </div>
       </section>
