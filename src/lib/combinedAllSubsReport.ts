@@ -79,6 +79,7 @@ type HubspotAccountAggregate = {
   accountId: string;
   accountName: string;
   companyIds: Set<string>;
+  hubspotWorkspaceIds: Set<string>;
   stripeKeys: Set<string>;
   matchedStripeKeys: Set<string>;
   matchedStripeWorkspaceIds: Set<string>;
@@ -643,6 +644,7 @@ function buildHubspotAccountMap(report: ReportResponse) {
         accountId: rawAccountId,
         accountName: String(row.accountName || "").trim(),
         companyIds: new Set<string>(),
+        hubspotWorkspaceIds: new Set<string>(),
         stripeKeys: new Set<string>(),
         matchedStripeKeys: new Set<string>(),
         matchedStripeWorkspaceIds: new Set<string>(),
@@ -659,6 +661,9 @@ function buildHubspotAccountMap(report: ReportResponse) {
     const entry = accounts.get(key)!;
     if (!entry.accountId && rawAccountId) entry.accountId = rawAccountId;
     if (!entry.accountName && row.accountName) entry.accountName = String(row.accountName || "").trim();
+    if (String(row.workspaceId || "").trim()) {
+      entry.hubspotWorkspaceIds.add(normalizeWorkspaceId(String(row.workspaceId || "")));
+    }
 
     for (const period of periods) {
       const value = round2(Number(row.valuesByPeriod?.[period.key] || 0));
@@ -1072,7 +1077,10 @@ export async function generateCombinedAllSubsReport(
   const rows: CombinedAllSubsRow[] = [];
   for (const account of accounts.values()) {
     const salesAssistByPeriod = buildSalesAssistByPeriodForWorkspaceSet(
-      account.matchedStripeWorkspaceIds,
+      new Set<string>([
+        ...Array.from(account.hubspotWorkspaceIds),
+        ...Array.from(account.matchedStripeWorkspaceIds),
+      ]),
       periods,
       salesAssistByWorkspaceMonth,
     );
