@@ -3,7 +3,10 @@ import {
   fetchSalesAssistDealMatches,
   fetchDealsInStage,
   fetchDealStageIdToLabelMap,
+  fetchLineItemIdsForDeals,
+  batchReadLineItems,
 } from "@/lib/hubspot";
+import { LI_PROPS } from "@/lib/logic";
 import { generateReport } from "@/lib/report";
 import {
   queryStripeThroughMrrCustomerArrFromBigQuery,
@@ -120,6 +123,15 @@ function round2(value: number) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+function isDeskTaggedValue(value: string) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return (
+    normalized.includes("desk - early access") ||
+    normalized.includes("desk early access") ||
+    /\bdesk\b/.test(normalized)
+  );
+}
+
 function isDeskEarlyAccessRow(row: ReportRow) {
   const tokens = [
     String(row.lineItemDescription || ""),
@@ -128,7 +140,7 @@ function isDeskEarlyAccessRow(row: ReportRow) {
   ]
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
-  return tokens.some((value) => value.includes("desk - early access") || value.includes("desk early access"));
+  return tokens.some((value) => isDeskTaggedValue(value));
 }
 
 function normalizeStageLabelKey(value: string) {
@@ -138,17 +150,36 @@ function normalizeStageLabelKey(value: string) {
     .replace(/[^a-z0-9]/g, "");
 }
 
-function isDeskEarlyAccessDealProperties(properties: Record<string, unknown>) {
+function isDeskTaggedLineItemProperties(properties: Record<string, unknown>) {
   const tokens = [
-    String(properties.dealname || ""),
-    String(properties.delivery_stage || ""),
-    String(properties.delivery_stage__c || ""),
-    String(properties.line_item_description || ""),
-    String(properties.line_item_description__c || ""),
+    String(properties.name || ""),
+    String(properties.description || ""),
+    String(properties.hs_product_name || ""),
+    String(properties.hs_sku || ""),
   ]
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
-  return tokens.some((value) => value.includes("desk - early access") || value.includes("desk early access"));
+  return tokens.some((value) => isDeskTaggedValue(value));
+}
+
+async function buildDeskTaggedDealIdSet(dealIds: string[]) {
+  const dealToLineItemIds = await fetchLineItemIdsForDeals(dealIds);
+  const allLineItemIds = Array.from(
+    new Set(dealToLineItemIds.flatMap((entry) => entry.ids || []).filter(Boolean)),
+  );
+  if (!allLineItemIds.length) return new Set<string>();
+
+  const lineItemsById = await batchReadLineItems(allLineItemIds, LI_PROPS);
+  const out = new Set<string>();
+  for (const entry of dealToLineItemIds) {
+    for (const lineItemId of entry.ids || []) {
+      const properties = (lineItemsById.get(lineItemId)?.properties || {}) as Record<string, unknown>;
+      if (!isDeskTaggedLineItemProperties(properties)) continue;
+      out.add(String(entry.dealId || "").trim());
+      break;
+    }
+  }
+  return out;
 }
 
 const PLAN_RANK: Record<CombinedAllSubsPlan, number> = {
@@ -381,10 +412,11 @@ async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string
       }
     }
     if (!fetchedAny) continue;
+    const deskTaggedDealIds = await buildDeskTaggedDealIdSet(Array.from(dealsById.keys()));
 
     for (const deal of dealsById.values()) {
       const properties = (deal.properties || {}) as Record<string, unknown>;
-      if (isDeskEarlyAccessDealProperties(properties)) continue;
+      if (deskTaggedDealIds.has(String(deal.id || "").trim())) continue;
       const workspaceId = normalizeWorkspaceId(
         workspacePropCandidates
           .map((key) => String(properties[key] ?? "").trim())
@@ -487,10 +519,11 @@ async function loadSalesAssistCompanyOffEventsByCompanyId(): Promise<Map<string,
       }
     }
     if (!fetchedAny) continue;
+    const deskTaggedDealIds = await buildDeskTaggedDealIdSet(Array.from(dealsById.keys()));
 
     for (const deal of dealsById.values()) {
       const properties = (deal.properties || {}) as Record<string, unknown>;
-      if (isDeskEarlyAccessDealProperties(properties)) continue;
+      if (deskTaggedDealIds.has(String(deal.id || "").trim())) continue;
       const companyId = String(properties.hs_primary_associated_company || "").trim();
       if (!companyId) continue;
       const atMs = parseHubspotTimestampMs(properties.closedate);
