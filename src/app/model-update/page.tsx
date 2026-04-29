@@ -297,6 +297,26 @@ function downloadCsv(filename: string, rows: string[][]) {
   URL.revokeObjectURL(url);
 }
 
+function summarizeNonJsonResponse(text: string) {
+  const collapsed = String(text || "").replace(/\s+/g, " ").trim();
+  return collapsed.slice(0, 180);
+}
+
+async function readJsonOrThrow<T>(res: Response, contextLabel: string): Promise<T> {
+  const text = await res.text();
+  if (!text) return {} as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const looksHtml = /<!doctype html|<html/i.test(text);
+    const summary = summarizeNonJsonResponse(text);
+    const hint = looksHtml
+      ? "Received HTML instead of JSON (likely auth redirect or server error page)."
+      : "Received non-JSON response from server.";
+    throw new Error(`${contextLabel} failed (${res.status}). ${hint}${summary ? ` Response: ${summary}` : ""}`);
+  }
+}
+
 function roundTo(value: number, digits = 6) {
   const factor = 10 ** digits;
   return Math.round((Number(value) || 0) * factor) / factor;
@@ -1098,18 +1118,12 @@ export default function ModelUpdatePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ startDate, endDate }),
       });
-      const text = await res.text();
-      let json: unknown = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
-      }
+      const json = await readJsonOrThrow<unknown>(res, "Analytics request");
       if (!res.ok) {
         if (json && typeof json === "object" && "error" in json) {
           throw new Error(String((json as { error?: unknown }).error || "Analytics request failed"));
         }
-        throw new Error(text || `HTTP ${res.status}`);
+        throw new Error(`Analytics request failed (${res.status})`);
       }
       if (!json || typeof json !== "object") throw new Error("Invalid analytics response");
       setAnalyticsData(json as AnalyticsResponse);
@@ -1164,8 +1178,10 @@ export default function ModelUpdatePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspaceIds }),
       });
-      const text = await res.text();
-      const json = text ? (JSON.parse(text) as { customerIds?: string[]; error?: string }) : {};
+      const json = await readJsonOrThrow<{ customerIds?: string[]; error?: string }>(
+        res,
+        "Sales-assist customer mapping request",
+      );
       if (!res.ok) {
         throw new Error(json.error || `Failed to map workspace IDs (${res.status})`);
       }
@@ -1212,8 +1228,10 @@ export default function ModelUpdatePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ startDate, endDate }),
       });
-      const text = await res.text();
-      const json = text ? (JSON.parse(text) as SalesledAllSubsResponse & { error?: string }) : null;
+      const json = await readJsonOrThrow<SalesledAllSubsResponse & { error?: string }>(
+        res,
+        "Salesled all-subs request",
+      );
       if (!res.ok) {
         throw new Error(json?.error || `Failed to build salesled-all-subs CSV (${res.status})`);
       }
@@ -1258,16 +1276,13 @@ export default function ModelUpdatePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ startDate, endDate }),
       });
-      const text = await res.text();
-      const json = text
-        ? (JSON.parse(text) as {
-            newHires?: NewHireRow[];
-            terminations?: TerminationRow[];
-            salaryChanges?: SalaryChangeRow[];
-            departmentChanges?: DepartmentChangeRow[];
-            error?: string;
-          })
-        : {};
+      const json = await readJsonOrThrow<{
+        newHires?: NewHireRow[];
+        terminations?: TerminationRow[];
+        salaryChanges?: SalaryChangeRow[];
+        departmentChanges?: DepartmentChangeRow[];
+        error?: string;
+      }>(res, "Workforce changes request");
       if (!res.ok) {
         throw new Error(json.error || `Failed to load workforce changes (${res.status})`);
       }
@@ -1304,10 +1319,10 @@ export default function ModelUpdatePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ startDate, endDate }),
       });
-      const text = await res.text();
-      const json = text
-        ? (JSON.parse(text) as UnmatchedTransactionalDealsResponse & { error?: string })
-        : null;
+      const json = await readJsonOrThrow<UnmatchedTransactionalDealsResponse & { error?: string }>(
+        res,
+        "Unmatched transactional deals request",
+      );
       if (!res.ok) {
         throw new Error(json?.error || `Failed to load debug deals (${res.status})`);
       }
