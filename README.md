@@ -328,6 +328,14 @@ HubSpot:
 - `HUBSPOT_CURRENT_ARR_FIELD` (optional)
 - `HUBSPOT_ARR_SYNC_DATE_FIELD` (optional)
 
+Authentication (Google SSO):
+
+- `AUTH_SECRET` (required for Auth.js session signing)
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `AUTH_ALLOWED_DOMAINS` (comma-separated company domains, e.g. `botpress.com,example.com`)
+- `AUTH_ADMIN_EMAILS` (optional comma-separated admin email allowlist)
+
 Stripe:
 
 - `STRIPE_SECRET_KEY`
