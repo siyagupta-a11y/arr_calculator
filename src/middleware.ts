@@ -15,11 +15,17 @@ const PUBLIC_API_PATH_PREFIXES = [
   "/api/stripe-bigquery-refresh",
   "/api/hubspot-current-metrics-sync",
 ];
+const ADMIN_PAGE_PATH_PREFIXES = ["/model-update"];
+const ADMIN_API_PATH_PREFIXES = ["/api/model-update"];
 
 function isPublicApiPath(pathname: string) {
   return PUBLIC_API_PATH_PREFIXES.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
   );
+}
+
+function matchesAnyPrefix(pathname: string, prefixes: string[]) {
+  return prefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
 export async function middleware(request: NextRequest) {
@@ -32,16 +38,30 @@ export async function middleware(request: NextRequest) {
     req: request,
     secret: process.env.AUTH_SECRET,
   });
-  if (token) return NextResponse.next();
+  if (!token) {
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  if (pathname.startsWith("/api/")) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const loginUrl = new URL("/login", request.nextUrl.origin);
+    const callbackUrl = `${request.nextUrl.pathname}${request.nextUrl.search}`;
+    loginUrl.searchParams.set("callbackUrl", callbackUrl);
+    return NextResponse.redirect(loginUrl);
   }
 
-  const loginUrl = new URL("/login", request.nextUrl.origin);
-  const callbackUrl = `${request.nextUrl.pathname}${request.nextUrl.search}`;
-  loginUrl.searchParams.set("callbackUrl", callbackUrl);
-  return NextResponse.redirect(loginUrl);
+  const isAdmin = String(token.role || "viewer").trim().toLowerCase() === "admin";
+  const requiresAdminPage = matchesAnyPrefix(pathname, ADMIN_PAGE_PATH_PREFIXES);
+  const requiresAdminApi = pathname.startsWith("/api/")
+    ? matchesAnyPrefix(pathname, ADMIN_API_PATH_PREFIXES)
+    : false;
+  if ((requiresAdminPage || requiresAdminApi) && !isAdmin) {
+    if (requiresAdminApi) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    return NextResponse.redirect(new URL("/combined-all-subs?error=admin_required", request.nextUrl.origin));
+  }
+
+  return NextResponse.next();
 }
 
 export const config = {

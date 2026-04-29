@@ -68,6 +68,12 @@ type QuickBooksCacAccountDefaultResponse = {
   updatedAt: number;
 };
 
+type AuthSessionResponse = {
+  user?: {
+    role?: string;
+  };
+};
+
 type CacPoint = {
   key: string;
   label: string;
@@ -2565,6 +2571,7 @@ export default function CombinedBillingOverviewPage() {
   } | null>(null);
   const [downloadingAiSpendBreakdownCsv, setDownloadingAiSpendBreakdownCsv] = useState(false);
   const [aiSpendBreakdownCsvError, setAiSpendBreakdownCsvError] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
   const runRequestRef = useRef(0);
 
   const fetchApiGetJson = useCallback(async <T,>(url: string): Promise<T> => {
@@ -2600,6 +2607,16 @@ export default function CombinedBillingOverviewPage() {
     }
   }, [fetchApiGetJson]);
 
+  const loadAuthRole = useCallback(async () => {
+    try {
+      const payload = await fetchApiGetJson<AuthSessionResponse>("/api/auth/session");
+      const role = String(payload?.user?.role || "viewer").trim().toLowerCase();
+      setIsAdmin(role === "admin");
+    } catch {
+      setIsAdmin(false);
+    }
+  }, [fetchApiGetJson]);
+
   const loadCacExpenseAccounts = useCallback(async () => {
     setCacExpenseAccountsLoading(true);
     setCacExpenseAccountsError("");
@@ -2624,10 +2641,15 @@ export default function CombinedBillingOverviewPage() {
   }, [fetchApiGetJson]);
 
   useEffect(() => {
+    void loadAuthRole();
+  }, [loadAuthRole]);
+
+  useEffect(() => {
     void loadCacDefaultSelection();
   }, [loadCacDefaultSelection]);
 
   const toggleCacAccountMenu = useCallback((target: CacFxProvider) => {
+    if (!isAdmin) return;
     setCacAccountMenuTarget((prev) => {
       const next = prev === target ? null : target;
       if (next && !cacExpenseAccountsLoaded && !cacExpenseAccountsLoading) {
@@ -2636,7 +2658,7 @@ export default function CombinedBillingOverviewPage() {
       return next;
     });
     setCacDefaultSaveStatus("");
-  }, [cacExpenseAccountsLoaded, cacExpenseAccountsLoading, loadCacExpenseAccounts]);
+  }, [cacExpenseAccountsLoaded, cacExpenseAccountsLoading, isAdmin, loadCacExpenseAccounts]);
 
   const toggleCacAccountSelection = useCallback((accountId: string) => {
     const id = normalizeEntityId(String(accountId || ""));
@@ -2665,6 +2687,7 @@ export default function CombinedBillingOverviewPage() {
   }, []);
 
   const saveCacDefaultSelection = useCallback(async () => {
+    if (!isAdmin) return;
     setSavingCacDefaultSelection(true);
     setCacExpenseAccountsError("");
     setCacDefaultSaveStatus("");
@@ -2702,7 +2725,7 @@ export default function CombinedBillingOverviewPage() {
     } finally {
       setSavingCacDefaultSelection(false);
     }
-  }, [selectedCacAccountIds]);
+  }, [isAdmin, selectedCacAccountIds]);
 
   async function run() {
     const requestId = runRequestRef.current + 1;
@@ -3533,6 +3556,7 @@ export default function CombinedBillingOverviewPage() {
               points={cacPoints}
               currency={currency}
               includeAccountBreakdownInCsv={true}
+              showAccountSelector={isAdmin}
               expenseAccounts={cacExpenseAccounts}
               selectedAccountIds={selectedCacAccountIds}
               runLoading={loading || cacLoading}

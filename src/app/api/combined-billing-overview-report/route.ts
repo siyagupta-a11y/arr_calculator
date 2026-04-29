@@ -1,4 +1,6 @@
+import { getToken } from "next-auth/jwt";
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 import { generateReport } from "@/lib/report";
 import type { ReportResponse, ReportRow } from "@/lib/types";
 import { fetchDealsInStageClosedBetween } from "@/lib/hubspot";
@@ -22,6 +24,7 @@ import {
 } from "@/lib/combinedAllSubsReport";
 import { queryBambooHrFullTimeRosterByDate } from "@/lib/bamboohr";
 import { fetchQuickBooksSalesMarketingCostsByMonth } from "@/lib/quickbooks";
+import { loadQuickBooksCacDefaultSelection } from "@/lib/quickbooksCacDefaultsStore";
 import {
   getMonthlyAverageCurrencyLayerFxRateForCloseMonth,
   getMonthlyAverageFxRateForCloseMonth,
@@ -2299,26 +2302,58 @@ async function buildCombinedBillingOverview(
   };
 }
 
-async function validateAndRun(body: Partial<RequestBody>) {
+async function resolveCacSelectionForRole(payload: ReturnType<typeof parsePayload>, isAdmin: boolean) {
+  if (isAdmin) {
+    return {
+      accountIds: payload.accountIds,
+      accountNames: payload.accountNames,
+    };
+  }
+  try {
+    const defaults = await loadQuickBooksCacDefaultSelection();
+    return {
+      accountIds: normalizeIdList(defaults.selectedAccountIds || []),
+      accountNames: [] as string[],
+    };
+  } catch {
+    return {
+      accountIds: [] as string[],
+      accountNames: [] as string[],
+    };
+  }
+}
+
+async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
   const payload = parsePayload(body);
-  const key = `api:combined-billing-overview:${stableStringify(payload)}`;
+  const roleScopedSelection = await resolveCacSelectionForRole(payload, isAdmin);
+  const roleScopedPayload = {
+    ...payload,
+    accountIds: roleScopedSelection.accountIds,
+    accountNames: roleScopedSelection.accountNames,
+  };
+  const key = `api:combined-billing-overview:${stableStringify(roleScopedPayload)}`;
   return getOrSetCache(key, CACHE_TTL_MS, () =>
     buildCombinedBillingOverview(
       payload.startDate,
       payload.endDate,
       payload.grain,
-      payload.accountIds,
-      payload.accountNames,
+      roleScopedSelection.accountIds,
+      roleScopedSelection.accountNames,
       payload.includeCac,
     ),
   );
 }
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
+    const token = await getToken({
+      req,
+      secret: process.env.AUTH_SECRET,
+    });
+    const isAdmin = String(token?.role || "viewer").trim().toLowerCase() === "admin";
     const raw = await req.text();
     const body = (raw ? JSON.parse(raw) : {}) as Partial<RequestBody>;
-    const report = await validateAndRun(body);
+    const report = await validateAndRun(body, isAdmin);
     return NextResponse.json(report);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -2332,8 +2367,13 @@ export async function POST(req: Request) {
   }
 }
 
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
+    const token = await getToken({
+      req,
+      secret: process.env.AUTH_SECRET,
+    });
+    const isAdmin = String(token?.role || "viewer").trim().toLowerCase() === "admin";
     const { searchParams } = new URL(req.url);
     const body: Partial<RequestBody> = {
       startDate: searchParams.get("startDate") || "",
@@ -2349,7 +2389,7 @@ export async function GET(req: Request) {
         .filter(Boolean),
       includeCac: (searchParams.get("includeCac") || "").toLowerCase() !== "false",
     };
-    const report = await validateAndRun(body);
+    const report = await validateAndRun(body, isAdmin);
     return NextResponse.json(report);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";

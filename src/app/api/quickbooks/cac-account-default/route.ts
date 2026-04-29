@@ -1,4 +1,6 @@
+import { getToken } from "next-auth/jwt";
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 import {
   loadQuickBooksCacDefaultSelection,
   saveQuickBooksCacDefaultSelection,
@@ -32,8 +34,17 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
+    const token = await getToken({
+      req: request,
+      secret: process.env.AUTH_SECRET,
+    });
+    const isAdmin = String(token?.role || "viewer").trim().toLowerCase() === "admin";
+    if (!isAdmin) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
     const raw = await request.text();
     const body = (raw ? JSON.parse(raw) : {}) as SaveBody;
     const accountIds = normalizeIds(body.accountIds);
