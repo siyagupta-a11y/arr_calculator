@@ -291,6 +291,10 @@ type SalesAssistWorkspaceEvent = {
   kind: SalesAssistEventKind;
 };
 
+type SalesAssistCompanyOffEvent = {
+  atMs: number;
+};
+
 async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string, SalesAssistWorkspaceEvent[]>> {
   const salesPipelineStageIds = Array.from(
     new Set(
@@ -405,6 +409,104 @@ async function loadSalesAssistWorkspaceEventsByWorkspaceId(): Promise<Map<string
   return out;
 }
 
+async function loadSalesAssistCompanyOffEventsByCompanyId(): Promise<Map<string, SalesAssistCompanyOffEvent[]>> {
+  const salesPipelineStageIds = Array.from(
+    new Set(
+      String(process.env.INCLUDED_DEALSTAGE || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  );
+
+  const workspaceProp = String(process.env.DEAL_WORKSPACE_ID_PROP || "workspace_id").trim() || "workspace_id";
+  const workspacePropCandidates = Array.from(
+    new Set(
+      [
+        workspaceProp,
+        workspaceProp.endsWith("__c") ? workspaceProp.slice(0, -3) : `${workspaceProp}__c`,
+        "workspace_id",
+        "workspace_id__c",
+      ]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+
+  let salesPipelineClosedWonStageIds = salesPipelineStageIds;
+  try {
+    const stageIdToLabel = await fetchDealStageIdToLabelMap();
+    const filtered = salesPipelineStageIds.filter((stageId) => {
+      const normalized = normalizeStageLabelKey(String(stageIdToLabel.get(stageId) || ""));
+      return normalized.includes("salespipeline") && normalized.includes("closedwon");
+    });
+    if (filtered.length) salesPipelineClosedWonStageIds = filtered;
+  } catch {
+    // Keep configured INCLUDED_DEALSTAGE ids if stage-label lookup is unavailable.
+  }
+
+  const out = new Map<string, SalesAssistCompanyOffEvent[]>();
+  for (const stageId of salesPipelineClosedWonStageIds) {
+    const dealsById = new Map<string, Awaited<ReturnType<typeof fetchDealsInStage>>[number]>();
+    let fetchedAny = false;
+    for (const workspaceField of workspacePropCandidates) {
+      try {
+        const deals = await fetchDealsInStage(
+          [
+            workspaceField,
+            "closedate",
+            "dealname",
+            "delivery_stage",
+            "delivery_stage__c",
+            "line_item_description",
+            "line_item_description__c",
+            "hs_primary_associated_company",
+          ],
+          stageId,
+        );
+        fetchedAny = true;
+        for (const deal of deals || []) {
+          const dealId = String(deal.id || "").trim();
+          if (!dealId) continue;
+          const previous = dealsById.get(dealId);
+          if (!previous) {
+            dealsById.set(dealId, deal);
+            continue;
+          }
+          dealsById.set(dealId, {
+            ...previous,
+            properties: {
+              ...(previous.properties || {}),
+              ...(deal.properties || {}),
+            },
+          });
+        }
+      } catch (error) {
+        if (isUnknownPropertyError(error)) continue;
+        throw error;
+      }
+    }
+    if (!fetchedAny) continue;
+
+    for (const deal of dealsById.values()) {
+      const properties = (deal.properties || {}) as Record<string, unknown>;
+      if (isDeskEarlyAccessDealProperties(properties)) continue;
+      const companyId = String(properties.hs_primary_associated_company || "").trim();
+      if (!companyId) continue;
+      const atMs = parseHubspotTimestampMs(properties.closedate);
+      if (!Number.isFinite(atMs)) continue;
+      if (!out.has(companyId)) out.set(companyId, []);
+      out.get(companyId)?.push({ atMs });
+    }
+  }
+
+  for (const events of out.values()) {
+    events.sort((a, b) => a.atMs - b.atMs);
+  }
+
+  return out;
+}
+
 function buildSalesAssistMonthMap(
   eventsByWorkspaceId: Map<string, SalesAssistWorkspaceEvent[]>,
   periodKeys: string[],
@@ -457,6 +559,30 @@ function buildSalesAssistByPeriodForWorkspaceSet(
       }
     }
     out[period.key] = isYes ? "yes" : "no";
+  }
+  return out;
+}
+
+function buildSalesAssistCompanyOffByPeriod(
+  companyIds: Iterable<string>,
+  periods: Array<{ key: string }>,
+  companyOffEventsByCompanyId: Map<string, SalesAssistCompanyOffEvent[]>,
+): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const period of periods) {
+    const monthKey = monthKeyFromPeriodKey(period.key);
+    let isOff = false;
+    if (monthKey) {
+      for (const companyId of companyIds) {
+        const events = companyOffEventsByCompanyId.get(String(companyId || "").trim());
+        if (!events?.length) continue;
+        if (events.some((event) => monthKeyFromTimestampMs(event.atMs) <= monthKey)) {
+          isOff = true;
+          break;
+        }
+      }
+    }
+    out[period.key] = isOff;
   }
   return out;
 }
@@ -861,13 +987,15 @@ export async function generateCombinedAllSubsReport(
   );
   const warnings: string[] = [];
   let salesAssistByWorkspaceMonth = new Map<string, Map<string, boolean>>();
+  let salesAssistCompanyOffByCompanyId = new Map<string, SalesAssistCompanyOffEvent[]>();
   if (includeSalesAssist) {
     try {
-      const eventsByWorkspaceId = await loadSalesAssistWorkspaceEventsByWorkspaceId();
-      salesAssistByWorkspaceMonth = buildSalesAssistMonthMap(
-        eventsByWorkspaceId,
-        periods.map((period) => period.key),
-      );
+      const [eventsByWorkspaceId, companyOffEventsByCompanyId] = await Promise.all([
+        loadSalesAssistWorkspaceEventsByWorkspaceId(),
+        loadSalesAssistCompanyOffEventsByCompanyId(),
+      ]);
+      salesAssistByWorkspaceMonth = buildSalesAssistMonthMap(eventsByWorkspaceId, periods.map((period) => period.key));
+      salesAssistCompanyOffByCompanyId = companyOffEventsByCompanyId;
     } catch (error: unknown) {
       warnings.push(
         `Sales-assist flag is temporarily unavailable. Cause: ${summarizeErrorMessage(error)}`,
@@ -915,6 +1043,14 @@ export async function generateCombinedAllSubsReport(
       periods,
       salesAssistByWorkspaceMonth,
     );
+    const companyOffByPeriod = buildSalesAssistCompanyOffByPeriod(
+      account.companyIds,
+      periods,
+      salesAssistCompanyOffByCompanyId,
+    );
+    for (const period of periods) {
+      if (companyOffByPeriod[period.key]) salesAssistByPeriod[period.key] = "no";
+    }
     rows.push({
       id: `hubspot:${account.accountKey}`,
       source: "hubspot_account",
