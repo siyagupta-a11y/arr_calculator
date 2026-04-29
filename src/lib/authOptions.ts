@@ -1,5 +1,6 @@
 import type { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
+import { loadAccessControlPolicy } from "@/lib/accessControlStore";
 
 function parseCsvLowerSet(raw: string | undefined) {
   return new Set(
@@ -17,7 +18,6 @@ function extractEmailDomain(email: string) {
 }
 
 const allowedDomains = parseCsvLowerSet(process.env.AUTH_ALLOWED_DOMAINS);
-const adminEmails = parseCsvLowerSet(process.env.AUTH_ADMIN_EMAILS);
 
 const googleClientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
 const googleClientSecret = String(process.env.GOOGLE_CLIENT_SECRET || "").trim();
@@ -61,16 +61,17 @@ export const authOptions: NextAuthOptions = {
         (profile as { email_verified?: unknown } | undefined)?.email_verified === true;
 
       if (!email || !emailVerified) return false;
-
-      if (!allowedDomains.size) return true;
+      const { policy } = await loadAccessControlPolicy();
+      if (policy.allowedEmails.includes(email)) return true;
       const emailDomain = extractEmailDomain(email);
-      if (allowedDomains.has(emailDomain)) return true;
-      if (hostedDomain && allowedDomains.has(hostedDomain)) return true;
+      if (allowedDomains.size && allowedDomains.has(emailDomain)) return true;
+      if (allowedDomains.size && hostedDomain && allowedDomains.has(hostedDomain)) return true;
       return false;
     },
     async jwt({ token }) {
       const email = String(token.email || "").trim().toLowerCase();
-      token.role = adminEmails.has(email) ? "admin" : "viewer";
+      const { policy } = await loadAccessControlPolicy();
+      token.role = policy.adminEmails.includes(email) ? "admin" : "viewer";
       return token;
     },
     async session({ session, token }) {
@@ -83,4 +84,3 @@ export const authOptions: NextAuthOptions = {
     },
   },
 };
-
