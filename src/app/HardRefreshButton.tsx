@@ -14,6 +14,7 @@ export default function HardRefreshButton() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [lastSyncAtUtc, setLastSyncAtUtc] = useState("");
   const [lastSyncSummary, setLastSyncSummary] = useState("");
+  const [syncProgress, setSyncProgress] = useState("");
   const [message, setMessage] = useState("");
 
   useEffect(() => {
@@ -91,32 +92,90 @@ export default function HardRefreshButton() {
   async function syncNow() {
     setSyncLoading(true);
     setMessage("");
+    setSyncProgress("");
     try {
-      const res = await fetch("/api/cache/sync", {
+      const startRes = await fetch("/api/cache/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
-        body: JSON.stringify({ warmup: true }),
+        body: JSON.stringify({ action: "start", warmup: true }),
       });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
+      if (!startRes.ok) {
+        const text = await startRes.text();
+        const snippet = text.replace(/\s+/g, " ").slice(0, 220);
+        throw new Error(`Sync start failed (${startRes.status}). ${snippet}`);
       }
-      const payload = (await res.json()) as {
-        finishedAtUtc?: string;
-        tasks?: Array<{ ok?: boolean }>;
+
+      const startPayload = (await startRes.json()) as {
+        startedAtUtc?: string;
+        totalTasks?: number;
+        nextTaskIndex?: number;
+        done?: boolean;
       };
-      const finishedAtUtc = String(payload?.finishedAtUtc || "").trim();
-      if (finishedAtUtc) setLastSyncAtUtc(finishedAtUtc);
-      const tasks = Array.isArray(payload?.tasks) ? payload.tasks : [];
-      if (tasks.length) {
-        const ok = tasks.filter((task) => task?.ok).length;
-        setLastSyncSummary(`${ok}/${tasks.length} tasks`);
+      const startedAtUtc = String(startPayload?.startedAtUtc || "").trim() || new Date().toISOString();
+      const totalTasks = Math.max(0, Number(startPayload?.totalTasks || 0));
+      let nextTaskIndex = Math.max(0, Number(startPayload?.nextTaskIndex || 0));
+      let done = Boolean(startPayload?.done) || totalTasks === 0;
+      let okTaskCount = 0;
+      let failedTaskCount = 0;
+
+      while (!done) {
+        setSyncProgress(`Running cache warmup task ${nextTaskIndex + 1}/${totalTasks}...`);
+        const stepRes = await fetch("/api/cache/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({
+            action: "step",
+            taskIndex: nextTaskIndex,
+            batchSize: 1,
+          }),
+        });
+        if (!stepRes.ok) {
+          const text = await stepRes.text();
+          const snippet = text.replace(/\s+/g, " ").slice(0, 220);
+          throw new Error(`Sync step failed (${stepRes.status}). ${snippet}`);
+        }
+        const stepPayload = (await stepRes.json()) as {
+          nextIndex?: number;
+          done?: boolean;
+          results?: Array<{ ok?: boolean }>;
+        };
+        const stepResults = Array.isArray(stepPayload?.results) ? stepPayload.results : [];
+        for (const item of stepResults) {
+          if (item?.ok) okTaskCount += 1;
+          else failedTaskCount += 1;
+        }
+        nextTaskIndex = Math.max(nextTaskIndex + 1, Number(stepPayload?.nextIndex || nextTaskIndex + 1));
+        done = Boolean(stepPayload?.done) || nextTaskIndex >= totalTasks;
+        setLastSyncSummary(`${okTaskCount}/${okTaskCount + failedTaskCount} tasks`);
       }
-      setMessage("Sync completed.");
+
+      await fetch("/api/cache/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          action: "complete",
+          warmup: true,
+          startedAtUtc,
+          okTaskCount,
+          failedTaskCount,
+          totalTaskCount: okTaskCount + failedTaskCount,
+        }),
+      });
+
+      setLastSyncAtUtc(new Date().toISOString());
+      setLastSyncSummary(`${okTaskCount}/${okTaskCount + failedTaskCount} tasks`);
+      if (failedTaskCount > 0) {
+        setMessage(`Sync completed with ${failedTaskCount} failed task(s).`);
+      } else {
+        setMessage("Sync completed.");
+      }
     } catch (error: unknown) {
       setMessage(error instanceof Error ? error.message : "Sync failed");
     } finally {
+      setSyncProgress("");
       setSyncLoading(false);
     }
   }
@@ -146,6 +205,21 @@ export default function HardRefreshButton() {
           }}
         >
           {message}
+        </div>
+      ) : null}
+      {syncProgress ? (
+        <div
+          style={{
+            background: "#eff6ff",
+            border: "1px solid #bfdbfe",
+            color: "#1e3a8a",
+            borderRadius: 8,
+            padding: "8px 10px",
+            maxWidth: 360,
+            fontSize: 12,
+          }}
+        >
+          {syncProgress}
         </div>
       ) : null}
       <div style={{ display: "flex", gap: 8 }}>
