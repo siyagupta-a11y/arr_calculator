@@ -63,20 +63,14 @@ function toIsoDateOnlyUtc(d: Date) {
   return d.toISOString().slice(0, 10);
 }
 
-function dateAddUtc(base: Date, days: number) {
-  return new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() + days, 0, 0, 0, 0));
-}
-
 function defaultRanges() {
   const now = new Date();
   const oneYearAgoMonthStart = new Date(Date.UTC(now.getUTCFullYear() - 1, now.getUTCMonth(), 1, 0, 0, 0, 0));
   const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
-  const last30Start = dateAddUtc(now, -30);
   return {
     today: toIsoDateOnlyUtc(now),
     currentMonthStart: toIsoDateOnlyUtc(currentMonthStart),
     oneYearStart: toIsoDateOnlyUtc(oneYearAgoMonthStart),
-    last30Start: toIsoDateOnlyUtc(last30Start),
   };
 }
 
@@ -117,7 +111,7 @@ async function invokeRoutePost(label: string, handler: RoutePostHandler, body: R
 }
 
 export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
-  const { today, currentMonthStart, oneYearStart, last30Start } = defaultRanges();
+  const { today, currentMonthStart, oneYearStart } = defaultRanges();
   return [
     {
       key: "combined-all-subs:grouped:arr:monthly",
@@ -137,16 +131,6 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
         startDate: oneYearStart,
         endDate: today,
         grain: "monthly",
-        includeCac: false,
-      },
-    },
-    {
-      key: "combined-billing-overview:daily",
-      handler: combinedBillingOverviewPost,
-      body: {
-        startDate: last30Start,
-        endDate: today,
-        grain: "daily",
         includeCac: false,
       },
     },
