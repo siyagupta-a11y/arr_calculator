@@ -171,6 +171,19 @@ function compareNullableNumber(a: number | null, b: number | null) {
   return a - b;
 }
 
+function parseJsonOrThrow(text: string, status: number, context: string) {
+  try {
+    return text ? (JSON.parse(text) as { rows?: StripeMonthRow[]; error?: string }) : {};
+  } catch {
+    const isHtml = /<!doctype html|<html/i.test(String(text || ""));
+    const snippet = String(text || "").replace(/\s+/g, " ").trim().slice(0, 180);
+    const reason = isHtml
+      ? "Received HTML instead of JSON (likely auth redirect or server error page)."
+      : "Received non-JSON response.";
+    throw new Error(`${context} failed (${status}). ${reason}${snippet ? ` Response: ${snippet}` : ""}`);
+  }
+}
+
 export default function DiffSheetPage() {
   const [month, setMonth] = useState(defaultMonth());
   const [stripeRows, setStripeRows] = useState<StripeMonthRow[]>([]);
@@ -194,7 +207,7 @@ export default function DiffSheetPage() {
         body: JSON.stringify({ month }),
       });
       const text = await res.text();
-      const json = text ? (JSON.parse(text) as { rows?: StripeMonthRow[]; error?: string }) : {};
+      const json = parseJsonOrThrow(text, res.status, "Stripe month fetch");
       if (!res.ok) {
         throw new Error(json.error || `Failed to fetch Stripe data (${res.status})`);
       }

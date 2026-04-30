@@ -84,6 +84,19 @@ function csvTimestamp() {
   return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 }
 
+function parseJsonResponseText(text: string, status: number, context: string) {
+  try {
+    return text ? (JSON.parse(text) as unknown) : null;
+  } catch {
+    const isHtml = /<!doctype html|<html/i.test(String(text || ""));
+    const snippet = String(text || "").replace(/\s+/g, " ").trim().slice(0, 180);
+    const reason = isHtml
+      ? "Received HTML instead of JSON (likely auth redirect or server error page)."
+      : "Received non-JSON response.";
+    throw new Error(`${context} failed (${status}). ${reason}${snippet ? ` Response: ${snippet}` : ""}`);
+  }
+}
+
 function isSalesAssistForPeriod(row: CombinedAllSubsRow, periodKey: string) {
   return (row.salesAssistByPeriod?.[periodKey] || row.salesAssist || "no") === "yes";
 }
@@ -176,12 +189,7 @@ export default function SegmentArrPage({
       });
 
       const text = await res.text();
-      let json: unknown = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
-      }
+      const json = parseJsonResponseText(text, res.status, "Combined all-subs request");
 
       if (!res.ok) {
         if (json && typeof json === "object" && "error" in json) {

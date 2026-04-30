@@ -9240,26 +9240,7 @@ ORDER BY snapshot_date ASC, annualized_arr DESC, customer_id ASC
     annualizedArrExcluded: Math.max(0, asNumber(row.annualized_arr_excluded)),
     lineCount: asInt(row.line_count),
   }));
-  const snapshotDates = Array.from(
-    new Set(baseRows.map((row) => String(row.snapshotDate || "").trim()).filter(Boolean)),
-  );
-  const adjustmentRows: StripeAiSpendDailyAnnualizedCustomerBreakdownRow[] = snapshotDates
-    .map((snapshotDate) => {
-      const annualizedAdjustment = fixedAiSpendAnnualizedAdjustmentForSnapshotDate(snapshotDate);
-      if (Math.abs(annualizedAdjustment) <= 1e-9) return null;
-      return {
-        snapshotDate,
-        snapshotTimestampUtc: "",
-        customerId: "__manual_adjustment_march_2026__",
-        customerName: "Manual adjustment (March 2026)",
-        annualizedArrWithoutExclusions: round2(annualizedAdjustment),
-        annualizedArr: round2(annualizedAdjustment),
-        annualizedArrExcluded: 0,
-        lineCount: 1,
-      };
-    })
-    .filter((row): row is StripeAiSpendDailyAnnualizedCustomerBreakdownRow => !!row);
-  const rows = [...baseRows, ...adjustmentRows];
+  const rows = baseRows;
 
   return {
     startDate: startDateIso,
