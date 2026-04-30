@@ -1276,6 +1276,71 @@ function round2(v: number) {
   return Math.round((Number(v) || 0) * 100) / 100;
 }
 
+type FixedAiSpendMonthAdjustment = {
+  monthKey: string;
+  amountMajor: number;
+};
+
+const FIXED_AI_SPEND_MONTH_ADJUSTMENTS: FixedAiSpendMonthAdjustment[] = [
+  { monthKey: "2026-03", amountMajor: 300 },
+];
+
+function isoMonthFromIsoDate(value: string) {
+  const match = /^(\d{4}-\d{2})-\d{2}$/.exec(String(value || "").trim());
+  return match ? match[1] : "";
+}
+
+function dayDiffInclusive(startUtc: Date, endUtc: Date) {
+  const ms = endUtc.getTime() - startUtc.getTime();
+  if (ms < 0) return 0;
+  return Math.floor(ms / 86_400_000) + 1;
+}
+
+function fixedAiSpendAdjustmentMajorForPeriod(periodStartIso: string, periodEndIso: string) {
+  const periodStart = parseIsoDateUtc(periodStartIso);
+  const periodEnd = parseIsoDateUtc(periodEndIso);
+  if (!periodStart || !periodEnd) return 0;
+  if (periodEnd.getTime() < periodStart.getTime()) return 0;
+
+  let adjustment = 0;
+  for (const config of FIXED_AI_SPEND_MONTH_ADJUSTMENTS) {
+    const monthStart = parseIsoMonthUtc(config.monthKey);
+    if (!monthStart) continue;
+    const monthEnd = endOfMonthUtc(monthStart);
+    const overlapStartMs = Math.max(periodStart.getTime(), monthStart.getTime());
+    const overlapEndMs = Math.min(periodEnd.getTime(), monthEnd.getTime());
+    if (overlapEndMs < overlapStartMs) continue;
+    const overlapDays = dayDiffInclusive(new Date(overlapStartMs), new Date(overlapEndMs));
+    const monthDays = dayDiffInclusive(monthStart, monthEnd);
+    if (monthDays <= 0 || overlapDays <= 0) continue;
+    adjustment += config.amountMajor * (overlapDays / monthDays);
+  }
+  return round2(adjustment);
+}
+
+function fixedAiSpendMonthlyAdjustmentMajorForMonth(monthKey: string) {
+  const normalized = String(monthKey || "").trim();
+  const found = FIXED_AI_SPEND_MONTH_ADJUSTMENTS.find((entry) => entry.monthKey === normalized);
+  return round2(found?.amountMajor || 0);
+}
+
+function fixedAiSpendAnnualizedAdjustmentForSnapshotDate(snapshotDateIso: string) {
+  const monthKey = isoMonthFromIsoDate(snapshotDateIso);
+  if (!monthKey) return 0;
+  return round2(fixedAiSpendMonthlyAdjustmentMajorForMonth(monthKey) * 12);
+}
+
+function applyFixedAiSpendAdjustmentsToPoints(points: StripeAiSpendPoint[]) {
+  return (points || []).map((point) => {
+    const adjustment = fixedAiSpendAdjustmentMajorForPeriod(point.periodStart, point.periodEnd);
+    if (Math.abs(adjustment) <= 1e-9) return point;
+    return {
+      ...point,
+      revenue: round2((Number(point.revenue || 0) + adjustment)),
+    };
+  });
+}
+
 function normalizeAnnualizationDescription(value: string) {
   return String(value || "")
     .trim()
@@ -6480,7 +6545,7 @@ FROM metered_lines
     runBigQueryQueryRows(accessToken, projectId, location, segmentSummaryQuery, baseParams),
   ]);
 
-  const points: StripeAiSpendPoint[] = summaryRows.map((row) => ({
+  const pointsBase: StripeAiSpendPoint[] = summaryRows.map((row) => ({
     key: asString(row.period_key),
     label: asString(row.period_label),
     periodStart: asString(row.period_start),
@@ -6489,6 +6554,7 @@ FROM metered_lines
     lineCount: asInt(row.line_count),
     customerCount: asInt(row.customer_count),
   }));
+  const points: StripeAiSpendPoint[] = applyFixedAiSpendAdjustmentsToPoints(pointsBase);
 
   const topCustomers: StripeAiSpendGroupRow[] = topCustomersRows.map((row) => ({
     key: asString(row.group_key) || "(blank)",
@@ -6528,9 +6594,12 @@ FROM metered_lines
   }));
   const segmentSummaryRow = segmentSummaryRows[0] || {};
   const meteredRevenueSalesled = round2(Math.max(0, asNumber(segmentSummaryRow.metered_revenue_salesled)));
-  const meteredRevenueSelfserve = round2(Math.max(0, asNumber(segmentSummaryRow.metered_revenue_selfserve)));
+  const meteredRevenueSelfserveBase = round2(Math.max(0, asNumber(segmentSummaryRow.metered_revenue_selfserve)));
 
   const totalRevenue = Math.max(0, points.reduce((sum, point) => sum + point.revenue, 0));
+  const baseTotalRevenue = Math.max(0, pointsBase.reduce((sum, point) => sum + point.revenue, 0));
+  const fixedAdjustmentDelta = round2(totalRevenue - baseTotalRevenue);
+  const meteredRevenueSelfserve = round2(Math.max(0, meteredRevenueSelfserveBase + fixedAdjustmentDelta));
 
   return {
     startDate: startDateIso,
@@ -7977,14 +8046,17 @@ LEFT JOIN net_customer_totals nct
   ];
   const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
   const first = rows[0] || {};
-  const amountMinorSum = asNumber(first.amount_minor_sum);
+  const amountMinorSumBase = asNumber(first.amount_minor_sum);
+  const fixedAdjustmentMajor = fixedAiSpendMonthlyAdjustmentMajorForMonth(monthStartIso.slice(0, 7));
+  const amountMajorSum = round2((amountMinorSumBase / 100) + fixedAdjustmentMajor);
+  const amountMinorSum = Math.round(amountMajorSum * 100);
 
   return {
     snapshotDate: asString(first.snapshot_date),
     snapshotTimestampUtc: asString(first.snapshot_timestamp_utc),
     lineCount: asInt(first.line_count),
     amountMinorSum,
-    amountMajorSum: round2(amountMinorSum / 100),
+    amountMajorSum,
     targetCurrency: targetCurrency.toUpperCase(),
   };
 }
@@ -8501,7 +8573,7 @@ FROM matched_lines
     runBigQueryQueryRows(accessToken, projectId, location, segmentSummaryQuery, baseParams),
   ]);
 
-  const points: StripeAiSpendPoint[] = summaryRows.map((row) => ({
+  const pointsBase: StripeAiSpendPoint[] = summaryRows.map((row) => ({
     key: asString(row.period_key),
     label: asString(row.period_label),
     periodStart: asString(row.period_start),
@@ -8510,6 +8582,7 @@ FROM matched_lines
     lineCount: asInt(row.line_count),
     customerCount: asInt(row.customer_count),
   }));
+  const points: StripeAiSpendPoint[] = applyFixedAiSpendAdjustmentsToPoints(pointsBase);
 
   const topCustomers: StripeAiSpendGroupRow[] = topCustomersRows.map((row) => ({
     key: asString(row.group_key) || "(blank)",
@@ -8549,9 +8622,12 @@ FROM matched_lines
   }));
   const segmentSummaryRow = segmentSummaryRows[0] || {};
   const meteredRevenueSalesled = round2(Math.max(0, asNumber(segmentSummaryRow.metered_revenue_salesled)));
-  const meteredRevenueSelfserve = round2(Math.max(0, asNumber(segmentSummaryRow.metered_revenue_selfserve)));
+  const meteredRevenueSelfserveBase = round2(Math.max(0, asNumber(segmentSummaryRow.metered_revenue_selfserve)));
 
   const totalRevenue = Math.max(0, points.reduce((sum, point) => sum + point.revenue, 0));
+  const baseTotalRevenue = Math.max(0, pointsBase.reduce((sum, point) => sum + point.revenue, 0));
+  const fixedAdjustmentDelta = round2(totalRevenue - baseTotalRevenue);
+  const meteredRevenueSelfserve = round2(Math.max(0, meteredRevenueSelfserveBase + fixedAdjustmentDelta));
 
   return {
     snapshotDate,
@@ -8853,7 +8929,16 @@ ORDER BY snapshot_date ASC
     annualizedArrExcluded: Math.max(0, asNumber(row.annualized_arr_excluded)),
     lineCount: asInt(row.line_count),
     customerCount: asInt(row.customer_count),
-  }));
+  })).map((point) => {
+    const annualizedAdjustment = fixedAiSpendAnnualizedAdjustmentForSnapshotDate(point.snapshotDate);
+    if (Math.abs(annualizedAdjustment) <= 1e-9) return point;
+    return {
+      ...point,
+      annualizedArrWithoutExclusions: round2(point.annualizedArrWithoutExclusions + annualizedAdjustment),
+      annualizedArr: round2(point.annualizedArr + annualizedAdjustment),
+      annualizedArrExcluded: round2(Math.max(0, point.annualizedArrExcluded)),
+    };
+  });
 
   return {
     startDate: startDateIso,
@@ -9145,7 +9230,7 @@ ORDER BY snapshot_date ASC, annualized_arr DESC, customer_id ASC
     ]),
   ];
   const rowsRaw = await runBigQueryQueryRows(accessToken, projectId, location, query, params);
-  const rows: StripeAiSpendDailyAnnualizedCustomerBreakdownRow[] = rowsRaw.map((row) => ({
+  const baseRows: StripeAiSpendDailyAnnualizedCustomerBreakdownRow[] = rowsRaw.map((row) => ({
     snapshotDate: asString(row.snapshot_date),
     snapshotTimestampUtc: asString(row.snapshot_timestamp_utc),
     customerId: asString(row.customer_id) || "(blank)",
@@ -9155,6 +9240,26 @@ ORDER BY snapshot_date ASC, annualized_arr DESC, customer_id ASC
     annualizedArrExcluded: Math.max(0, asNumber(row.annualized_arr_excluded)),
     lineCount: asInt(row.line_count),
   }));
+  const snapshotDates = Array.from(
+    new Set(baseRows.map((row) => String(row.snapshotDate || "").trim()).filter(Boolean)),
+  );
+  const adjustmentRows: StripeAiSpendDailyAnnualizedCustomerBreakdownRow[] = snapshotDates
+    .map((snapshotDate) => {
+      const annualizedAdjustment = fixedAiSpendAnnualizedAdjustmentForSnapshotDate(snapshotDate);
+      if (Math.abs(annualizedAdjustment) <= 1e-9) return null;
+      return {
+        snapshotDate,
+        snapshotTimestampUtc: "",
+        customerId: "__manual_adjustment_march_2026__",
+        customerName: "Manual adjustment (March 2026)",
+        annualizedArrWithoutExclusions: round2(annualizedAdjustment),
+        annualizedArr: round2(annualizedAdjustment),
+        annualizedArrExcluded: 0,
+        lineCount: 1,
+      };
+    })
+    .filter((row): row is StripeAiSpendDailyAnnualizedCustomerBreakdownRow => !!row);
+  const rows = [...baseRows, ...adjustmentRows];
 
   return {
     startDate: startDateIso,
