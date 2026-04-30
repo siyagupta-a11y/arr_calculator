@@ -503,19 +503,38 @@ async function fetchDealsForStageWithWorkspaceCandidates(
   extraProps: string[],
   dateRange?: { startDate: string; endDate: string },
 ) {
+  const dealsById = new Map<string, HubspotDeal>();
+  let fetchedAny = false;
   for (const workspaceField of workspacePropCandidates) {
     const props = Array.from(new Set([workspaceField, ...extraProps].filter(Boolean)));
     try {
-      if (dateRange) {
-        return await fetchDealsInStageClosedBetween(props, stageId, dateRange.startDate, dateRange.endDate);
+      const deals = dateRange
+        ? await fetchDealsInStageClosedBetween(props, stageId, dateRange.startDate, dateRange.endDate)
+        : await fetchDealsInStage(props, stageId);
+      fetchedAny = true;
+      for (const deal of deals || []) {
+        const dealId = String(deal.id || "").trim();
+        if (!dealId) continue;
+        const previous = dealsById.get(dealId);
+        if (!previous) {
+          dealsById.set(dealId, deal);
+          continue;
+        }
+        dealsById.set(dealId, {
+          ...previous,
+          properties: {
+            ...(previous.properties || {}),
+            ...(deal.properties || {}),
+          },
+        });
       }
-      return await fetchDealsInStage(props, stageId);
     } catch (error) {
       if (isUnknownPropertyError(error)) continue;
       throw error;
     }
   }
-  return [];
+  if (!fetchedAny) return [];
+  return Array.from(dealsById.values());
 }
 
 async function fetchDealsForStageWithWorkspaceAndReasonCandidates(
