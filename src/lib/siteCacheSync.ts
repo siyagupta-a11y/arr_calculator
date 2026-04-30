@@ -1,5 +1,9 @@
 import { clearHubspotMemoryCache } from "@/lib/hubspot";
-import { clearPersistentServerResponseCache, clearServerResponseCache } from "@/lib/serverResponseCache";
+import {
+  clearPersistentServerResponseCache,
+  clearServerResponseCache,
+  writeServerCacheSyncStatus,
+} from "@/lib/serverResponseCache";
 import { clearStripeReportMemoryCache } from "@/lib/stripeReport";
 import { POST as combinedAllSubsPost } from "@/app/api/combined-all-subs-report/route";
 import { POST as combinedBillingOverviewPost } from "@/app/api/combined-billing-overview-report/route";
@@ -55,7 +59,7 @@ function defaultRanges() {
   };
 }
 
-type RoutePostHandler = (req: any) => Promise<Response>;
+type RoutePostHandler = (req: never) => Promise<Response>;
 
 async function invokeRoutePost(label: string, handler: RoutePostHandler, body: Record<string, unknown>) {
   const t0 = Date.now();
@@ -65,7 +69,7 @@ async function invokeRoutePost(label: string, handler: RoutePostHandler, body: R
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const res = await handler(req);
+    const res = await handler(req as never);
     if (res.ok) {
       return {
         key: label,
@@ -197,7 +201,7 @@ export async function syncWebsiteCache(options: SyncOptions = {}): Promise<Cache
 
   const tasks = warmup ? await runWarmupTasks() : [];
   const finishedAt = Date.now();
-  return {
+  const result: CacheSyncResult = {
     startedAtUtc,
     finishedAtUtc: new Date(finishedAt).toISOString(),
     tookMs: finishedAt - startedAt,
@@ -208,4 +212,16 @@ export async function syncWebsiteCache(options: SyncOptions = {}): Promise<Cache
     },
     tasks,
   };
+  const okTaskCount = tasks.filter((task) => task.ok).length;
+  const failedTaskCount = tasks.length - okTaskCount;
+  await writeServerCacheSyncStatus({
+    startedAtUtc: result.startedAtUtc,
+    finishedAtUtc: result.finishedAtUtc,
+    tookMs: result.tookMs,
+    warmup: result.warmup,
+    okTaskCount,
+    failedTaskCount,
+    totalTaskCount: tasks.length,
+  });
+  return result;
 }

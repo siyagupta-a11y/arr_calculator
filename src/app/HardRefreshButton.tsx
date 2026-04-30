@@ -12,6 +12,8 @@ export default function HardRefreshButton() {
   const [loading, setLoading] = useState(false);
   const [syncLoading, setSyncLoading] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [lastSyncAtUtc, setLastSyncAtUtc] = useState("");
+  const [lastSyncSummary, setLastSyncSummary] = useState("");
   const [message, setMessage] = useState("");
 
   useEffect(() => {
@@ -29,6 +31,33 @@ export default function HardRefreshButton() {
       }
     };
     void loadSession();
+    const loadCacheStatus = async () => {
+      try {
+        const res = await fetch("/api/cache/status", { cache: "no-store" });
+        if (!res.ok) return;
+        const payload = (await res.json()) as {
+          lastSync?: {
+            finishedAtUtc?: string;
+            okTaskCount?: number;
+            failedTaskCount?: number;
+            totalTaskCount?: number;
+          } | null;
+        };
+        if (!active) return;
+        const finishedAtUtc = String(payload?.lastSync?.finishedAtUtc || "").trim();
+        if (finishedAtUtc) {
+          setLastSyncAtUtc(finishedAtUtc);
+          const ok = Number(payload?.lastSync?.okTaskCount || 0);
+          const total = Number(payload?.lastSync?.totalTaskCount || 0);
+          if (total > 0) {
+            setLastSyncSummary(`${ok}/${total} tasks`);
+          }
+        }
+      } catch {
+        if (!active) return;
+      }
+    };
+    void loadCacheStatus();
     return () => {
       active = false;
     };
@@ -72,6 +101,17 @@ export default function HardRefreshButton() {
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || `HTTP ${res.status}`);
+      }
+      const payload = (await res.json()) as {
+        finishedAtUtc?: string;
+        tasks?: Array<{ ok?: boolean }>;
+      };
+      const finishedAtUtc = String(payload?.finishedAtUtc || "").trim();
+      if (finishedAtUtc) setLastSyncAtUtc(finishedAtUtc);
+      const tasks = Array.isArray(payload?.tasks) ? payload.tasks : [];
+      if (tasks.length) {
+        const ok = tasks.filter((task) => task?.ok).length;
+        setLastSyncSummary(`${ok}/${tasks.length} tasks`);
       }
       setMessage("Sync completed.");
     } catch (error: unknown) {
@@ -148,6 +188,22 @@ export default function HardRefreshButton() {
           {loading ? "Refreshing..." : "Hard refresh"}
         </button>
       </div>
+      {lastSyncAtUtc ? (
+        <div
+          style={{
+            background: "#ecfdf5",
+            border: "1px solid #a7f3d0",
+            color: "#065f46",
+            borderRadius: 8,
+            padding: "6px 10px",
+            maxWidth: 420,
+            fontSize: 12,
+          }}
+        >
+          Last sync: {new Date(lastSyncAtUtc).toUTCString()}
+          {lastSyncSummary ? ` (${lastSyncSummary})` : ""}
+        </div>
+      ) : null}
     </div>
   );
 }

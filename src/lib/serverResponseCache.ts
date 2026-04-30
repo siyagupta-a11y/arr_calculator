@@ -14,12 +14,23 @@ type PersistentCacheEnvelope<T> = {
   value: T;
 };
 
+export type ServerCacheSyncStatus = {
+  startedAtUtc: string;
+  finishedAtUtc: string;
+  tookMs: number;
+  warmup: boolean;
+  okTaskCount: number;
+  failedTaskCount: number;
+  totalTaskCount: number;
+};
+
 const VALUE_CACHE = new Map<string, CacheEntry<unknown>>();
 const IN_FLIGHT = new Map<string, Promise<unknown>>();
 let CACHE_GENERATION = 1;
 const BLOB_PREFIX = String(process.env.SERVER_RESPONSE_CACHE_BLOB_PREFIX || "arr/runtime-cache/v1")
   .trim()
   .replace(/^\/+|\/+$/g, "");
+const SYNC_STATUS_BLOB_PATH = `${BLOB_PREFIX}/_sync-status.json`;
 
 const persistentCacheStats = {
   hits: 0,
@@ -177,6 +188,60 @@ export async function clearPersistentServerResponseCache() {
   }
 
   return { enabled: true, deleted, scanned, pages, prefix: BLOB_PREFIX };
+}
+
+export async function writeServerCacheSyncStatus(status: ServerCacheSyncStatus) {
+  if (!canUsePersistentBlobCache()) return false;
+  const token = blobReadWriteToken();
+  if (!token) return false;
+  try {
+    await put(SYNC_STATUS_BLOB_PATH, JSON.stringify(status), {
+      access: "private",
+      allowOverwrite: true,
+      addRandomSuffix: false,
+      contentType: "application/json; charset=utf-8",
+      token,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function readServerCacheSyncStatus(): Promise<ServerCacheSyncStatus | null> {
+  if (!canUsePersistentBlobCache()) return null;
+  const token = blobReadWriteToken();
+  if (!token) return null;
+  try {
+    const meta = await head(SYNC_STATUS_BLOB_PATH, { token });
+    const res = await fetch(meta.url, {
+      headers: blobFetchHeaders(),
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const parsed = (await res.json()) as Partial<ServerCacheSyncStatus>;
+    if (!parsed || typeof parsed !== "object") return null;
+    const startedAtUtc = String(parsed.startedAtUtc || "").trim();
+    const finishedAtUtc = String(parsed.finishedAtUtc || "").trim();
+    const tookMs = Number(parsed.tookMs || 0);
+    const warmup = Boolean(parsed.warmup);
+    const okTaskCount = Number(parsed.okTaskCount || 0);
+    const failedTaskCount = Number(parsed.failedTaskCount || 0);
+    const totalTaskCount = Number(parsed.totalTaskCount || 0);
+    if (!startedAtUtc || !finishedAtUtc || !Number.isFinite(tookMs)) return null;
+    return {
+      startedAtUtc,
+      finishedAtUtc,
+      tookMs,
+      warmup,
+      okTaskCount: Number.isFinite(okTaskCount) ? okTaskCount : 0,
+      failedTaskCount: Number.isFinite(failedTaskCount) ? failedTaskCount : 0,
+      totalTaskCount: Number.isFinite(totalTaskCount) ? totalTaskCount : 0,
+    };
+  } catch (error: unknown) {
+    if (error instanceof BlobNotFoundError) return null;
+    return null;
+  }
 }
 
 export function serverResponseCacheStats() {
