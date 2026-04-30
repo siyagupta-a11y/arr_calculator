@@ -38,6 +38,10 @@ const CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_CACHE_TTL_MS", 24 
 const AI_SPEND_EXCLUSIONS_CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_EXCLUSIONS_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
 const SALES_CYCLE_CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_SALES_CYCLE_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
 const SUBQUERY_CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_SUBQUERY_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
+const MONTHLY_CANONICAL_START_DATE = (() => {
+  const configured = String(process.env.COMBINED_BILLING_OVERVIEW_MONTHLY_CACHE_START || "2023-01-01").trim();
+  return isIsoDate(configured) ? configured : "2023-01-01";
+})();
 const AI_SPEND_UPCOMING_PRODUCT_TERMS = ["ai tokens", "web search and crawl"];
 
 type CombinedGrain = "daily" | "monthly" | "quarterly";
@@ -1376,6 +1380,30 @@ function parsePayload(raw: Partial<RequestBody>) {
   };
 }
 
+function monthKeyFromPointLike(value: { key?: string; periodStart?: string; monthKey?: string; asOfDate?: string }) {
+  const key = String(value.key || "").trim();
+  if (/^\d{4}-\d{2}$/.test(key)) return key;
+  const monthKey = String(value.monthKey || "").trim();
+  if (/^\d{4}-\d{2}$/.test(monthKey)) return monthKey;
+  const periodStart = String(value.periodStart || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(periodStart)) return periodStart.slice(0, 7);
+  const asOfDate = String(value.asOfDate || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) return asOfDate.slice(0, 7);
+  return "";
+}
+
+function filterMonthlyRange<T extends { key?: string; periodStart?: string; monthKey?: string; asOfDate?: string }>(
+  rows: T[] | undefined,
+  startMonthKey: string,
+  endMonthKey: string,
+) {
+  return (rows || []).filter((row) => {
+    const monthKey = monthKeyFromPointLike(row);
+    if (!monthKey) return false;
+    return monthKey >= startMonthKey && monthKey <= endMonthKey;
+  });
+}
+
 async function cachedGenerateHubspotReport(request: Parameters<typeof generateReport>[0]) {
   const key = `api:combined-billing-overview:hubspot-report:${stableStringify(request)}`;
   return getOrSetCache(key, SUBQUERY_CACHE_TTL_MS, () => generateReport(request));
@@ -2302,6 +2330,63 @@ async function buildCombinedBillingOverview(
   };
 }
 
+function sliceMonthlyCombinedBillingOverview(
+  canonical: Awaited<ReturnType<typeof buildCombinedBillingOverview>>,
+  requestedStartDate: string,
+  requestedEndDate: string,
+) {
+  const startMonthKey = requestedStartDate.slice(0, 7);
+  const endMonthKey = requestedEndDate.slice(0, 7);
+
+  const points = filterMonthlyRange(canonical.points, startMonthKey, endMonthKey);
+  const linePoints = filterMonthlyRange(canonical.linePoints, startMonthKey, endMonthKey);
+  const lineSourcePoints = {
+    salesled: filterMonthlyRange(canonical.lineSourcePoints?.salesled || [], startMonthKey, endMonthKey),
+    selfserve: filterMonthlyRange(canonical.lineSourcePoints?.selfserve || [], startMonthKey, endMonthKey),
+    aiSpend: filterMonthlyRange(canonical.lineSourcePoints?.aiSpend || [], startMonthKey, endMonthKey),
+  };
+  const arrPerEmployeePoints = filterMonthlyRange(canonical.arrPerEmployeePoints, startMonthKey, endMonthKey);
+  const salesCyclePoints = filterMonthlyRange(canonical.salesCyclePoints, startMonthKey, endMonthKey);
+  const retentionPoints = filterMonthlyRange(canonical.retentionPoints, startMonthKey, endMonthKey);
+  const ltvPoints = filterMonthlyRange(canonical.ltvPoints, startMonthKey, endMonthKey);
+  const cacPoints = filterMonthlyRange(canonical.cacPoints, startMonthKey, endMonthKey);
+  const cacCurrencyLayerPoints = filterMonthlyRange(canonical.cacCurrencyLayerPoints, startMonthKey, endMonthKey);
+  const cacCadPoints = filterMonthlyRange(canonical.cacCadPoints, startMonthKey, endMonthKey);
+  const aiSpendExcludedEnterprisePrepaidCustomers = filterMonthlyRange(
+    canonical.aiSpendExcludedEnterprisePrepaidCustomers,
+    startMonthKey,
+    endMonthKey,
+  );
+  const aiSpendDailyPointBreakdown = filterMonthlyRange(
+    canonical.aiSpendDailyPointBreakdown,
+    startMonthKey,
+    endMonthKey,
+  );
+
+  const currentMrr = points.length ? round2(Number(points[points.length - 1].mrrEnd || 0)) : 0;
+  const currentArr = round2(currentMrr * 12);
+
+  return {
+    ...canonical,
+    startDate: requestedStartDate,
+    endDate: requestedEndDate,
+    currentMrr,
+    currentArr,
+    points,
+    linePoints,
+    lineSourcePoints,
+    arrPerEmployeePoints,
+    salesCyclePoints,
+    retentionPoints,
+    ltvPoints,
+    cacPoints,
+    cacCurrencyLayerPoints,
+    cacCadPoints,
+    aiSpendExcludedEnterprisePrepaidCustomers,
+    aiSpendDailyPointBreakdown,
+  };
+}
+
 async function resolveCacSelectionForRole(payload: ReturnType<typeof parsePayload>, isAdmin: boolean) {
   if (isAdmin) {
     return {
@@ -2329,6 +2414,32 @@ async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
   const cacheScopedSelection = payload.includeCac
     ? roleScopedSelection
     : { accountIds: [] as string[], accountNames: [] as string[] };
+  if (payload.grain === "monthly") {
+    const todayIso = toIsoDateOnly(new Date());
+    const canonicalStartDate = payload.startDate < MONTHLY_CANONICAL_START_DATE
+      ? payload.startDate
+      : MONTHLY_CANONICAL_START_DATE;
+    const canonicalEndDate = payload.endDate > todayIso ? payload.endDate : todayIso;
+    const canonicalPayload = {
+      ...payload,
+      startDate: canonicalStartDate,
+      endDate: canonicalEndDate,
+      accountIds: cacheScopedSelection.accountIds,
+      accountNames: cacheScopedSelection.accountNames,
+    };
+    const canonicalKey = `api:combined-billing-overview:${stableStringify(canonicalPayload)}`;
+    const canonical = await getOrSetCache(canonicalKey, CACHE_TTL_MS, () =>
+      buildCombinedBillingOverview(
+        canonicalStartDate,
+        canonicalEndDate,
+        payload.grain,
+        cacheScopedSelection.accountIds,
+        cacheScopedSelection.accountNames,
+        payload.includeCac,
+      ),
+    );
+    return sliceMonthlyCombinedBillingOverview(canonical, payload.startDate, payload.endDate);
+  }
   const roleScopedPayload = {
     ...payload,
     accountIds: cacheScopedSelection.accountIds,

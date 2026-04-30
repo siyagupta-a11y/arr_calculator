@@ -65,12 +65,15 @@ function toIsoDateOnlyUtc(d: Date) {
 
 function defaultRanges() {
   const now = new Date();
-  const oneYearAgoMonthStart = new Date(Date.UTC(now.getUTCFullYear() - 1, now.getUTCMonth(), 1, 0, 0, 0, 0));
   const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+  const monthlyHistoryStart = String(process.env.COMBINED_BILLING_OVERVIEW_MONTHLY_CACHE_START || "2023-01-01").trim();
+  const monthlyHistoryStartIso = /^\d{4}-\d{2}-\d{2}$/.test(monthlyHistoryStart)
+    ? monthlyHistoryStart
+    : "2023-01-01";
   return {
     today: toIsoDateOnlyUtc(now),
     currentMonthStart: toIsoDateOnlyUtc(currentMonthStart),
-    oneYearStart: toIsoDateOnlyUtc(oneYearAgoMonthStart),
+    monthlyHistoryStart: monthlyHistoryStartIso,
   };
 }
 
@@ -111,7 +114,7 @@ async function invokeRoutePost(label: string, handler: RoutePostHandler, body: R
 }
 
 export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
-  const { today, currentMonthStart, oneYearStart } = defaultRanges();
+  const { today, currentMonthStart, monthlyHistoryStart } = defaultRanges();
   return [
     {
       key: "combined-all-subs:grouped:arr:monthly",
@@ -128,17 +131,27 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
       key: "combined-billing-overview:monthly",
       handler: combinedBillingOverviewPost,
       body: {
-        startDate: oneYearStart,
+        startDate: monthlyHistoryStart,
         endDate: today,
         grain: "monthly",
         includeCac: false,
       },
     },
     {
+      key: "combined-billing-overview:monthly:cac",
+      handler: combinedBillingOverviewPost,
+      body: {
+        startDate: monthlyHistoryStart,
+        endDate: today,
+        grain: "monthly",
+        includeCac: true,
+      },
+    },
+    {
       key: "hubspot-view-model:contracted:monthly",
       handler: hubspotViewModelPost,
       body: {
-        startDate: oneYearStart,
+        startDate: monthlyHistoryStart,
         endDate: today,
         mode: "contracted",
         grain: "monthly",
@@ -148,7 +161,7 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
       key: "stripe-through-mrr:monthly:email",
       handler: stripeThroughMrrPost,
       body: {
-        startDate: oneYearStart,
+        startDate: monthlyHistoryStart,
         endDate: today,
         grain: "monthly",
         groupBy: "email",
@@ -160,7 +173,7 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
       key: "stripe-billing-overview:monthly",
       handler: stripeBillingOverviewPost,
       body: {
-        startDate: oneYearStart,
+        startDate: monthlyHistoryStart,
         endDate: today,
         grain: "monthly",
         groupBy: "none",
@@ -179,7 +192,7 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
       key: "tofu:grouped:month",
       handler: tofuPost,
       body: {
-        startDate: oneYearStart,
+        startDate: monthlyHistoryStart,
         endDate: today,
         combineMode: "grouped",
         groupBy: "month",
