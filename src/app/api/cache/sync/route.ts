@@ -56,7 +56,9 @@ export async function POST(req: NextRequest) {
     if (action === "start") {
       const startedAtUtc = new Date().toISOString();
       const cleared = await clearWebsiteCaches();
-      const totalTasks = warmup ? buildWarmupTaskDefinitions().length : 0;
+      const taskDefinitions = warmup ? buildWarmupTaskDefinitions() : [];
+      const totalTasks = taskDefinitions.length;
+      const taskKeys = taskDefinitions.map((task) => task.key);
       if (!warmup) {
         await writeFinalSyncStatusCounts(startedAtUtc, false, 0, 0, 0);
       }
@@ -66,6 +68,7 @@ export async function POST(req: NextRequest) {
         warmup,
         startedAtUtc,
         totalTasks,
+        taskKeys,
         nextTaskIndex: 0,
         done: totalTasks === 0,
         cleared,
