@@ -9555,3 +9555,80 @@ export async function loadStripeLineItemsFromBigQuery(
 
   return out;
 }
+
+export type BigQuerySqlParameter = {
+  name: string;
+  type: "INT64" | "STRING";
+  value: string;
+};
+
+export async function runBigQuerySqlRows(
+  query: string,
+  params: BigQuerySqlParameter[] = [],
+  options?: StripeBigQueryOptions,
+) {
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  return runBigQueryQueryRows(accessToken, projectId, location, query, params);
+}
+
+export async function runBigQuerySqlStatement(
+  query: string,
+  params: BigQuerySqlParameter[] = [],
+  options?: StripeBigQueryOptions,
+) {
+  await runBigQuerySqlRows(query, params, options);
+}
+
+export async function insertBigQueryRows(params: {
+  projectId?: string;
+  dataset: string;
+  table: string;
+  rows: Array<Record<string, unknown>>;
+  options?: StripeBigQueryOptions;
+}) {
+  const profile = normalizeProfile(params.options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = String(params.projectId || "").trim() || readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const accessToken = await getAccessToken(sa);
+
+  const response = await fetch(
+    `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(params.dataset)}/tables/${encodeURIComponent(params.table)}/insertAll`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        kind: "bigquery#tableDataInsertAllRequest",
+        skipInvalidRows: false,
+        ignoreUnknownValues: false,
+        rows: (params.rows || []).map((row, idx) => ({
+          insertId: `${Date.now()}-${idx}`,
+          json: row,
+        })),
+      }),
+      cache: "no-store",
+    },
+  );
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`BigQuery insertAll error ${response.status}: ${text}`);
+  }
+  const parsed = text ? (JSON.parse(text) as { insertErrors?: Array<{ errors?: Array<{ message?: string }> }> }) : {};
+  const errors = Array.isArray(parsed.insertErrors) ? parsed.insertErrors : [];
+  if (errors.length > 0) {
+    const message = errors
+      .flatMap((entry) => entry.errors || [])
+      .map((entry) => String(entry.message || "").trim())
+      .filter(Boolean)
+      .join("; ");
+    throw new Error(`BigQuery insertAll reported row errors${message ? `: ${message}` : ""}`);
+  }
+}

@@ -5,11 +5,14 @@ import { generateReport } from "@/lib/report";
 import type { ReportResponse, ReportRow } from "@/lib/types";
 import { fetchDealsInStageClosedBetween } from "@/lib/hubspot";
 import {
+  insertBigQueryRows,
   queryStripeAiSpendFromBigQuery,
   queryStripeAiSpendCurrentMonthFromUpcomingFromBigQuery,
   queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFromBigQuery,
   queryStripeBillingOverviewFromBigQuery,
   queryStripeLatestUpcomingSnapshotDateFromBigQuery,
+  runBigQuerySqlRows,
+  runBigQuerySqlStatement,
   type StripeBillingOverviewPoint,
   type StripeBillingOverviewCustomerArrRow,
 } from "@/lib/stripeBigquery";
@@ -42,7 +45,15 @@ const MONTHLY_CANONICAL_START_DATE = (() => {
   const configured = String(process.env.COMBINED_BILLING_OVERVIEW_MONTHLY_CACHE_START || "2023-01-01").trim();
   return isIsoDate(configured) ? configured : "2023-01-01";
 })();
+const PRECOMPUTED_TABLE_PROJECT = String(process.env.PRECOMPUTED_TABLES_PROJECT || "botpress-stripe-data-pipeline")
+  .trim() || "botpress-stripe-data-pipeline";
+const PRECOMPUTED_TABLE_DATASET = String(process.env.PRECOMPUTED_TABLES_DATASET || "precomputed_tables")
+  .trim() || "precomputed_tables";
+const PRECOMPUTED_TABLE_COMBINED_BILLING = String(
+  process.env.PRECOMPUTED_TABLE_COMBINED_BILLING_OVERVIEW_MONTHLY || "combined_billing_overview_monthly_cache",
+).trim() || "combined_billing_overview_monthly_cache";
 const AI_SPEND_UPCOMING_PRODUCT_TERMS = ["ai tokens", "web search and crawl"];
+let precomputedCombinedBillingTableEnsured = false;
 
 type CombinedGrain = "daily" | "monthly" | "quarterly";
 type CacFxProvider = "frankfurter" | "currencylayer";
@@ -262,6 +273,108 @@ function normalizeNames(values: unknown) {
         .filter(Boolean),
     ),
   );
+}
+
+function validateBigQueryIdentifierPart(value: string, fallback: string) {
+  const normalized = String(value || "").trim() || fallback;
+  if (!/^[A-Za-z0-9_]+$/.test(normalized)) {
+    throw new Error(`Invalid BigQuery identifier: ${normalized}`);
+  }
+  return normalized;
+}
+
+function precomputedCombinedBillingTableRef() {
+  const project = String(PRECOMPUTED_TABLE_PROJECT || "").trim() || "botpress-stripe-data-pipeline";
+  if (!/^[A-Za-z0-9_-]+$/.test(project)) {
+    throw new Error(`Invalid BigQuery project id: ${project}`);
+  }
+  const dataset = validateBigQueryIdentifierPart(PRECOMPUTED_TABLE_DATASET, "precomputed_tables");
+  const table = validateBigQueryIdentifierPart(
+    PRECOMPUTED_TABLE_COMBINED_BILLING,
+    "combined_billing_overview_monthly_cache",
+  );
+  return `\`${project}.${dataset}.${table}\``;
+}
+
+async function ensurePrecomputedCombinedBillingTable() {
+  if (precomputedCombinedBillingTableEnsured) return;
+  const tableRef = precomputedCombinedBillingTableRef();
+  await runBigQuerySqlStatement(
+    `
+CREATE TABLE IF NOT EXISTS ${tableRef} (
+  cache_key STRING NOT NULL,
+  include_cac BOOL NOT NULL,
+  canonical_start_date DATE NOT NULL,
+  canonical_end_date DATE NOT NULL,
+  generated_at TIMESTAMP NOT NULL,
+  payload_json STRING NOT NULL
+)
+PARTITION BY DATE(generated_at)
+CLUSTER BY include_cac, canonical_start_date, canonical_end_date
+`,
+    [],
+    { profile: "stripe_arr_correct" },
+  );
+  precomputedCombinedBillingTableEnsured = true;
+}
+
+async function readPrecomputedCombinedBillingPayload(cacheKey: string) {
+  await ensurePrecomputedCombinedBillingTable();
+  const tableRef = precomputedCombinedBillingTableRef();
+  const rows = await runBigQuerySqlRows(
+    `
+SELECT payload_json
+FROM ${tableRef}
+WHERE cache_key = @cache_key
+ORDER BY generated_at DESC
+LIMIT 1
+`,
+    [{ name: "cache_key", type: "STRING", value: cacheKey }],
+    { profile: "stripe_arr_correct" },
+  );
+  const payloadJson = String(rows[0]?.payload_json || "").trim();
+  if (!payloadJson) return null;
+  try {
+    const parsed = JSON.parse(payloadJson) as ReturnType<typeof sliceMonthlyCombinedBillingOverview>;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function writePrecomputedCombinedBillingPayload(args: {
+  cacheKey: string;
+  includeCac: boolean;
+  canonicalStartDate: string;
+  canonicalEndDate: string;
+  payload: unknown;
+}) {
+  await ensurePrecomputedCombinedBillingTable();
+  const tableRef = precomputedCombinedBillingTableRef();
+  await runBigQuerySqlStatement(
+    `DELETE FROM ${tableRef} WHERE cache_key = @cache_key`,
+    [{ name: "cache_key", type: "STRING", value: args.cacheKey }],
+    { profile: "stripe_arr_correct" },
+  );
+  const dataset = validateBigQueryIdentifierPart(PRECOMPUTED_TABLE_DATASET, "precomputed_tables");
+  const table = validateBigQueryIdentifierPart(
+    PRECOMPUTED_TABLE_COMBINED_BILLING,
+    "combined_billing_overview_monthly_cache",
+  );
+  await insertBigQueryRows({
+    projectId: String(PRECOMPUTED_TABLE_PROJECT || "").trim() || "botpress-stripe-data-pipeline",
+    dataset,
+    table,
+    rows: [{
+      cache_key: args.cacheKey,
+      include_cac: args.includeCac,
+      canonical_start_date: args.canonicalStartDate,
+      canonical_end_date: args.canonicalEndDate,
+      generated_at: new Date().toISOString(),
+      payload_json: JSON.stringify(args.payload),
+    }],
+    options: { profile: "stripe_arr_correct" },
+  });
 }
 
 function previousPeriodRangeForGrain(startDate: string, grain: CombinedGrain) {
@@ -2428,16 +2541,28 @@ async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
       accountNames: cacheScopedSelection.accountNames,
     };
     const canonicalKey = `api:combined-billing-overview:${stableStringify(canonicalPayload)}`;
-    const canonical = await getOrSetCache(canonicalKey, CACHE_TTL_MS, () =>
-      buildCombinedBillingOverview(
+    const canonical = await getOrSetCache(canonicalKey, CACHE_TTL_MS, async () => {
+      const precomputed = await readPrecomputedCombinedBillingPayload(canonicalKey).catch(() => null);
+      if (precomputed) return precomputed;
+
+      const built = await buildCombinedBillingOverview(
         canonicalStartDate,
         canonicalEndDate,
         payload.grain,
         cacheScopedSelection.accountIds,
         cacheScopedSelection.accountNames,
         payload.includeCac,
-      ),
-    );
+      );
+
+      await writePrecomputedCombinedBillingPayload({
+        cacheKey: canonicalKey,
+        includeCac: payload.includeCac,
+        canonicalStartDate,
+        canonicalEndDate,
+        payload: built,
+      }).catch(() => null);
+      return built;
+    });
     return sliceMonthlyCombinedBillingOverview(canonical, payload.startDate, payload.endDate);
   }
   const roleScopedPayload = {
