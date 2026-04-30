@@ -5,13 +5,20 @@ import {
   type TofuDetailMetric,
   type TofuDetailRequest,
   type TofuRequest,
+  type TofuResponse,
 } from "@/lib/tofuReport";
 import type { CombinedAllSubsCombineMode } from "@/lib/combinedAllSubsReport";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
+import { readPrecomputedPayload, writePrecomputedPayload } from "@/lib/precomputedPayloadStore";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-const CACHE_TTL_MS = readTtlMs("API_TOFU_REPORT_CACHE_TTL_MS", 5 * 60_000);
+const CACHE_TTL_MS = readTtlMs("API_TOFU_REPORT_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
+const MONTHLY_CANONICAL_START_DATE = (() => {
+  const configured = String(process.env.COMBINED_BILLING_OVERVIEW_MONTHLY_CACHE_START || "2023-01-01").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(configured) ? configured : "2023-01-01";
+})();
+const PRECOMPUTED_ENDPOINT_KEY = "tofu:monthly";
 
 type TofuApiRequest = Partial<TofuRequest> & {
   detailPeriodKey?: string;
@@ -19,7 +26,24 @@ type TofuApiRequest = Partial<TofuRequest> & {
   detailSegment?: string;
 };
 
-function validateAndRun(body: TofuApiRequest) {
+function monthKey(value: string) {
+  return String(value || "").trim().slice(0, 7);
+}
+
+function sliceMonthlyTofuResponse(response: TofuResponse, startDate: string, endDate: string): TofuResponse {
+  const startMonth = monthKey(startDate);
+  const endMonth = monthKey(endDate);
+  return {
+    ...response,
+    startDate,
+    endDate,
+    rows: (response.rows || []).filter((row) => row.periodKey >= startMonth && row.periodKey <= endMonth),
+    planRows: (response.planRows || []).filter((row) => row.periodKey >= startMonth && row.periodKey <= endMonth),
+    segmentRows: (response.segmentRows || []).filter((row) => row.periodKey >= startMonth && row.periodKey <= endMonth),
+  };
+}
+
+async function validateAndRun(body: TofuApiRequest) {
   const basePayload: TofuRequest = {
     startDate: String(body.startDate || ""),
     endDate: String(body.endDate || ""),
@@ -43,8 +67,32 @@ function validateAndRun(body: TofuApiRequest) {
     return getOrSetCache(key, CACHE_TTL_MS, () => generateTofuDetailReport(detailPayload));
   }
 
-  const key = `api:tofu-report:base:${stableStringify(basePayload)}`;
-  return getOrSetCache(key, CACHE_TTL_MS, () => generateTofuReport(basePayload));
+  const today = new Date().toISOString().slice(0, 10);
+  const canonicalStartDate = basePayload.startDate < MONTHLY_CANONICAL_START_DATE
+    ? basePayload.startDate
+    : MONTHLY_CANONICAL_START_DATE;
+  const canonicalEndDate = basePayload.endDate > today ? basePayload.endDate : today;
+  const canonicalPayload: TofuRequest = {
+    ...basePayload,
+    startDate: canonicalStartDate,
+    endDate: canonicalEndDate,
+  };
+  const key = `api:tofu-report:base:${stableStringify(canonicalPayload)}`;
+  const canonical = await getOrSetCache(key, CACHE_TTL_MS, async () => {
+    const precomputed = await readPrecomputedPayload<TofuResponse>(PRECOMPUTED_ENDPOINT_KEY, key).catch(() => null);
+    if (precomputed) return precomputed;
+    const built = await generateTofuReport(canonicalPayload);
+    await writePrecomputedPayload({
+      endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+      cache_key: key,
+      start_date: canonicalStartDate,
+      end_date: canonicalEndDate,
+      grain: "monthly",
+      payload_json: JSON.stringify(built),
+    }).catch(() => null);
+    return built;
+  });
+  return sliceMonthlyTofuResponse(canonical, basePayload.startDate, basePayload.endDate);
 }
 
 export async function POST(req: Request) {

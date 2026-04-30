@@ -13,6 +13,7 @@ import { POST as stripeAiSpendPost } from "@/app/api/stripe-ai-spend-report/rout
 import { POST as stripeBillingOverviewPost } from "@/app/api/stripe-billing-overview-report/route";
 import { POST as stripeThroughMrrPost } from "@/app/api/stripe-through-mrr-report/route";
 import { POST as tofuPost } from "@/app/api/tofu-report/route";
+import { POST as ndrGdrPost } from "@/app/api/ndr-gdr-report/route";
 
 type SyncOptions = {
   warmup?: boolean;
@@ -120,7 +121,7 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
       key: "combined-all-subs:grouped:arr:monthly",
       handler: combinedAllSubsPost,
       body: {
-        startDate: currentMonthStart,
+        startDate: monthlyHistoryStart,
         endDate: today,
         combineMode: "grouped",
         displayMode: "arr",
@@ -196,6 +197,36 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
         endDate: today,
         combineMode: "grouped",
         groupBy: "month",
+      },
+    },
+    {
+      key: "ndr-gdr:overall",
+      handler: ndrGdrPost,
+      body: {
+        startDate: monthlyHistoryStart,
+        endDate: today,
+        combineMode: "grouped",
+        groupBy: "overall",
+      },
+    },
+    {
+      key: "ndr-gdr:source",
+      handler: ndrGdrPost,
+      body: {
+        startDate: monthlyHistoryStart,
+        endDate: today,
+        combineMode: "grouped",
+        groupBy: "source",
+      },
+    },
+    {
+      key: "ndr-gdr:plan",
+      handler: ndrGdrPost,
+      body: {
+        startDate: monthlyHistoryStart,
+        endDate: today,
+        combineMode: "grouped",
+        groupBy: "plan",
       },
     },
     {

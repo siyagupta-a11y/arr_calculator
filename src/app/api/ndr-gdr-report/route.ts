@@ -7,11 +7,17 @@ import {
   type CombinedAllSubsRequest,
 } from "@/lib/combinedAllSubsReport";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
+import { readPrecomputedPayload, writePrecomputedPayload } from "@/lib/precomputedPayloadStore";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 const CACHE_TTL_MS = readTtlMs("API_NDR_GDR_CACHE_TTL_MS", 60_000);
+const MONTHLY_CANONICAL_START_DATE = (() => {
+  const configured = String(process.env.COMBINED_BILLING_OVERVIEW_MONTHLY_CACHE_START || "2023-01-01").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(configured) ? configured : "2023-01-01";
+})();
+const PRECOMPUTED_ENDPOINT_KEY = "ndr-gdr:monthly";
 
 type RequestBody = {
   startDate?: string;
@@ -60,6 +66,8 @@ const SOURCE_LABELS: Record<CombinedAllSubsRow["source"], string> = {
   stripe_only_customer: "Self-serve",
 };
 
+type NdrGdrResponse = Awaited<ReturnType<typeof buildNdrGdrReport>>;
+
 function isIsoDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
@@ -87,6 +95,48 @@ function normalizePlan(value: string | undefined): CombinedAllSubsPlan {
   if (normalized === "plus") return "plus";
   if (normalized === "pay_as_you_go" || normalized === "pay as you go") return "pay_as_you_go";
   return "free";
+}
+
+function monthKey(value: string) {
+  return String(value || "").trim().slice(0, 7);
+}
+
+function filterByPeriodKeys(
+  values: Record<string, number | null>,
+  allowedKeys: Set<string>,
+): Record<string, number | null> {
+  const out: Record<string, number | null> = {};
+  for (const [key, value] of Object.entries(values || {})) {
+    if (allowedKeys.has(key)) out[key] = value;
+  }
+  return out;
+}
+
+function sliceNdrGdrResponse(report: NdrGdrResponse, startDate: string, endDate: string): NdrGdrResponse {
+  const startMonth = monthKey(startDate);
+  const endMonth = monthKey(endDate);
+  const periods = (report.periods || []).filter((period) => period.key >= startMonth && period.key <= endMonth);
+  const allowedPeriodKeys = new Set(periods.map((period) => period.key));
+  const mapCohorts = (cohorts: CohortRow[]) =>
+    (cohorts || [])
+      .filter((cohort) => allowedPeriodKeys.has(cohort.cohortKey))
+      .map((cohort) => ({
+        ...cohort,
+        ndrByPeriod: filterByPeriodKeys(cohort.ndrByPeriod, allowedPeriodKeys),
+        gdrByPeriod: filterByPeriodKeys(cohort.gdrByPeriod, allowedPeriodKeys),
+      }));
+  const segments = (report.segments || []).map((segment) => ({
+    ...segment,
+    cohorts: mapCohorts(segment.cohorts || []),
+  }));
+  return {
+    ...report,
+    startDate,
+    endDate,
+    periods,
+    segments,
+    cohorts: segments[0]?.cohorts || [],
+  };
 }
 
 function planForPeriod(row: CombinedAllSubsRow, periodKey: string): CombinedAllSubsPlan {
@@ -320,8 +370,26 @@ async function validateAndRun(body: Partial<RequestBody>) {
     throw new Error("endDate must be >= startDate");
   }
 
-  const key = `api:ndr-gdr:${stableStringify({ startDate, endDate, combineMode, groupBy })}`;
-  return getOrSetCache(key, CACHE_TTL_MS, () => buildNdrGdrReport({ startDate, endDate, combineMode, groupBy }));
+  const today = new Date().toISOString().slice(0, 10);
+  const canonicalStartDate = startDate < MONTHLY_CANONICAL_START_DATE ? startDate : MONTHLY_CANONICAL_START_DATE;
+  const canonicalEndDate = endDate > today ? endDate : today;
+  const canonicalPayload = { startDate: canonicalStartDate, endDate: canonicalEndDate, combineMode, groupBy };
+  const key = `api:ndr-gdr:${stableStringify(canonicalPayload)}`;
+  const canonical = await getOrSetCache(key, CACHE_TTL_MS, async () => {
+    const precomputed = await readPrecomputedPayload<NdrGdrResponse>(PRECOMPUTED_ENDPOINT_KEY, key).catch(() => null);
+    if (precomputed) return precomputed;
+    const built = await buildNdrGdrReport(canonicalPayload);
+    await writePrecomputedPayload({
+      endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+      cache_key: key,
+      start_date: canonicalStartDate,
+      end_date: canonicalEndDate,
+      grain: "monthly",
+      payload_json: JSON.stringify(built),
+    }).catch(() => null);
+    return built;
+  });
+  return sliceNdrGdrResponse(canonical, startDate, endDate);
 }
 
 export async function POST(req: Request) {
