@@ -1,11 +1,33 @@
+import { createHash } from "node:crypto";
+import { BlobNotFoundError, del, head, list, put } from "@vercel/blob";
+import { blobFetchHeaders, blobReadWriteToken, hasBlobToken } from "@/lib/blobConfig";
+
 type CacheEntry<T> = {
   value: T;
   expiresAt: number;
 };
 
+type PersistentCacheEnvelope<T> = {
+  key: string;
+  cachedAt: number;
+  expiresAt: number;
+  value: T;
+};
+
 const VALUE_CACHE = new Map<string, CacheEntry<unknown>>();
 const IN_FLIGHT = new Map<string, Promise<unknown>>();
 let CACHE_GENERATION = 1;
+const BLOB_PREFIX = String(process.env.SERVER_RESPONSE_CACHE_BLOB_PREFIX || "arr/runtime-cache/v1")
+  .trim()
+  .replace(/^\/+|\/+$/g, "");
+
+const persistentCacheStats = {
+  hits: 0,
+  misses: 0,
+  writes: 0,
+  readErrors: 0,
+  writeErrors: 0,
+};
 
 function nowMs() {
   return Date.now();
@@ -40,6 +62,134 @@ function cacheKeyWithGeneration(key: string) {
   return `${CACHE_GENERATION}:${key}`;
 }
 
+function canUsePersistentBlobCache() {
+  if (!hasBlobToken()) return false;
+  const raw = String(process.env.SERVER_RESPONSE_CACHE_BLOB_ENABLED || "true").trim().toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "no";
+}
+
+function cacheBlobPathForScopedKey(scopedKey: string) {
+  const digest = createHash("sha256").update(scopedKey).digest("hex");
+  return `${BLOB_PREFIX}/${digest}.json`;
+}
+
+async function readPersistentBlobEntry<T>(scopedKey: string): Promise<PersistentCacheEnvelope<T> | null> {
+  if (!canUsePersistentBlobCache()) return null;
+
+  const token = blobReadWriteToken();
+  if (!token) return null;
+
+  const pathname = cacheBlobPathForScopedKey(scopedKey);
+  try {
+    const meta = await head(pathname, { token });
+    const res = await fetch(meta.url, {
+      headers: blobFetchHeaders(),
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const parsed = (await res.json()) as Partial<PersistentCacheEnvelope<T>>;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (String(parsed.key || "") !== scopedKey) return null;
+    if (!Number.isFinite(Number(parsed.expiresAt || 0))) return null;
+    return {
+      key: scopedKey,
+      cachedAt: Number(parsed.cachedAt || 0),
+      expiresAt: Number(parsed.expiresAt || 0),
+      value: parsed.value as T,
+    };
+  } catch (error: unknown) {
+    if (error instanceof BlobNotFoundError) return null;
+    persistentCacheStats.readErrors += 1;
+    return null;
+  }
+}
+
+async function writePersistentBlobEntry<T>(scopedKey: string, value: T, expiresAt: number) {
+  if (!canUsePersistentBlobCache()) return;
+  const token = blobReadWriteToken();
+  if (!token) return;
+
+  const pathname = cacheBlobPathForScopedKey(scopedKey);
+  const payload: PersistentCacheEnvelope<T> = {
+    key: scopedKey,
+    cachedAt: nowMs(),
+    expiresAt,
+    value,
+  };
+  try {
+    await put(pathname, JSON.stringify(payload), {
+      access: "private",
+      allowOverwrite: true,
+      addRandomSuffix: false,
+      contentType: "application/json; charset=utf-8",
+      token,
+    });
+    persistentCacheStats.writes += 1;
+  } catch {
+    persistentCacheStats.writeErrors += 1;
+  }
+}
+
+export async function clearPersistentServerResponseCache() {
+  if (!canUsePersistentBlobCache()) {
+    return {
+      enabled: false,
+      deleted: 0,
+      scanned: 0,
+      pages: 0,
+      prefix: BLOB_PREFIX,
+    };
+  }
+
+  const token = blobReadWriteToken();
+  if (!token) {
+    return {
+      enabled: false,
+      deleted: 0,
+      scanned: 0,
+      pages: 0,
+      prefix: BLOB_PREFIX,
+    };
+  }
+
+  let cursor: string | undefined;
+  let hasMore = true;
+  let deleted = 0;
+  let scanned = 0;
+  let pages = 0;
+
+  while (hasMore) {
+    const page = await list({
+      token,
+      prefix: `${BLOB_PREFIX}/`,
+      cursor,
+      limit: 1000,
+    });
+    pages += 1;
+    const pathnames = (page.blobs || []).map((blob) => String(blob.pathname || "")).filter(Boolean);
+    scanned += pathnames.length;
+    if (pathnames.length) {
+      await del(pathnames, { token });
+      deleted += pathnames.length;
+    }
+    hasMore = Boolean(page.hasMore);
+    cursor = page.cursor;
+  }
+
+  return { enabled: true, deleted, scanned, pages, prefix: BLOB_PREFIX };
+}
+
+export function serverResponseCacheStats() {
+  return {
+    generation: CACHE_GENERATION,
+    inMemoryEntries: VALUE_CACHE.size,
+    inFlightEntries: IN_FLIGHT.size,
+    persistentEnabled: canUsePersistentBlobCache(),
+    persistentPrefix: BLOB_PREFIX,
+    persistent: { ...persistentCacheStats },
+  };
+}
+
 export function clearServerResponseCache() {
   const entriesBefore = VALUE_CACHE.size;
   const inFlightBefore = IN_FLIGHT.size;
@@ -59,6 +209,17 @@ export async function getOrSetCache<T>(key: string, ttlMs: number, producer: () 
     const hit = VALUE_CACHE.get(scopedKey);
     if (hit && hit.expiresAt > nowMs()) return hit.value as T;
     if (hit && hit.expiresAt <= nowMs()) VALUE_CACHE.delete(scopedKey);
+
+    const persistentHit = await readPersistentBlobEntry<T>(scopedKey);
+    if (persistentHit && persistentHit.expiresAt > nowMs()) {
+      VALUE_CACHE.set(scopedKey, {
+        value: persistentHit.value,
+        expiresAt: persistentHit.expiresAt,
+      });
+      persistentCacheStats.hits += 1;
+      return persistentHit.value;
+    }
+    persistentCacheStats.misses += 1;
   }
 
   const inFlight = IN_FLIGHT.get(scopedKey);
@@ -67,7 +228,9 @@ export async function getOrSetCache<T>(key: string, ttlMs: number, producer: () 
   const promise = (async () => {
     const value = await producer();
     if (ttlMs > 0) {
-      VALUE_CACHE.set(scopedKey, { value, expiresAt: nowMs() + ttlMs });
+      const expiresAt = nowMs() + ttlMs;
+      VALUE_CACHE.set(scopedKey, { value, expiresAt });
+      await writePersistentBlobEntry(scopedKey, value, expiresAt);
     }
     return value;
   })();

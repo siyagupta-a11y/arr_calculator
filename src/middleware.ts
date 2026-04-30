@@ -14,6 +14,7 @@ const PUBLIC_API_PATH_PREFIXES = [
   "/api/stripe-upcoming-snapshots-cleanup",
   "/api/stripe-bigquery-refresh",
   "/api/hubspot-current-metrics-sync",
+  "/api/cache/nightly-sync",
 ];
 const ADMIN_PAGE_PATH_PREFIXES = ["/model-update"];
 const ADMIN_API_PATH_PREFIXES = ["/api/model-update"];
