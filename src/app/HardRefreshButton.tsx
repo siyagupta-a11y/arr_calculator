@@ -118,41 +118,57 @@ export default function HardRefreshButton() {
       let done = Boolean(startPayload?.done) || totalTasks === 0;
       let okTaskCount = 0;
       let failedTaskCount = 0;
+      let transportFailedTaskCount = 0;
 
       while (!done) {
         setSyncProgress(`Running cache warmup task ${nextTaskIndex + 1}/${totalTasks}...`);
-        const stepRes = await fetch("/api/cache/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          cache: "no-store",
-          body: JSON.stringify({
-            action: "step",
-            taskIndex: nextTaskIndex,
-            batchSize: 1,
-          }),
-        });
-        if (!stepRes.ok) {
-          const text = await stepRes.text();
-          const snippet = text.replace(/\s+/g, " ").slice(0, 220);
-          const looksLikeHtml = snippet.toLowerCase().includes("<!doctype html");
-          const reason = looksLikeHtml
-            ? "Server returned HTML error page (usually timeout or runtime crash)."
-            : snippet;
-          throw new Error(`Sync step failed (${stepRes.status}). ${reason}`);
+        let stepProcessed = false;
+        for (let attempt = 1; attempt <= 2 && !stepProcessed; attempt += 1) {
+          const stepRes = await fetch("/api/cache/sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            cache: "no-store",
+            body: JSON.stringify({
+              action: "step",
+              taskIndex: nextTaskIndex,
+              batchSize: 1,
+            }),
+          });
+          if (!stepRes.ok) {
+            const text = await stepRes.text();
+            const snippet = text.replace(/\s+/g, " ").slice(0, 220);
+            const looksLikeHtml = snippet.toLowerCase().includes("<!doctype html");
+            if (attempt < 2) {
+              setSyncProgress(`Retrying task ${nextTaskIndex + 1}/${totalTasks} after transient error...`);
+              continue;
+            }
+            transportFailedTaskCount += 1;
+            failedTaskCount += 1;
+            nextTaskIndex += 1;
+            done = nextTaskIndex >= totalTasks;
+            const reason = looksLikeHtml
+              ? "Server returned HTML error page (usually timeout or runtime crash)."
+              : snippet;
+            setMessage(`Task ${nextTaskIndex}/${totalTasks} failed and was skipped. ${reason}`);
+            setLastSyncSummary(`${okTaskCount}/${okTaskCount + failedTaskCount} tasks`);
+            stepProcessed = true;
+            continue;
+          }
+          const stepPayload = (await stepRes.json()) as {
+            nextIndex?: number;
+            done?: boolean;
+            results?: Array<{ ok?: boolean }>;
+          };
+          const stepResults = Array.isArray(stepPayload?.results) ? stepPayload.results : [];
+          for (const item of stepResults) {
+            if (item?.ok) okTaskCount += 1;
+            else failedTaskCount += 1;
+          }
+          nextTaskIndex = Math.max(nextTaskIndex + 1, Number(stepPayload?.nextIndex || nextTaskIndex + 1));
+          done = Boolean(stepPayload?.done) || nextTaskIndex >= totalTasks;
+          setLastSyncSummary(`${okTaskCount}/${okTaskCount + failedTaskCount} tasks`);
+          stepProcessed = true;
         }
-        const stepPayload = (await stepRes.json()) as {
-          nextIndex?: number;
-          done?: boolean;
-          results?: Array<{ ok?: boolean }>;
-        };
-        const stepResults = Array.isArray(stepPayload?.results) ? stepPayload.results : [];
-        for (const item of stepResults) {
-          if (item?.ok) okTaskCount += 1;
-          else failedTaskCount += 1;
-        }
-        nextTaskIndex = Math.max(nextTaskIndex + 1, Number(stepPayload?.nextIndex || nextTaskIndex + 1));
-        done = Boolean(stepPayload?.done) || nextTaskIndex >= totalTasks;
-        setLastSyncSummary(`${okTaskCount}/${okTaskCount + failedTaskCount} tasks`);
       }
 
       await fetch("/api/cache/sync", {
@@ -172,7 +188,8 @@ export default function HardRefreshButton() {
       setLastSyncAtUtc(new Date().toISOString());
       setLastSyncSummary(`${okTaskCount}/${okTaskCount + failedTaskCount} tasks`);
       if (failedTaskCount > 0) {
-        setMessage(`Sync completed with ${failedTaskCount} failed task(s).`);
+        const extra = transportFailedTaskCount > 0 ? ` (${transportFailedTaskCount} transport timeout/crash)` : "";
+        setMessage(`Sync completed with ${failedTaskCount} failed task(s)${extra}.`);
       } else {
         setMessage("Sync completed.");
       }
