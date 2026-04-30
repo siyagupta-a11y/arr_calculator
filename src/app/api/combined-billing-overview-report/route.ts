@@ -34,10 +34,10 @@ import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseC
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-const CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_CACHE_TTL_MS", 60_000);
-const AI_SPEND_EXCLUSIONS_CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_EXCLUSIONS_CACHE_TTL_MS", 300_000);
-const SALES_CYCLE_CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_SALES_CYCLE_CACHE_TTL_MS", 300_000);
-const SUBQUERY_CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_SUBQUERY_CACHE_TTL_MS", 300_000);
+const CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
+const AI_SPEND_EXCLUSIONS_CACHE_TTL_MS = readTtlMs("API_STRIPE_AI_SPEND_EXCLUSIONS_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
+const SALES_CYCLE_CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_SALES_CYCLE_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
+const SUBQUERY_CACHE_TTL_MS = readTtlMs("API_COMBINED_BILLING_OVERVIEW_SUBQUERY_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
 const AI_SPEND_UPCOMING_PRODUCT_TERMS = ["ai tokens", "web search and crawl"];
 
 type CombinedGrain = "daily" | "monthly" | "quarterly";
@@ -2326,10 +2326,13 @@ async function resolveCacSelectionForRole(payload: ReturnType<typeof parsePayloa
 async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
   const payload = parsePayload(body);
   const roleScopedSelection = await resolveCacSelectionForRole(payload, isAdmin);
+  const cacheScopedSelection = payload.includeCac
+    ? roleScopedSelection
+    : { accountIds: [] as string[], accountNames: [] as string[] };
   const roleScopedPayload = {
     ...payload,
-    accountIds: roleScopedSelection.accountIds,
-    accountNames: roleScopedSelection.accountNames,
+    accountIds: cacheScopedSelection.accountIds,
+    accountNames: cacheScopedSelection.accountNames,
   };
   const key = `api:combined-billing-overview:${stableStringify(roleScopedPayload)}`;
   return getOrSetCache(key, CACHE_TTL_MS, () =>
@@ -2337,8 +2340,8 @@ async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
       payload.startDate,
       payload.endDate,
       payload.grain,
-      roleScopedSelection.accountIds,
-      roleScopedSelection.accountNames,
+      cacheScopedSelection.accountIds,
+      cacheScopedSelection.accountNames,
       payload.includeCac,
     ),
   );

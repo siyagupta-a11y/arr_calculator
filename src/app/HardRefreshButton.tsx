@@ -7,6 +7,21 @@ function shouldHide(pathname: string) {
   return pathname === "/login" || pathname === "/privacy-policy" || pathname === "/eula";
 }
 
+function formatMontrealTime(isoUtc: string) {
+  const dt = new Date(isoUtc);
+  if (Number.isNaN(dt.getTime())) return isoUtc;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Toronto",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(dt);
+}
+
 export default function HardRefreshButton() {
   const pathname = usePathname();
   const [loading, setLoading] = useState(false);
@@ -345,7 +360,7 @@ export default function HardRefreshButton() {
             fontSize: 12,
           }}
         >
-          Last sync: {new Date(lastSyncAtUtc).toUTCString()}
+          Last sync: {formatMontrealTime(lastSyncAtUtc)} ET
           {lastSyncSummary ? ` (${lastSyncSummary})` : ""}
         </div>
       ) : null}
