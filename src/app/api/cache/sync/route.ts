@@ -10,7 +10,7 @@ import {
 } from "@/lib/siteCacheSync";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 800;
 
 type Body = {
   action?: "start" | "step" | "complete" | "run";

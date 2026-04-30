@@ -134,7 +134,11 @@ export default function HardRefreshButton() {
         if (!stepRes.ok) {
           const text = await stepRes.text();
           const snippet = text.replace(/\s+/g, " ").slice(0, 220);
-          throw new Error(`Sync step failed (${stepRes.status}). ${snippet}`);
+          const looksLikeHtml = snippet.toLowerCase().includes("<!doctype html");
+          const reason = looksLikeHtml
+            ? "Server returned HTML error page (usually timeout or runtime crash)."
+            : snippet;
+          throw new Error(`Sync step failed (${stepRes.status}). ${reason}`);
         }
         const stepPayload = (await stepRes.json()) as {
           nextIndex?: number;

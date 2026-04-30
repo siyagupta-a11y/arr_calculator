@@ -137,6 +137,7 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
         startDate: oneYearStart,
         endDate: today,
         grain: "monthly",
+        includeCac: false,
       },
     },
     {
@@ -146,6 +147,7 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
         startDate: last30Start,
         endDate: today,
         grain: "daily",
+        includeCac: false,
       },
     },
     {
@@ -167,7 +169,7 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
         grain: "monthly",
         groupBy: "email",
         page: 1,
-        pageSize: 1000,
+        pageSize: 250,
       },
     },
     {

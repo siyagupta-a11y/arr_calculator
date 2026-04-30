@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { syncWebsiteCache } from "@/lib/siteCacheSync";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 800;
 
 function isAuthorized(req: Request) {
   if (req.headers.get("x-vercel-cron")) return true;
@@ -28,4 +28,3 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   return GET(req);
 }
-
