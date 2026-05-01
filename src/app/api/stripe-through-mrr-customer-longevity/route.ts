@@ -119,24 +119,27 @@ email_line_item_months AS (
     AND cp.email != ''
     AND COALESCE(CAST(il.amount_minor AS FLOAT64), 0) > 0
 ),
-email_earliest_line_item_month AS (
+email_earliest_paying_after_created AS (
   SELECT
-    email,
-    MIN(line_item_month) AS earliest_line_item_month
-  FROM email_line_item_months
-  WHERE line_item_month IS NOT NULL
-  GROUP BY email
+    ec.email,
+    MIN(elm.line_item_month) AS earliest_paying_month
+  FROM email_created ec
+  JOIN email_line_item_months elm
+    ON elm.email = ec.email
+   AND elm.line_item_month >= ec.earliest_created_month
+  WHERE elm.line_item_month IS NOT NULL
+  GROUP BY ec.email
 ),
 matched AS (
   SELECT
     ec.earliest_customer_id AS customer_id,
     ec.email AS email
   FROM email_created ec
-  JOIN email_earliest_line_item_month ep
+  JOIN email_earliest_paying_after_created ep
     ON ep.email = ec.email
   CROSS JOIN bounds b
   WHERE ec.earliest_created_date BETWEEN b.start_date AND b.end_date
-    AND ep.earliest_line_item_month = ec.earliest_created_month
+    AND ep.earliest_paying_month = ec.earliest_created_month
 )
 SELECT
   customer_id,
