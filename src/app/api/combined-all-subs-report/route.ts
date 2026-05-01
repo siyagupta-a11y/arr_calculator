@@ -16,6 +16,7 @@ const MONTHLY_CANONICAL_START_DATE = (() => {
   return /^\d{4}-\d{2}-\d{2}$/.test(configured) ? configured : "2023-01-01";
 })();
 const PRECOMPUTED_ENDPOINT_KEY = "combined-all-subs:monthly";
+type CombinedAllSubsApiRequest = Partial<CombinedAllSubsRequest> & { precomputeRangeOnly?: boolean };
 
 function monthKey(value: string) {
   return String(value || "").trim().slice(0, 7);
@@ -63,7 +64,7 @@ function sliceMonthlyResponse(
   };
 }
 
-async function validateAndRun(body: Partial<CombinedAllSubsRequest>) {
+async function validateAndRun(body: CombinedAllSubsApiRequest) {
   const payload: CombinedAllSubsRequest = {
     startDate: String(body.startDate || ""),
     endDate: String(body.endDate || ""),
@@ -74,7 +75,8 @@ async function validateAndRun(body: Partial<CombinedAllSubsRequest>) {
     groupedMatchStrategy: body.groupedMatchStrategy,
     includeSalesAssist: body.includeSalesAssist,
   };
-  if (payload.planGrain === "monthly") {
+  const precomputeRangeOnly = body.precomputeRangeOnly === true;
+  if (payload.planGrain === "monthly" && !precomputeRangeOnly) {
     const today = new Date().toISOString().slice(0, 10);
     const canonicalStartDate = payload.startDate < MONTHLY_CANONICAL_START_DATE
       ? payload.startDate
@@ -112,7 +114,7 @@ async function validateAndRun(body: Partial<CombinedAllSubsRequest>) {
 export async function POST(req: Request) {
   try {
     const raw = await req.text();
-    const body = (raw ? JSON.parse(raw) : {}) as Partial<CombinedAllSubsRequest>;
+    const body = (raw ? JSON.parse(raw) : {}) as CombinedAllSubsApiRequest;
     const report = await validateAndRun(body);
     return NextResponse.json(report);
   } catch (error: unknown) {

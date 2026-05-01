@@ -141,21 +141,62 @@ export default function HardRefreshButton() {
       const transportFailureIndexes = new Set<number>();
       let transportFailedTaskCount = 0;
 
+      const stepBatchSize = 3;
       while (!done) {
-        setSyncProgress(`Running cache warmup task ${nextTaskIndex + 1}/${totalTasks}...`);
+        const stepEnd = Math.min(totalTasks, nextTaskIndex + stepBatchSize);
+        setSyncProgress(`Running cache warmup tasks ${nextTaskIndex + 1}-${stepEnd}/${totalTasks}...`);
         const currentTaskIndex = nextTaskIndex;
         let stepProcessed = false;
         for (let attempt = 1; attempt <= 2 && !stepProcessed; attempt += 1) {
-          const stepRes = await fetch("/api/cache/sync", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            cache: "no-store",
-            body: JSON.stringify({
-              action: "step",
-              taskIndex: nextTaskIndex,
-              batchSize: 1,
-            }),
-          });
+          let stepRes: Response | null = null;
+          let fetchThrown: unknown = null;
+          try {
+            stepRes = await fetch("/api/cache/sync", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              cache: "no-store",
+              body: JSON.stringify({
+                action: "step",
+                taskIndex: nextTaskIndex,
+                batchSize: stepBatchSize,
+              }),
+            });
+          } catch (error: unknown) {
+            fetchThrown = error;
+          }
+          if (fetchThrown) {
+            if (attempt < 2) {
+              setSyncProgress(`Retrying task ${nextTaskIndex + 1}/${totalTasks} after transient network error...`);
+              continue;
+            }
+            transportFailedTaskCount += 1;
+            failedTaskCount += 1;
+            transportFailureIndexes.add(currentTaskIndex);
+            const label = taskKeys[currentTaskIndex] || `task ${currentTaskIndex + 1}`;
+            const reason = fetchThrown instanceof Error ? fetchThrown.message : "Fetch failed";
+            failedTaskReasons.set(currentTaskIndex, `${label}: ${reason}`);
+            nextTaskIndex += 1;
+            done = nextTaskIndex >= totalTasks;
+            setLastSyncSummary(`${okTaskCount}/${okTaskCount + failedTaskCount} tasks`);
+            stepProcessed = true;
+            continue;
+          }
+          if (!stepRes) {
+            if (attempt < 2) {
+              setSyncProgress(`Retrying task ${nextTaskIndex + 1}/${totalTasks} after transient network error...`);
+              continue;
+            }
+            transportFailedTaskCount += 1;
+            failedTaskCount += 1;
+            transportFailureIndexes.add(currentTaskIndex);
+            const label = taskKeys[currentTaskIndex] || `task ${currentTaskIndex + 1}`;
+            failedTaskReasons.set(currentTaskIndex, `${label}: No response from sync endpoint.`);
+            nextTaskIndex += 1;
+            done = nextTaskIndex >= totalTasks;
+            setLastSyncSummary(`${okTaskCount}/${okTaskCount + failedTaskCount} tasks`);
+            stepProcessed = true;
+            continue;
+          }
           if (!stepRes.ok) {
             const text = await stepRes.text();
             const snippet = text.replace(/\s+/g, " ").slice(0, 220);
@@ -184,20 +225,27 @@ export default function HardRefreshButton() {
             results?: Array<{ ok?: boolean; key?: string; error?: string; status?: number }>;
           };
           const stepResults = Array.isArray(stepPayload?.results) ? stepPayload.results : [];
-          const item = stepResults[0];
-          if (item?.ok) {
-            okTaskCount += 1;
-            failedTaskReasons.delete(currentTaskIndex);
-            if (transportFailureIndexes.delete(currentTaskIndex)) {
-              transportFailedTaskCount = Math.max(0, transportFailedTaskCount - 1);
+          for (let idx = 0; idx < stepResults.length; idx += 1) {
+            const taskIdx = currentTaskIndex + idx;
+            const item = stepResults[idx];
+            if (item?.ok) {
+              okTaskCount += 1;
+              failedTaskReasons.delete(taskIdx);
+              if (transportFailureIndexes.delete(taskIdx)) {
+                transportFailedTaskCount = Math.max(0, transportFailedTaskCount - 1);
+              }
+            } else {
+              failedTaskCount += 1;
+              const label = String(item?.key || taskKeys[taskIdx] || `task ${taskIdx + 1}`);
+              const detail = String(item?.error || (item?.status ? `HTTP ${item.status}` : "task failed"));
+              failedTaskReasons.set(taskIdx, `${label}: ${detail}`);
             }
-          } else {
-            failedTaskCount += 1;
-            const label = String(item?.key || taskKeys[currentTaskIndex] || `task ${currentTaskIndex + 1}`);
-            const detail = String(item?.error || (item?.status ? `HTTP ${item.status}` : "task failed"));
-            failedTaskReasons.set(currentTaskIndex, `${label}: ${detail}`);
           }
-          nextTaskIndex = Math.max(nextTaskIndex + 1, Number(stepPayload?.nextIndex || nextTaskIndex + 1));
+          const processedCount = Math.max(1, stepResults.length);
+          nextTaskIndex = Math.max(
+            currentTaskIndex + processedCount,
+            Number(stepPayload?.nextIndex || currentTaskIndex + processedCount),
+          );
           done = Boolean(stepPayload?.done) || nextTaskIndex >= totalTasks;
           setLastSyncSummary(`${okTaskCount}/${okTaskCount + failedTaskCount} tasks`);
           stepProcessed = true;
@@ -208,16 +256,21 @@ export default function HardRefreshButton() {
         const retryIndexes = Array.from(failedTaskReasons.keys()).sort((a, b) => a - b);
         for (const index of retryIndexes) {
           setSyncProgress(`Retrying failed task ${index + 1}/${totalTasks}...`);
-          const retryRes = await fetch("/api/cache/sync", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            cache: "no-store",
-            body: JSON.stringify({
-              action: "step",
-              taskIndex: index,
-              batchSize: 1,
-            }),
-          });
+          let retryRes: Response | null = null;
+          try {
+            retryRes = await fetch("/api/cache/sync", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              cache: "no-store",
+              body: JSON.stringify({
+                action: "step",
+                taskIndex: index,
+                batchSize: 1,
+              }),
+            });
+          } catch {
+            continue;
+          }
           if (!retryRes.ok) continue;
           const retryPayload = (await retryRes.json()) as {
             results?: Array<{ ok?: boolean; key?: string; error?: string; status?: number }>;

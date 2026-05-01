@@ -45,6 +45,7 @@ type WarmupTaskDefinition = {
   key: string;
   handler: RoutePostHandler;
   body: Record<string, unknown>;
+  source?: "bigquery" | "hubspot" | "stripe_api" | "mixed";
 };
 
 export type CacheSyncClearResult = {
@@ -114,43 +115,176 @@ async function invokeRoutePost(label: string, handler: RoutePostHandler, body: R
   }
 }
 
+async function invokeRoutePostWithRetry(task: WarmupTaskDefinition) {
+  let attempt = 1;
+  let result = await invokeRoutePost(task.key, task.handler, task.body);
+  while (!result.ok && attempt < 3) {
+    attempt += 1;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    result = await invokeRoutePost(task.key, task.handler, task.body);
+  }
+  if (!result.ok && attempt > 1) {
+    return {
+      ...result,
+      error: `${result.error || "task failed"} (after ${attempt} attempts)`,
+    };
+  }
+  return result;
+}
+
+function parseIsoDateOnlyUtc(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month ||
+    parsed.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+function addMonthsUtc(date: Date, deltaMonths: number) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + deltaMonths, 1));
+}
+
+function endOfMonthUtc(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0));
+}
+
+type WarmupRangeChunk = {
+  startDate: string;
+  endDate: string;
+  label: string;
+};
+
+function buildMonthlyWarmupChunks(startDate: string, endDate: string, monthsPerChunk: number): WarmupRangeChunk[] {
+  const start = parseIsoDateOnlyUtc(startDate);
+  const end = parseIsoDateOnlyUtc(endDate);
+  if (!start || !end || end.getTime() < start.getTime()) return [];
+  const chunkMonths = Number.isFinite(monthsPerChunk) ? Math.max(1, Math.floor(monthsPerChunk)) : 2;
+  const chunks: WarmupRangeChunk[] = [];
+  let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  while (cursor.getTime() <= end.getTime()) {
+    const chunkStart = cursor;
+    const chunkEndCandidate = endOfMonthUtc(addMonthsUtc(chunkStart, chunkMonths - 1));
+    const chunkEnd = chunkEndCandidate.getTime() > end.getTime() ? end : chunkEndCandidate;
+    const chunkStartIso = toIsoDateOnlyUtc(chunkStart);
+    const chunkEndIso = toIsoDateOnlyUtc(chunkEnd);
+    chunks.push({
+      startDate: chunkStartIso,
+      endDate: chunkEndIso,
+      label: `${chunkStartIso}..${chunkEndIso}`,
+    });
+    cursor = addMonthsUtc(chunkStart, chunkMonths);
+  }
+  return chunks;
+}
+
 export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
   const { today, currentMonthStart, monthlyHistoryStart } = defaultRanges();
-  return [
-    {
-      key: "combined-all-subs:grouped:arr:monthly",
+  const chunkMonths = Number(process.env.CACHE_SYNC_MONTHLY_CHUNK_SIZE || 2);
+  const chunks = buildMonthlyWarmupChunks(monthlyHistoryStart, today, chunkMonths);
+  const tasks: WarmupTaskDefinition[] = [];
+
+  for (const chunk of chunks) {
+    tasks.push({
+      key: `combined-all-subs:chunk:${chunk.label}`,
       handler: combinedAllSubsPost,
+      source: "bigquery",
       body: {
-        startDate: monthlyHistoryStart,
-        endDate: today,
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
         combineMode: "grouped",
         displayMode: "arr",
         planGrain: "monthly",
+        precomputeRangeOnly: true,
       },
-    },
-    {
-      key: "combined-billing-overview:monthly",
+    });
+    tasks.push({
+      key: `combined-billing-overview:no-cac:chunk:${chunk.label}`,
       handler: combinedBillingOverviewPost,
+      source: "bigquery",
       body: {
-        startDate: monthlyHistoryStart,
-        endDate: today,
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
         grain: "monthly",
         includeCac: false,
+        precomputeRangeOnly: true,
       },
-    },
-    {
-      key: "combined-billing-overview:monthly:cac",
+    });
+    tasks.push({
+      key: `combined-billing-overview:cac:chunk:${chunk.label}`,
       handler: combinedBillingOverviewPost,
+      source: "bigquery",
       body: {
-        startDate: monthlyHistoryStart,
-        endDate: today,
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
         grain: "monthly",
         includeCac: true,
+        precomputeRangeOnly: true,
       },
-    },
+    });
+    tasks.push({
+      key: `tofu:chunk:${chunk.label}`,
+      handler: tofuPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "grouped",
+        groupBy: "month",
+        precomputeRangeOnly: true,
+      },
+    });
+    tasks.push({
+      key: `ndr-gdr:overall:chunk:${chunk.label}`,
+      handler: ndrGdrPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "grouped",
+        groupBy: "overall",
+        precomputeRangeOnly: true,
+      },
+    });
+    tasks.push({
+      key: `ndr-gdr:source:chunk:${chunk.label}`,
+      handler: ndrGdrPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "grouped",
+        groupBy: "source",
+        precomputeRangeOnly: true,
+      },
+    });
+    tasks.push({
+      key: `ndr-gdr:plan:chunk:${chunk.label}`,
+      handler: ndrGdrPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "grouped",
+        groupBy: "plan",
+        precomputeRangeOnly: true,
+      },
+    });
+  }
+
+  tasks.push(
     {
       key: "hubspot-view-model:contracted:monthly",
       handler: hubspotViewModelPost,
+      source: "hubspot",
       body: {
         startDate: monthlyHistoryStart,
         endDate: today,
@@ -161,6 +295,7 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
     {
       key: "stripe-through-mrr:monthly:email",
       handler: stripeThroughMrrPost,
+      source: "bigquery",
       body: {
         startDate: monthlyHistoryStart,
         endDate: today,
@@ -173,6 +308,7 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
     {
       key: "stripe-billing-overview:monthly",
       handler: stripeBillingOverviewPost,
+      source: "bigquery",
       body: {
         startDate: monthlyHistoryStart,
         endDate: today,
@@ -183,6 +319,7 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
     {
       key: "stripe-ai-spend:current-month",
       handler: stripeAiSpendPost,
+      source: "bigquery",
       body: {
         startDate: currentMonthStart,
         endDate: today,
@@ -190,51 +327,14 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
       },
     },
     {
-      key: "tofu:grouped:month",
-      handler: tofuPost,
-      body: {
-        startDate: monthlyHistoryStart,
-        endDate: today,
-        combineMode: "grouped",
-        groupBy: "month",
-      },
-    },
-    {
-      key: "ndr-gdr:overall",
-      handler: ndrGdrPost,
-      body: {
-        startDate: monthlyHistoryStart,
-        endDate: today,
-        combineMode: "grouped",
-        groupBy: "overall",
-      },
-    },
-    {
-      key: "ndr-gdr:source",
-      handler: ndrGdrPost,
-      body: {
-        startDate: monthlyHistoryStart,
-        endDate: today,
-        combineMode: "grouped",
-        groupBy: "source",
-      },
-    },
-    {
-      key: "ndr-gdr:plan",
-      handler: ndrGdrPost,
-      body: {
-        startDate: monthlyHistoryStart,
-        endDate: today,
-        combineMode: "grouped",
-        groupBy: "plan",
-      },
-    },
-    {
       key: "combined-live-arr",
       handler: combinedLiveArrPost,
+      source: "mixed",
       body: {},
     },
-  ];
+  );
+
+  return tasks;
 }
 
 export async function clearWebsiteCaches(): Promise<CacheSyncClearResult> {
@@ -252,11 +352,43 @@ export async function runWarmupTaskBatch(startIndex: number, batchSize: number):
   const safeBatchSize = Number.isFinite(batchSize) ? Math.max(1, Math.min(3, Math.floor(batchSize))) : 1;
   const endExclusive = Math.min(totalTasks, safeStart + safeBatchSize);
 
-  const results: CacheSyncTaskResult[] = [];
+  const scheduled: Array<{ index: number; task: WarmupTaskDefinition }> = [];
   for (let i = safeStart; i < endExclusive; i += 1) {
-    const task = tasks[i];
-    results.push(await invokeRoutePost(task.key, task.handler, task.body));
+    scheduled.push({ index: i, task: tasks[i] });
   }
+
+  const orderedResults: Array<CacheSyncTaskResult | null> = Array.from(
+    { length: scheduled.length },
+    () => null,
+  );
+
+  let cursor = 0;
+  while (cursor < scheduled.length) {
+    const wave: Array<{ localIndex: number; task: WarmupTaskDefinition }> = [];
+    const usedSources = new Set<string>();
+    for (let j = cursor; j < scheduled.length; j += 1) {
+      const localIndex = j;
+      const task = scheduled[j].task;
+      const source = String(task.source || "mixed");
+      if (usedSources.has(source)) break;
+      usedSources.add(source);
+      wave.push({ localIndex, task });
+    }
+
+    const waveResults = await Promise.all(
+      wave.map(async ({ localIndex, task }) => ({
+        localIndex,
+        result: await invokeRoutePostWithRetry(task),
+      })),
+    );
+
+    for (const waveResult of waveResults) {
+      orderedResults[waveResult.localIndex] = waveResult.result;
+    }
+    cursor += Math.max(1, wave.length);
+  }
+
+  const results = orderedResults.filter((value): value is CacheSyncTaskResult => Boolean(value));
 
   return {
     totalTasks,

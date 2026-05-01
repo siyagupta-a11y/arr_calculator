@@ -218,6 +218,7 @@ type RequestBody = {
   accountIds?: string[];
   accountNames?: string[];
   includeCac?: boolean;
+  precomputeRangeOnly?: boolean;
 };
 
 function round2(n: number) {
@@ -1490,6 +1491,7 @@ function parsePayload(raw: Partial<RequestBody>) {
     accountIds: normalizeIdList(raw.accountIds),
     accountNames: normalizeNames(raw.accountNames),
     includeCac: raw.includeCac !== false,
+    precomputeRangeOnly: raw.precomputeRangeOnly === true,
   };
 }
 
@@ -2527,6 +2529,24 @@ async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
   const cacheScopedSelection = payload.includeCac
     ? roleScopedSelection
     : { accountIds: [] as string[], accountNames: [] as string[] };
+  if (payload.grain === "monthly" && payload.precomputeRangeOnly) {
+    const roleScopedPayload = {
+      ...payload,
+      accountIds: cacheScopedSelection.accountIds,
+      accountNames: cacheScopedSelection.accountNames,
+    };
+    const key = `api:combined-billing-overview:range:${stableStringify(roleScopedPayload)}`;
+    return getOrSetCache(key, CACHE_TTL_MS, () =>
+      buildCombinedBillingOverview(
+        payload.startDate,
+        payload.endDate,
+        payload.grain,
+        cacheScopedSelection.accountIds,
+        cacheScopedSelection.accountNames,
+        payload.includeCac,
+      ),
+    );
+  }
   if (payload.grain === "monthly") {
     const todayIso = toIsoDateOnly(new Date());
     const canonicalStartDate = payload.startDate < MONTHLY_CANONICAL_START_DATE

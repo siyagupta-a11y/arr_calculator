@@ -24,6 +24,7 @@ type RequestBody = {
   endDate?: string;
   combineMode?: string;
   groupBy?: string;
+  precomputeRangeOnly?: boolean;
 };
 
 type CohortRow = {
@@ -363,11 +364,18 @@ async function validateAndRun(body: Partial<RequestBody>) {
   const endDate = String(body.endDate || "").trim();
   const combineMode = normalizeCombineMode(body.combineMode);
   const groupBy = normalizeGroupBy(body.groupBy);
+  const precomputeRangeOnly = body.precomputeRangeOnly === true;
   if (!isIsoDate(startDate) || !isIsoDate(endDate)) {
     throw new Error("Invalid startDate/endDate");
   }
   if (endDate < startDate) {
     throw new Error("endDate must be >= startDate");
+  }
+
+  if (precomputeRangeOnly) {
+    const rangePayload = { startDate, endDate, combineMode, groupBy };
+    const rangeKey = `api:ndr-gdr:range:${stableStringify(rangePayload)}`;
+    return getOrSetCache(rangeKey, CACHE_TTL_MS, () => buildNdrGdrReport(rangePayload));
   }
 
   const today = new Date().toISOString().slice(0, 10);

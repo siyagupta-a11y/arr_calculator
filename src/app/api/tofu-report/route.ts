@@ -24,6 +24,7 @@ type TofuApiRequest = Partial<TofuRequest> & {
   detailPeriodKey?: string;
   detailMetric?: string;
   detailSegment?: string;
+  precomputeRangeOnly?: boolean;
 };
 
 function monthKey(value: string) {
@@ -65,6 +66,12 @@ async function validateAndRun(body: TofuApiRequest) {
     };
     const key = `api:tofu-report:detail:${stableStringify(detailPayload)}`;
     return getOrSetCache(key, CACHE_TTL_MS, () => generateTofuDetailReport(detailPayload));
+  }
+
+  const precomputeRangeOnly = body.precomputeRangeOnly === true;
+  if (precomputeRangeOnly) {
+    const rangeKey = `api:tofu-report:range:${stableStringify(basePayload)}`;
+    return getOrSetCache(rangeKey, CACHE_TTL_MS, () => generateTofuReport(basePayload));
   }
 
   const today = new Date().toISOString().slice(0, 10);
