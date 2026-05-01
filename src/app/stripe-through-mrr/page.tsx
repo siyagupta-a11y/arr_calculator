@@ -271,6 +271,7 @@ export default function StripeThroughMrrPage() {
   const [createdCustomersWithSameMonthMrrRowsLoading, setCreatedCustomersWithSameMonthMrrRowsLoading] = useState(false);
   const [createdCustomersWithSameMonthMrrRowsError, setCreatedCustomersWithSameMonthMrrRowsError] = useState<string | null>(null);
   const [showCreatedCustomersWithSameMonthMrrRows, setShowCreatedCustomersWithSameMonthMrrRows] = useState(false);
+  const [createdCustomersWithSameMonthMrrCountError, setCreatedCustomersWithSameMonthMrrCountError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Detail table filters
@@ -294,6 +295,7 @@ export default function StripeThroughMrrPage() {
     setCreatedCustomersWithSameMonthMrrRowsLoading(false);
     setCreatedCustomersWithSameMonthMrrRowsError(null);
     setShowCreatedCustomersWithSameMonthMrrRows(false);
+    setCreatedCustomersWithSameMonthMrrCountError(null);
     try {
       const [res, longevityRes] = await Promise.all([
         fetch("/api/stripe-through-mrr-report", {
@@ -352,6 +354,9 @@ export default function StripeThroughMrrPage() {
         if (Number.isFinite(countValue)) {
           setCreatedCustomersWithSameMonthMrrCount(Math.max(0, Math.floor(countValue)));
         }
+      } else if (longevityRes) {
+        const text = await longevityRes.text();
+        setCreatedCustomersWithSameMonthMrrCountError(text || `HTTP ${longevityRes.status}`);
       }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
@@ -1170,6 +1175,11 @@ export default function StripeThroughMrrPage() {
                       : new Intl.NumberFormat().format(createdCustomersWithSameMonthMrrCount)}
                   </button>
                 </p>
+                {createdCustomersWithSameMonthMrrCountError ? (
+                  <p className="stripe-ui__panel-subtitle" style={{ marginTop: "0.35rem", color: "#b91c1c" }}>
+                    Metric error: {createdCustomersWithSameMonthMrrCountError}
+                  </p>
+                ) : null}
               </div>
             </div>
             {showCreatedCustomersWithSameMonthMrrRows ? (

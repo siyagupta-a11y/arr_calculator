@@ -86,10 +86,6 @@ customer_created_raw AS (
   SELECT
     TRIM(CAST(c.id AS STRING)) AS customer_id,
     NULLIF(TRIM(CAST(c.email AS STRING)), '') AS email,
-    COALESCE(
-      SAFE_CAST(NULLIF(TRIM(CAST(c.received_at AS STRING)), '') AS TIMESTAMP),
-      SAFE_CAST(NULLIF(TRIM(CAST(c._sdc_received_at AS STRING)), '') AS TIMESTAMP)
-    ) AS received_at_ts,
     DATE(
       COALESCE(
         SAFE_CAST(NULLIF(TRIM(CAST(c.created AS STRING)), '') AS TIMESTAMP),
@@ -107,24 +103,14 @@ customer_created_raw AS (
 customer_created AS (
   SELECT
     customer_id,
-    email,
-    created_date,
-    DATE_TRUNC(created_date, MONTH) AS created_month
-  FROM (
-    SELECT
-      customer_id,
-      COALESCE(email, '') AS email,
-      created_date,
-      ROW_NUMBER() OVER (
-        PARTITION BY customer_id
-        ORDER BY (email IS NULL), received_at_ts DESC
-      ) AS rn
-    FROM customer_created_raw
-    WHERE customer_id IS NOT NULL
-      AND customer_id != ''
-      AND created_date IS NOT NULL
-  )
-  WHERE rn = 1
+    COALESCE(ARRAY_AGG(email IGNORE NULLS LIMIT 1)[OFFSET(0)], '') AS email,
+    MIN(created_date) AS created_date,
+    DATE_TRUNC(MIN(created_date), MONTH) AS created_month
+  FROM customer_created_raw
+  WHERE customer_id IS NOT NULL
+    AND customer_id != ''
+    AND created_date IS NOT NULL
+  GROUP BY customer_id
 ),
 created_in_range AS (
   SELECT
