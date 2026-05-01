@@ -84,6 +84,12 @@ type ApiResponse = {
   };
 };
 
+type LongevityApiResponse = {
+  startDate: string;
+  endDate: string;
+  newAndStillCustomerCount: number;
+};
+
 type DetailMetricKey =
   | "monthEndArr"
   | "newMrr"
@@ -256,6 +262,7 @@ export default function StripeThroughMrrPage() {
   const [loading, setLoading] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
   const [data, setData] = useState<ApiResponse | null>(null);
+  const [newAndStillCustomerCount, setNewAndStillCustomerCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Detail table filters
@@ -274,22 +281,33 @@ export default function StripeThroughMrrPage() {
     setHasRunOnce(true);
     setLoading(true);
     setError(null);
+    setNewAndStillCustomerCount(null);
     try {
-      const res = await fetch("/api/stripe-through-mrr-report", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          startDate,
-          endDate,
-          detailStartMonth,
-          detailEndMonth,
-          grain,
-          groupBy,
-          countryFilters: countryFilterRules,
-          page: targetPage,
-          pageSize: PAGE_SIZE,
+      const [res, longevityRes] = await Promise.all([
+        fetch("/api/stripe-through-mrr-report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            startDate,
+            endDate,
+            detailStartMonth,
+            detailEndMonth,
+            grain,
+            groupBy,
+            countryFilters: countryFilterRules,
+            page: targetPage,
+            pageSize: PAGE_SIZE,
+          }),
         }),
-      });
+        fetch("/api/stripe-through-mrr-customer-longevity", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            startDate,
+            endDate,
+          }),
+        }).catch(() => null),
+      ]);
 
       const text = await res.text();
       let json: unknown = null;
@@ -314,6 +332,12 @@ export default function StripeThroughMrrPage() {
       setDetailStartMonth(report.detailStartMonth);
       setDetailEndMonth(report.detailEndMonth);
       setGrain(report.grain || "monthly");
+
+      if (longevityRes && longevityRes.ok) {
+        const longevityJson = (await longevityRes.json()) as Partial<LongevityApiResponse>;
+        const countValue = Number(longevityJson?.newAndStillCustomerCount || 0);
+        if (Number.isFinite(countValue)) setNewAndStillCustomerCount(Math.max(0, Math.floor(countValue)));
+      }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
       setError(message);
@@ -1057,6 +1081,12 @@ export default function StripeThroughMrrPage() {
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Detail month range</p>
                 <p className="stripe-ui__stat-value">{`${data.detailStartMonth} to ${data.detailEndMonth}`}</p>
+              </div>
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">New customers still active since their first month (in range)</p>
+                <p className="stripe-ui__stat-value">
+                  {newAndStillCustomerCount == null ? "—" : new Intl.NumberFormat().format(newAndStillCustomerCount)}
+                </p>
               </div>
             </div>
           </section>
