@@ -29,104 +29,95 @@ function mrrChangeTable() {
   return table;
 }
 
-async function computeNewAndStillCustomersCount(startDate: string, endDate: string) {
-  const table = mrrChangeTable();
+function customersTable() {
+  const configured = String(process.env.BIGQUERY_STRIPE_CUSTOMERS_TABLE || "").trim();
+  const fallback = "botpress-stripe-data-pipeline.stripe.customers";
+  const table = configured || fallback;
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/.test(table)) {
+    throw new Error(`Invalid BigQuery table identifier: ${table}`);
+  }
+  return table;
+}
+
+async function computeCreatedCustomersWithSameMonthMrrCount(startDate: string, endDate: string) {
+  const mrrTable = mrrChangeTable();
+  const customerTable = customersTable();
   const rows = await runBigQuerySqlRows(
     `
 WITH bounds AS (
   SELECT
     DATE(@start_date) AS start_date,
     DATE(@end_date) AS end_date,
-    DATE_TRUNC(DATE(@start_date), MONTH) AS start_month,
     DATE_TRUNC(DATE(@end_date), MONTH) AS end_month
-),
-months AS (
-  SELECT month_start
-  FROM bounds,
-  UNNEST(GENERATE_DATE_ARRAY(start_month, end_month, INTERVAL 1 MONTH)) AS month_start
 ),
 customer_month_changes AS (
   SELECT
     DATE_TRUNC(DATE(event_timestamp), MONTH) AS month_start,
     TRIM(CAST(customer_id AS STRING)) AS customer_id,
     SUM(COALESCE(CAST(mrr_change AS FLOAT64), 0)) AS net_change
-  FROM \`${table}\`, bounds
+  FROM \`${mrrTable}\`, bounds
   WHERE DATE(event_timestamp) <= bounds.end_date
     AND customer_id IS NOT NULL
     AND TRIM(CAST(customer_id AS STRING)) != ''
   GROUP BY 1, 2
 ),
-customers AS (
-  SELECT DISTINCT customer_id
-  FROM customer_month_changes
-),
-baseline AS (
-  SELECT
-    c.customer_id,
-    COALESCE(SUM(IF(cm.month_start < bounds.start_month, cm.net_change, 0)), 0) AS baseline_mrr
-  FROM customers c
-  CROSS JOIN bounds
-  LEFT JOIN customer_month_changes cm
-    ON cm.customer_id = c.customer_id
-  GROUP BY 1
-),
-grid AS (
-  SELECT
-    c.customer_id,
-    m.month_start
-  FROM customers c
-  CROSS JOIN months m
-),
-month_grid AS (
-  SELECT
-    g.customer_id,
-    g.month_start,
-    COALESCE(cm.net_change, 0) AS net_change,
-    b.baseline_mrr
-  FROM grid g
-  LEFT JOIN customer_month_changes cm
-    ON cm.customer_id = g.customer_id
-   AND cm.month_start = g.month_start
-  JOIN baseline b
-    ON b.customer_id = g.customer_id
-),
-mrr_by_month AS (
+customer_month_mrr AS (
   SELECT
     customer_id,
     month_start,
-    baseline_mrr + SUM(net_change) OVER (
+    SUM(net_change) OVER (
       PARTITION BY customer_id
       ORDER BY month_start
       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS month_end_mrr,
-    baseline_mrr + COALESCE(SUM(net_change) OVER (
-      PARTITION BY customer_id
-      ORDER BY month_start
-      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-    ), 0) AS prev_month_end_mrr
-  FROM month_grid
+    ) AS month_end_mrr
+  FROM customer_month_changes
 ),
-first_new_month AS (
+customer_created_raw AS (
+  SELECT
+    TRIM(CAST(c.id AS STRING)) AS customer_id,
+    DATE(
+      COALESCE(
+        SAFE_CAST(NULLIF(TRIM(CAST(c.created AS STRING)), '') AS TIMESTAMP),
+        CASE
+          WHEN REGEXP_CONTAINS(NULLIF(TRIM(CAST(c.created AS STRING)), ''), r'^\\d{13,}$')
+            THEN TIMESTAMP_MILLIS(SAFE_CAST(TRIM(CAST(c.created AS STRING)) AS INT64))
+          WHEN REGEXP_CONTAINS(NULLIF(TRIM(CAST(c.created AS STRING)), ''), r'^\\d{10}$')
+            THEN TIMESTAMP_SECONDS(SAFE_CAST(TRIM(CAST(c.created AS STRING)) AS INT64))
+          ELSE NULL
+        END
+      )
+    ) AS created_date
+  FROM \`${customerTable}\` c
+),
+customer_created AS (
   SELECT
     customer_id,
-    MIN(month_start) AS first_new_month
-  FROM mrr_by_month
-  WHERE prev_month_end_mrr <= 0
-    AND month_end_mrr > 0
-  GROUP BY 1
+    MIN(created_date) AS created_date,
+    DATE_TRUNC(MIN(created_date), MONTH) AS created_month
+  FROM customer_created_raw
+  WHERE customer_id IS NOT NULL
+    AND customer_id != ''
+    AND created_date IS NOT NULL
+  GROUP BY customer_id
 ),
-continuous_since_new AS (
+created_in_range AS (
   SELECT
-    f.customer_id
-  FROM first_new_month f
-  JOIN mrr_by_month m
-    ON m.customer_id = f.customer_id
-   AND m.month_start >= f.first_new_month
-  GROUP BY 1
-  HAVING MIN(m.month_end_mrr) > 0
+    c.customer_id,
+    c.created_month
+  FROM customer_created c, bounds b
+  WHERE c.created_date BETWEEN b.start_date AND b.end_date
+),
+matched AS (
+  SELECT
+    r.customer_id
+  FROM created_in_range r
+  LEFT JOIN customer_month_mrr m
+    ON m.customer_id = r.customer_id
+   AND m.month_start = r.created_month
+  WHERE COALESCE(m.month_end_mrr, 0) > 0
 )
 SELECT COUNT(*) AS customer_count
-FROM continuous_since_new
+FROM matched
 `,
     [
       { name: "start_date", type: "STRING", value: startDate },
@@ -147,13 +138,13 @@ async function validateAndRun(body: Partial<ApiBody>) {
     throw new Error("endDate must be >= startDate");
   }
   const key = `api:stripe-through-mrr-customer-longevity:${stableStringify({ startDate, endDate })}`;
-  const newAndStillCustomerCount = await getOrSetCache(key, CACHE_TTL_MS, () =>
-    computeNewAndStillCustomersCount(startDate, endDate),
+  const createdCustomersWithSameMonthMrrCount = await getOrSetCache(key, CACHE_TTL_MS, () =>
+    computeCreatedCustomersWithSameMonthMrrCount(startDate, endDate),
   );
   return {
     startDate,
     endDate,
-    newAndStillCustomerCount,
+    createdCustomersWithSameMonthMrrCount,
   };
 }
 

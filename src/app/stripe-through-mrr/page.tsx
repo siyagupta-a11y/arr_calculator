@@ -87,7 +87,7 @@ type ApiResponse = {
 type LongevityApiResponse = {
   startDate: string;
   endDate: string;
-  newAndStillCustomerCount: number;
+  createdCustomersWithSameMonthMrrCount: number;
 };
 
 type DetailMetricKey =
@@ -262,7 +262,7 @@ export default function StripeThroughMrrPage() {
   const [loading, setLoading] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
   const [data, setData] = useState<ApiResponse | null>(null);
-  const [newAndStillCustomerCount, setNewAndStillCustomerCount] = useState<number | null>(null);
+  const [createdCustomersWithSameMonthMrrCount, setCreatedCustomersWithSameMonthMrrCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Detail table filters
@@ -281,7 +281,7 @@ export default function StripeThroughMrrPage() {
     setHasRunOnce(true);
     setLoading(true);
     setError(null);
-    setNewAndStillCustomerCount(null);
+    setCreatedCustomersWithSameMonthMrrCount(null);
     try {
       const [res, longevityRes] = await Promise.all([
         fetch("/api/stripe-through-mrr-report", {
@@ -335,8 +335,10 @@ export default function StripeThroughMrrPage() {
 
       if (longevityRes && longevityRes.ok) {
         const longevityJson = (await longevityRes.json()) as Partial<LongevityApiResponse>;
-        const countValue = Number(longevityJson?.newAndStillCustomerCount || 0);
-        if (Number.isFinite(countValue)) setNewAndStillCustomerCount(Math.max(0, Math.floor(countValue)));
+        const countValue = Number(longevityJson?.createdCustomersWithSameMonthMrrCount || 0);
+        if (Number.isFinite(countValue)) {
+          setCreatedCustomersWithSameMonthMrrCount(Math.max(0, Math.floor(countValue)));
+        }
       }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
@@ -1083,9 +1085,11 @@ export default function StripeThroughMrrPage() {
                 <p className="stripe-ui__stat-value">{`${data.detailStartMonth} to ${data.detailEndMonth}`}</p>
               </div>
               <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">New customers still active since their first month (in range)</p>
+                <p className="stripe-ui__stat-label">Created in range with non-zero MRR in their creation month</p>
                 <p className="stripe-ui__stat-value">
-                  {newAndStillCustomerCount == null ? "—" : new Intl.NumberFormat().format(newAndStillCustomerCount)}
+                  {createdCustomersWithSameMonthMrrCount == null
+                    ? "—"
+                    : new Intl.NumberFormat().format(createdCustomersWithSameMonthMrrCount)}
                 </p>
               </div>
             </div>
