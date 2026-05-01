@@ -88,6 +88,10 @@ type LongevityApiResponse = {
   startDate: string;
   endDate: string;
   createdCustomersWithSameMonthMrrCount: number;
+  rows?: Array<{
+    customerId: string;
+    email: string;
+  }>;
 };
 
 type DetailMetricKey =
@@ -263,6 +267,10 @@ export default function StripeThroughMrrPage() {
   const [exportingCsv, setExportingCsv] = useState(false);
   const [data, setData] = useState<ApiResponse | null>(null);
   const [createdCustomersWithSameMonthMrrCount, setCreatedCustomersWithSameMonthMrrCount] = useState<number | null>(null);
+  const [createdCustomersWithSameMonthMrrRows, setCreatedCustomersWithSameMonthMrrRows] = useState<Array<{ customerId: string; email: string }>>([]);
+  const [createdCustomersWithSameMonthMrrRowsLoading, setCreatedCustomersWithSameMonthMrrRowsLoading] = useState(false);
+  const [createdCustomersWithSameMonthMrrRowsError, setCreatedCustomersWithSameMonthMrrRowsError] = useState<string | null>(null);
+  const [showCreatedCustomersWithSameMonthMrrRows, setShowCreatedCustomersWithSameMonthMrrRows] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Detail table filters
@@ -282,6 +290,10 @@ export default function StripeThroughMrrPage() {
     setLoading(true);
     setError(null);
     setCreatedCustomersWithSameMonthMrrCount(null);
+    setCreatedCustomersWithSameMonthMrrRows([]);
+    setCreatedCustomersWithSameMonthMrrRowsLoading(false);
+    setCreatedCustomersWithSameMonthMrrRowsError(null);
+    setShowCreatedCustomersWithSameMonthMrrRows(false);
     try {
       const [res, longevityRes] = await Promise.all([
         fetch("/api/stripe-through-mrr-report", {
@@ -305,6 +317,7 @@ export default function StripeThroughMrrPage() {
           body: JSON.stringify({
             startDate,
             endDate,
+            includeDetails: false,
           }),
         }).catch(() => null),
       ]);
@@ -346,6 +359,55 @@ export default function StripeThroughMrrPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function toggleCreatedCustomersWithSameMonthMrrRows() {
+    if (!showCreatedCustomersWithSameMonthMrrRows) {
+      if (!createdCustomersWithSameMonthMrrRows.length && !createdCustomersWithSameMonthMrrRowsLoading) {
+        setCreatedCustomersWithSameMonthMrrRowsLoading(true);
+        setCreatedCustomersWithSameMonthMrrRowsError(null);
+        try {
+          const res = await fetch("/api/stripe-through-mrr-customer-longevity", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              startDate: data?.startDate || startDate,
+              endDate: data?.endDate || endDate,
+              includeDetails: true,
+            }),
+          });
+          const text = await res.text();
+          let json: unknown = null;
+          try {
+            json = text ? JSON.parse(text) : null;
+          } catch {
+            json = null;
+          }
+          if (!res.ok) {
+            const message =
+              json && typeof json === "object" && "error" in json
+                ? String((json as { error?: unknown }).error || "Failed to load customer list")
+                : text || `HTTP ${res.status}`;
+            throw new Error(message);
+          }
+          const payload = (json || {}) as Partial<LongevityApiResponse>;
+          const rows = Array.isArray(payload.rows) ? payload.rows : [];
+          setCreatedCustomersWithSameMonthMrrRows(
+            rows
+              .map((row) => ({
+                customerId: String(row.customerId || "").trim(),
+                email: String(row.email || "").trim(),
+              }))
+              .filter((row) => row.customerId),
+          );
+        } catch (e: unknown) {
+          setCreatedCustomersWithSameMonthMrrRowsError(e instanceof Error ? e.message : "Failed to load customer list");
+        } finally {
+          setCreatedCustomersWithSameMonthMrrRowsLoading(false);
+        }
+      }
+    }
+    setShowCreatedCustomersWithSameMonthMrrRows((value) => !value);
   }
 
   function runFresh() {
@@ -885,6 +947,14 @@ export default function StripeThroughMrrPage() {
     });
   }
 
+  function exportCreatedCustomersWithSameMonthMrrRowsCsv() {
+    const headers = ["Customer ID", "Email"];
+    const rows = createdCustomersWithSameMonthMrrRows.map((row) => [row.customerId, row.email || ""]);
+    const start = data?.startDate || startDate;
+    const end = data?.endDate || endDate;
+    downloadCsv(`stripe-through-mrr-created-in-range-nonzero-mrr-${start}-to-${end}.csv`, headers, rows);
+  }
+
   return (
     <div className="stripe-ui">
       <section className="stripe-ui__hero ui-reveal">
@@ -1087,12 +1157,65 @@ export default function StripeThroughMrrPage() {
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Created in range with non-zero MRR in their creation month</p>
                 <p className="stripe-ui__stat-value">
-                  {createdCustomersWithSameMonthMrrCount == null
-                    ? "—"
-                    : new Intl.NumberFormat().format(createdCustomersWithSameMonthMrrCount)}
+                  <button
+                    type="button"
+                    className="stripe-ui__btn stripe-ui__btn--ghost"
+                    onClick={() => void toggleCreatedCustomersWithSameMonthMrrRows()}
+                    style={{ padding: 0, fontSize: "inherit", fontWeight: 700, textDecoration: "underline" }}
+                    disabled={createdCustomersWithSameMonthMrrCount == null}
+                    title="Click to show included customer IDs and emails"
+                  >
+                    {createdCustomersWithSameMonthMrrCount == null
+                      ? "—"
+                      : new Intl.NumberFormat().format(createdCustomersWithSameMonthMrrCount)}
+                  </button>
                 </p>
               </div>
             </div>
+            {showCreatedCustomersWithSameMonthMrrRows ? (
+              <div style={{ marginTop: "0.9rem" }}>
+                {createdCustomersWithSameMonthMrrRowsLoading ? (
+                  <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>Loading included customers...</p>
+                ) : null}
+                {createdCustomersWithSameMonthMrrRowsError ? (
+                  <p className="stripe-ui__panel-subtitle" style={{ margin: 0, color: "#b91c1c" }}>
+                    {createdCustomersWithSameMonthMrrRowsError}
+                  </p>
+                ) : null}
+                {!createdCustomersWithSameMonthMrrRowsLoading && !createdCustomersWithSameMonthMrrRowsError ? (
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.55rem" }}>
+                      <button
+                        type="button"
+                        className="stripe-ui__btn stripe-ui__btn--ghost"
+                        onClick={exportCreatedCustomersWithSameMonthMrrRowsCsv}
+                        disabled={!createdCustomersWithSameMonthMrrRows.length}
+                      >
+                        Download CSV
+                      </button>
+                    </div>
+                    <div className="stripe-ui__table-wrap">
+                      <table className="stripe-ui__table" aria-label="Created in range with non-zero creation-month MRR">
+                        <thead>
+                          <tr>
+                            <th>Customer ID</th>
+                            <th>Email</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {createdCustomersWithSameMonthMrrRows.map((row) => (
+                            <tr key={`${row.customerId}|${row.email}`}>
+                              <td>{row.customerId}</td>
+                              <td>{row.email || "(blank)"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </section>
 
           <section className="stripe-ui__panel ui-reveal ui-reveal-3">

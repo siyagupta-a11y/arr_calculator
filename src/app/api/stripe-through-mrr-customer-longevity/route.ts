@@ -13,6 +13,7 @@ const STRIPE_THROUGH_MRR_OPTIONS: { profile: StripeBigQueryProfile } = {
 type ApiBody = {
   startDate?: string;
   endDate?: string;
+  includeDetails?: boolean;
 };
 
 function isIsoDate(value: string) {
@@ -39,7 +40,16 @@ function customersTable() {
   return table;
 }
 
-async function computeCreatedCustomersWithSameMonthMrrCount(startDate: string, endDate: string) {
+type CreatedCustomerMatchRow = {
+  customerId: string;
+  email: string;
+};
+
+async function computeCreatedCustomersWithSameMonthMrr(
+  startDate: string,
+  endDate: string,
+  includeDetails: boolean,
+) {
   const mrrTable = mrrChangeTable();
   const customerTable = customersTable();
   const rows = await runBigQuerySqlRows(
@@ -75,6 +85,11 @@ customer_month_mrr AS (
 customer_created_raw AS (
   SELECT
     TRIM(CAST(c.id AS STRING)) AS customer_id,
+    NULLIF(TRIM(CAST(c.email AS STRING)), '') AS email,
+    COALESCE(
+      SAFE_CAST(NULLIF(TRIM(CAST(c.received_at AS STRING)), '') AS TIMESTAMP),
+      SAFE_CAST(NULLIF(TRIM(CAST(c._sdc_received_at AS STRING)), '') AS TIMESTAMP)
+    ) AS received_at_ts,
     DATE(
       COALESCE(
         SAFE_CAST(NULLIF(TRIM(CAST(c.created AS STRING)), '') AS TIMESTAMP),
@@ -92,32 +107,48 @@ customer_created_raw AS (
 customer_created AS (
   SELECT
     customer_id,
-    MIN(created_date) AS created_date,
-    DATE_TRUNC(MIN(created_date), MONTH) AS created_month
-  FROM customer_created_raw
-  WHERE customer_id IS NOT NULL
-    AND customer_id != ''
-    AND created_date IS NOT NULL
-  GROUP BY customer_id
+    email,
+    created_date,
+    DATE_TRUNC(created_date, MONTH) AS created_month
+  FROM (
+    SELECT
+      customer_id,
+      COALESCE(email, '') AS email,
+      created_date,
+      ROW_NUMBER() OVER (
+        PARTITION BY customer_id
+        ORDER BY (email IS NULL), received_at_ts DESC
+      ) AS rn
+    FROM customer_created_raw
+    WHERE customer_id IS NOT NULL
+      AND customer_id != ''
+      AND created_date IS NOT NULL
+  )
+  WHERE rn = 1
 ),
 created_in_range AS (
   SELECT
     c.customer_id,
+    c.email,
     c.created_month
   FROM customer_created c, bounds b
   WHERE c.created_date BETWEEN b.start_date AND b.end_date
 ),
 matched AS (
   SELECT
-    r.customer_id
+    r.customer_id,
+    COALESCE(r.email, '') AS email
   FROM created_in_range r
   LEFT JOIN customer_month_mrr m
     ON m.customer_id = r.customer_id
    AND m.month_start = r.created_month
   WHERE COALESCE(m.month_end_mrr, 0) > 0
 )
-SELECT COUNT(*) AS customer_count
+SELECT
+  customer_id,
+  email
 FROM matched
+ORDER BY customer_id
 `,
     [
       { name: "start_date", type: "STRING", value: startDate },
@@ -125,12 +156,20 @@ FROM matched
     ],
     STRIPE_THROUGH_MRR_OPTIONS,
   );
-  return Number(rows[0]?.customer_count || 0);
+  const detailRows: CreatedCustomerMatchRow[] = rows.map((row) => ({
+    customerId: String(row.customer_id || "").trim(),
+    email: String(row.email || "").trim(),
+  })).filter((row) => row.customerId);
+  return {
+    count: detailRows.length,
+    rows: includeDetails ? detailRows : [],
+  };
 }
 
 async function validateAndRun(body: Partial<ApiBody>) {
   const startDate = String(body.startDate || "").trim();
   const endDate = String(body.endDate || "").trim();
+  const includeDetails = body.includeDetails === true;
   if (!isIsoDate(startDate) || !isIsoDate(endDate)) {
     throw new Error("Invalid startDate/endDate");
   }
@@ -138,13 +177,14 @@ async function validateAndRun(body: Partial<ApiBody>) {
     throw new Error("endDate must be >= startDate");
   }
   const key = `api:stripe-through-mrr-customer-longevity:${stableStringify({ startDate, endDate })}`;
-  const createdCustomersWithSameMonthMrrCount = await getOrSetCache(key, CACHE_TTL_MS, () =>
-    computeCreatedCustomersWithSameMonthMrrCount(startDate, endDate),
+  const payload = await getOrSetCache(key, CACHE_TTL_MS, () =>
+    computeCreatedCustomersWithSameMonthMrr(startDate, endDate, true),
   );
   return {
     startDate,
     endDate,
-    createdCustomersWithSameMonthMrrCount,
+    createdCustomersWithSameMonthMrrCount: Number(payload.count || 0),
+    rows: includeDetails ? payload.rows : [],
   };
 }
 
