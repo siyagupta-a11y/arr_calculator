@@ -24,6 +24,22 @@ export type ServerCacheSyncStatus = {
   totalTaskCount: number;
 };
 
+export type ServerCacheSyncRunState = {
+  startedAtUtc: string;
+  warmup: boolean;
+  syncMode: "fast" | "full";
+  dirtyMode: boolean;
+  dirtyMonthKeys: string[];
+  totalTasks: number;
+  nextTaskIndex: number;
+  okTaskCount: number;
+  failedTaskCount: number;
+  failedTaskKeys: string[];
+  taskKeys: string[];
+  done: boolean;
+  updatedAtUtc: string;
+};
+
 const VALUE_CACHE = new Map<string, CacheEntry<unknown>>();
 const IN_FLIGHT = new Map<string, Promise<unknown>>();
 let CACHE_GENERATION = 1;
@@ -31,6 +47,7 @@ const BLOB_PREFIX = String(process.env.SERVER_RESPONSE_CACHE_BLOB_PREFIX || "arr
   .trim()
   .replace(/^\/+|\/+$/g, "");
 const SYNC_STATUS_BLOB_PATH = `${BLOB_PREFIX}/_sync-status.json`;
+const SYNC_RUN_STATE_BLOB_PATH = `${BLOB_PREFIX}/_sync-run-state.json`;
 
 const persistentCacheStats = {
   hits: 0,
@@ -237,6 +254,66 @@ export async function readServerCacheSyncStatus(): Promise<ServerCacheSyncStatus
       okTaskCount: Number.isFinite(okTaskCount) ? okTaskCount : 0,
       failedTaskCount: Number.isFinite(failedTaskCount) ? failedTaskCount : 0,
       totalTaskCount: Number.isFinite(totalTaskCount) ? totalTaskCount : 0,
+    };
+  } catch (error: unknown) {
+    if (error instanceof BlobNotFoundError) return null;
+    return null;
+  }
+}
+
+export async function writeServerCacheSyncRunState(state: ServerCacheSyncRunState) {
+  if (!canUsePersistentBlobCache()) return false;
+  const token = blobReadWriteToken();
+  if (!token) return false;
+  try {
+    await put(SYNC_RUN_STATE_BLOB_PATH, JSON.stringify(state), {
+      access: "private",
+      allowOverwrite: true,
+      addRandomSuffix: false,
+      contentType: "application/json; charset=utf-8",
+      token,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function readServerCacheSyncRunState(): Promise<ServerCacheSyncRunState | null> {
+  if (!canUsePersistentBlobCache()) return null;
+  const token = blobReadWriteToken();
+  if (!token) return null;
+  try {
+    const meta = await head(SYNC_RUN_STATE_BLOB_PATH, { token });
+    const res = await fetch(meta.url, {
+      headers: blobFetchHeaders(),
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const parsed = (await res.json()) as Partial<ServerCacheSyncRunState>;
+    if (!parsed || typeof parsed !== "object") return null;
+    const startedAtUtc = String(parsed.startedAtUtc || "").trim();
+    const syncMode = String(parsed.syncMode || "").trim().toLowerCase() === "full" ? "full" : "fast";
+    const updatedAtUtc = String(parsed.updatedAtUtc || "").trim();
+    if (!startedAtUtc || !updatedAtUtc) return null;
+    return {
+      startedAtUtc,
+      warmup: Boolean(parsed.warmup),
+      syncMode,
+      dirtyMode: Boolean(parsed.dirtyMode),
+      dirtyMonthKeys: Array.isArray(parsed.dirtyMonthKeys) ? parsed.dirtyMonthKeys.map((v) => String(v || "")) : [],
+      totalTasks: Number.isFinite(Number(parsed.totalTasks || 0)) ? Math.max(0, Number(parsed.totalTasks || 0)) : 0,
+      nextTaskIndex: Number.isFinite(Number(parsed.nextTaskIndex || 0))
+        ? Math.max(0, Number(parsed.nextTaskIndex || 0))
+        : 0,
+      okTaskCount: Number.isFinite(Number(parsed.okTaskCount || 0)) ? Math.max(0, Number(parsed.okTaskCount || 0)) : 0,
+      failedTaskCount: Number.isFinite(Number(parsed.failedTaskCount || 0))
+        ? Math.max(0, Number(parsed.failedTaskCount || 0))
+        : 0,
+      failedTaskKeys: Array.isArray(parsed.failedTaskKeys) ? parsed.failedTaskKeys.map((v) => String(v || "")) : [],
+      taskKeys: Array.isArray(parsed.taskKeys) ? parsed.taskKeys.map((v) => String(v || "")) : [],
+      done: Boolean(parsed.done),
+      updatedAtUtc,
     };
   } catch (error: unknown) {
     if (error instanceof BlobNotFoundError) return null;

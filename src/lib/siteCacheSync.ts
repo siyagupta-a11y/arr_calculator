@@ -1,7 +1,11 @@
 import { clearHubspotMemoryCache } from "@/lib/hubspot";
+import { detectDirtyMonthSyncPlan, resolveDirtyMonthKeys } from "@/lib/dirtyDateSync";
 import {
   clearPersistentServerResponseCache,
   clearServerResponseCache,
+  readServerCacheSyncRunState,
+  type ServerCacheSyncRunState,
+  writeServerCacheSyncRunState,
   writeServerCacheSyncStatus,
 } from "@/lib/serverResponseCache";
 import { clearStripeReportMemoryCache } from "@/lib/stripeReport";
@@ -12,11 +16,16 @@ import { POST as hubspotViewModelPost } from "@/app/api/hubspot-view-model/route
 import { POST as stripeAiSpendPost } from "@/app/api/stripe-ai-spend-report/route";
 import { POST as stripeBillingOverviewPost } from "@/app/api/stripe-billing-overview-report/route";
 import { POST as stripeThroughMrrPost } from "@/app/api/stripe-through-mrr-report/route";
-import { POST as tofuPost } from "@/app/api/tofu-report/route";
-import { POST as ndrGdrPost } from "@/app/api/ndr-gdr-report/route";
+
+export type SyncMode = "fast" | "full";
 
 type SyncOptions = {
   warmup?: boolean;
+  syncMode?: SyncMode;
+};
+
+type WarmupTaskOptions = {
+  dirtyMonthKeys?: string[] | null;
 };
 
 export type CacheSyncTaskResult = {
@@ -61,21 +70,74 @@ export type CacheSyncBatchResult = {
   results: CacheSyncTaskResult[];
 };
 
+function normalizeSyncMode(value: unknown): SyncMode {
+  return String(value || "").trim().toLowerCase() === "full" ? "full" : "fast";
+}
+
 function toIsoDateOnlyUtc(d: Date) {
   return d.toISOString().slice(0, 10);
 }
 
-function defaultRanges() {
+function parseIsoDateOnlyUtc(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month ||
+    parsed.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+function parseMonthKeyUtc(value: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(value || "").trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return null;
+  return new Date(Date.UTC(year, month - 1, 1));
+}
+
+function addMonthsUtc(date: Date, deltaMonths: number) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + deltaMonths, 1));
+}
+
+function endOfMonthUtc(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0));
+}
+
+function daysAgoIsoUtc(days: number) {
+  const now = new Date();
+  const utc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - Math.max(0, days)));
+  return toIsoDateOnlyUtc(utc);
+}
+
+function maxIsoDate(a: string, b: string) {
+  return a >= b ? a : b;
+}
+
+function defaultRanges(syncMode: SyncMode) {
   const now = new Date();
   const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
   const monthlyHistoryStart = String(process.env.COMBINED_BILLING_OVERVIEW_MONTHLY_CACHE_START || "2023-01-01").trim();
   const monthlyHistoryStartIso = /^\d{4}-\d{2}-\d{2}$/.test(monthlyHistoryStart)
     ? monthlyHistoryStart
     : "2023-01-01";
+  const fastDaysRaw = Number(process.env.CACHE_SYNC_FAST_LOOKBACK_DAYS || 90);
+  const fastLookbackDays = Number.isFinite(fastDaysRaw) ? Math.max(30, Math.floor(fastDaysRaw)) : 90;
+  const fastStart = maxIsoDate(monthlyHistoryStartIso, daysAgoIsoUtc(fastLookbackDays));
+  const effectiveStart = syncMode === "full" ? monthlyHistoryStartIso : fastStart;
   return {
     today: toIsoDateOnlyUtc(now),
     currentMonthStart: toIsoDateOnlyUtc(currentMonthStart),
     monthlyHistoryStart: monthlyHistoryStartIso,
+    effectiveStart,
   };
 }
 
@@ -116,12 +178,39 @@ async function invokeRoutePost(label: string, handler: RoutePostHandler, body: R
 }
 
 async function invokeRoutePostWithRetry(task: WarmupTaskDefinition) {
+  const timeoutMsRaw = Number(process.env.CACHE_SYNC_TASK_TIMEOUT_MS || 180000);
+  const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(15_000, Math.floor(timeoutMsRaw)) : 180_000;
+  const withTimeout = <T>(promise: Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Task timed out after ${Math.floor(timeoutMs / 1000)}s`)), timeoutMs);
+      promise
+        .then((value) => {
+          clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+    });
+
   let attempt = 1;
-  let result = await invokeRoutePost(task.key, task.handler, task.body);
+  let result = await withTimeout(invokeRoutePost(task.key, task.handler, task.body)).catch((error: unknown) => ({
+    key: task.key,
+    ok: false,
+    tookMs: 0,
+    error: error instanceof Error ? error.message : String(error),
+  }));
   while (!result.ok && attempt < 3) {
     attempt += 1;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    result = await invokeRoutePost(task.key, task.handler, task.body);
+    const backoffMs = Math.min(2000, 250 * 2 ** (attempt - 2));
+    await new Promise((resolve) => setTimeout(resolve, backoffMs + Math.floor(Math.random() * 150)));
+    result = await withTimeout(invokeRoutePost(task.key, task.handler, task.body)).catch((error: unknown) => ({
+      key: task.key,
+      ok: false,
+      tookMs: 0,
+      error: error instanceof Error ? error.message : String(error),
+    }));
   }
   if (!result.ok && attempt > 1) {
     return {
@@ -130,31 +219,6 @@ async function invokeRoutePostWithRetry(task: WarmupTaskDefinition) {
     };
   }
   return result;
-}
-
-function parseIsoDateOnlyUtc(value: string) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]) - 1;
-  const day = Number(match[3]);
-  const parsed = new Date(Date.UTC(year, month, day));
-  if (
-    parsed.getUTCFullYear() !== year ||
-    parsed.getUTCMonth() !== month ||
-    parsed.getUTCDate() !== day
-  ) {
-    return null;
-  }
-  return parsed;
-}
-
-function addMonthsUtc(date: Date, deltaMonths: number) {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + deltaMonths, 1));
-}
-
-function endOfMonthUtc(date: Date) {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0));
 }
 
 type WarmupRangeChunk = {
@@ -167,7 +231,7 @@ function buildMonthlyWarmupChunks(startDate: string, endDate: string, monthsPerC
   const start = parseIsoDateOnlyUtc(startDate);
   const end = parseIsoDateOnlyUtc(endDate);
   if (!start || !end || end.getTime() < start.getTime()) return [];
-  const chunkMonths = Number.isFinite(monthsPerChunk) ? Math.max(1, Math.floor(monthsPerChunk)) : 2;
+  const chunkMonths = Number.isFinite(monthsPerChunk) ? Math.max(1, Math.floor(monthsPerChunk)) : 6;
   const chunks: WarmupRangeChunk[] = [];
   let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
   while (cursor.getTime() <= end.getTime()) {
@@ -186,10 +250,64 @@ function buildMonthlyWarmupChunks(startDate: string, endDate: string, monthsPerC
   return chunks;
 }
 
-export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
-  const { today, currentMonthStart, monthlyHistoryStart } = defaultRanges();
-  const chunkMonths = Number(process.env.CACHE_SYNC_MONTHLY_CHUNK_SIZE || 2);
-  const chunks = buildMonthlyWarmupChunks(monthlyHistoryStart, today, chunkMonths);
+function buildMonthlyWarmupChunksFromDirtyMonths(monthKeys: string[], monthsPerChunk: number): WarmupRangeChunk[] {
+  const parsed = monthKeys
+    .map((value) => parseMonthKeyUtc(value))
+    .filter((value): value is Date => Boolean(value))
+    .sort((a, b) => a.getTime() - b.getTime());
+  if (!parsed.length) return [];
+  const uniqueMonths: Date[] = [];
+  for (const monthStart of parsed) {
+    const last = uniqueMonths[uniqueMonths.length - 1];
+    if (last && last.getTime() === monthStart.getTime()) continue;
+    uniqueMonths.push(monthStart);
+  }
+  const chunkMonths = Number.isFinite(monthsPerChunk) ? Math.max(1, Math.floor(monthsPerChunk)) : 4;
+  const today = new Date();
+  const todayDateOnly = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const chunks: WarmupRangeChunk[] = [];
+  let index = 0;
+  while (index < uniqueMonths.length) {
+    const chunkStart = uniqueMonths[index];
+    let endIndex = index;
+    while (endIndex + 1 < uniqueMonths.length) {
+      const nextExpected = addMonthsUtc(uniqueMonths[endIndex], 1).getTime();
+      const nextActual = uniqueMonths[endIndex + 1].getTime();
+      if (nextExpected !== nextActual) break;
+      if (endIndex - index + 1 >= chunkMonths) break;
+      endIndex += 1;
+    }
+    const chunkEndByMonth = endOfMonthUtc(uniqueMonths[endIndex]);
+    const chunkEnd = chunkEndByMonth.getTime() > todayDateOnly.getTime() ? todayDateOnly : chunkEndByMonth;
+    const startDate = toIsoDateOnlyUtc(chunkStart);
+    const endDate = toIsoDateOnlyUtc(chunkEnd);
+    chunks.push({
+      startDate,
+      endDate,
+      label: `${startDate}..${endDate}`,
+    });
+    index = endIndex + 1;
+  }
+  return chunks;
+}
+
+export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options: WarmupTaskOptions = {}): WarmupTaskDefinition[] {
+  const normalizedMode = normalizeSyncMode(syncMode);
+  const { today, currentMonthStart, effectiveStart } = defaultRanges(normalizedMode);
+  const defaultChunkMonths = normalizedMode === "full" ? 4 : 6;
+  const chunkMonthsRaw = Number(process.env.CACHE_SYNC_MONTHLY_CHUNK_SIZE || defaultChunkMonths);
+  const chunkMonths = Number.isFinite(chunkMonthsRaw) ? Math.max(1, Math.floor(chunkMonthsRaw)) : defaultChunkMonths;
+  const dirtyMonthKeys = Array.isArray(options.dirtyMonthKeys)
+    ? Array.from(new Set(options.dirtyMonthKeys.map((value) => String(value || "").trim()).filter((value) => /^\d{4}-\d{2}$/.test(value))))
+      .sort()
+    : null;
+  if (dirtyMonthKeys && dirtyMonthKeys.length === 0) return [];
+  const chunks = dirtyMonthKeys
+    ? buildMonthlyWarmupChunksFromDirtyMonths(dirtyMonthKeys, chunkMonths)
+    : buildMonthlyWarmupChunks(effectiveStart, today, chunkMonths);
+  if (!chunks.length) return [];
+  const taskStart = chunks[0].startDate;
+  const taskEnd = chunks[chunks.length - 1].endDate;
   const tasks: WarmupTaskDefinition[] = [];
 
   for (const chunk of chunks) {
@@ -230,54 +348,6 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
         precomputeRangeOnly: true,
       },
     });
-    tasks.push({
-      key: `tofu:chunk:${chunk.label}`,
-      handler: tofuPost,
-      source: "bigquery",
-      body: {
-        startDate: chunk.startDate,
-        endDate: chunk.endDate,
-        combineMode: "grouped",
-        groupBy: "month",
-        precomputeRangeOnly: true,
-      },
-    });
-    tasks.push({
-      key: `ndr-gdr:overall:chunk:${chunk.label}`,
-      handler: ndrGdrPost,
-      source: "bigquery",
-      body: {
-        startDate: chunk.startDate,
-        endDate: chunk.endDate,
-        combineMode: "grouped",
-        groupBy: "overall",
-        precomputeRangeOnly: true,
-      },
-    });
-    tasks.push({
-      key: `ndr-gdr:source:chunk:${chunk.label}`,
-      handler: ndrGdrPost,
-      source: "bigquery",
-      body: {
-        startDate: chunk.startDate,
-        endDate: chunk.endDate,
-        combineMode: "grouped",
-        groupBy: "source",
-        precomputeRangeOnly: true,
-      },
-    });
-    tasks.push({
-      key: `ndr-gdr:plan:chunk:${chunk.label}`,
-      handler: ndrGdrPost,
-      source: "bigquery",
-      body: {
-        startDate: chunk.startDate,
-        endDate: chunk.endDate,
-        combineMode: "grouped",
-        groupBy: "plan",
-        precomputeRangeOnly: true,
-      },
-    });
   }
 
   tasks.push(
@@ -286,8 +356,8 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
       handler: hubspotViewModelPost,
       source: "hubspot",
       body: {
-        startDate: monthlyHistoryStart,
-        endDate: today,
+        startDate: taskStart,
+        endDate: taskEnd,
         mode: "contracted",
         grain: "monthly",
       },
@@ -297,8 +367,8 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
       handler: stripeThroughMrrPost,
       source: "bigquery",
       body: {
-        startDate: monthlyHistoryStart,
-        endDate: today,
+        startDate: taskStart,
+        endDate: taskEnd,
         grain: "monthly",
         groupBy: "email",
         page: 1,
@@ -310,8 +380,8 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
       handler: stripeBillingOverviewPost,
       source: "bigquery",
       body: {
-        startDate: monthlyHistoryStart,
-        endDate: today,
+        startDate: taskStart,
+        endDate: taskEnd,
         grain: "monthly",
         groupBy: "none",
       },
@@ -321,8 +391,8 @@ export function buildWarmupTaskDefinitions(): WarmupTaskDefinition[] {
       handler: stripeAiSpendPost,
       source: "bigquery",
       body: {
-        startDate: currentMonthStart,
-        endDate: today,
+        startDate: dirtyMonthKeys ? taskStart : currentMonthStart,
+        endDate: dirtyMonthKeys ? taskEnd : today,
         grain: "monthly",
       },
     },
@@ -345,11 +415,16 @@ export async function clearWebsiteCaches(): Promise<CacheSyncClearResult> {
   return { inMemory, persistent };
 }
 
-export async function runWarmupTaskBatch(startIndex: number, batchSize: number): Promise<CacheSyncBatchResult> {
-  const tasks = buildWarmupTaskDefinitions();
+export async function runWarmupTaskBatch(
+  startIndex: number,
+  batchSize: number,
+  syncMode: SyncMode = "fast",
+  options: WarmupTaskOptions = {},
+): Promise<CacheSyncBatchResult> {
+  const tasks = buildWarmupTaskDefinitions(syncMode, options);
   const totalTasks = tasks.length;
   const safeStart = Number.isFinite(startIndex) ? Math.max(0, Math.floor(startIndex)) : 0;
-  const safeBatchSize = Number.isFinite(batchSize) ? Math.max(1, Math.min(3, Math.floor(batchSize))) : 1;
+  const safeBatchSize = Number.isFinite(batchSize) ? Math.max(1, Math.min(8, Math.floor(batchSize))) : 1;
   const endExclusive = Math.min(totalTasks, safeStart + safeBatchSize);
 
   const scheduled: Array<{ index: number; task: WarmupTaskDefinition }> = [];
@@ -362,30 +437,43 @@ export async function runWarmupTaskBatch(startIndex: number, batchSize: number):
     () => null,
   );
 
-  let cursor = 0;
-  while (cursor < scheduled.length) {
+  const pending = Array.from({ length: scheduled.length }, (_, idx) => idx);
+  const sourceLimits: Record<string, number> = {
+    bigquery: 2,
+    hubspot: 1,
+    stripe_api: 1,
+    mixed: 1,
+  };
+
+  while (pending.length) {
     const wave: Array<{ localIndex: number; task: WarmupTaskDefinition }> = [];
-    const usedSources = new Set<string>();
-    for (let j = cursor; j < scheduled.length; j += 1) {
-      const localIndex = j;
-      const task = scheduled[j].task;
+    const sourceUsed: Record<string, number> = {};
+    for (let i = 0; i < pending.length && wave.length < safeBatchSize; ) {
+      const localIndex = pending[i];
+      const task = scheduled[localIndex].task;
       const source = String(task.source || "mixed");
-      if (usedSources.has(source)) break;
-      usedSources.add(source);
-      wave.push({ localIndex, task });
+      const limit = sourceLimits[source] ?? 1;
+      const used = sourceUsed[source] || 0;
+      if (used < limit) {
+        sourceUsed[source] = used + 1;
+        wave.push({ localIndex, task });
+        pending.splice(i, 1);
+        continue;
+      }
+      i += 1;
     }
 
-    const waveResults = await Promise.all(
-      wave.map(async ({ localIndex, task }) => ({
-        localIndex,
-        result: await invokeRoutePostWithRetry(task),
-      })),
-    );
-
-    for (const waveResult of waveResults) {
-      orderedResults[waveResult.localIndex] = waveResult.result;
+    if (!wave.length) {
+      const localIndex = pending.shift();
+      if (localIndex === undefined) break;
+      wave.push({ localIndex, task: scheduled[localIndex].task });
     }
-    cursor += Math.max(1, wave.length);
+
+    const waveResults = await Promise.all(wave.map(async ({ localIndex, task }) => ({
+      localIndex,
+      result: await invokeRoutePostWithRetry(task),
+    })));
+    for (const { localIndex, result } of waveResults) orderedResults[localIndex] = result;
   }
 
   const results = orderedResults.filter((value): value is CacheSyncTaskResult => Boolean(value));
@@ -397,6 +485,58 @@ export async function runWarmupTaskBatch(startIndex: number, batchSize: number):
     done: endExclusive >= totalTasks,
     results,
   };
+}
+
+export async function initializeSyncRunState(args: {
+  warmup: boolean;
+  syncMode: SyncMode;
+  dirtyMode?: boolean;
+  dirtyMonthKeys?: string[];
+  startedAtUtc: string;
+  totalTasks: number;
+  taskKeys: string[];
+}) {
+  const state: ServerCacheSyncRunState = {
+    startedAtUtc: args.startedAtUtc,
+    warmup: args.warmup,
+    syncMode: normalizeSyncMode(args.syncMode),
+    dirtyMode: Boolean(args.dirtyMode),
+    dirtyMonthKeys: Array.isArray(args.dirtyMonthKeys) ? args.dirtyMonthKeys : [],
+    totalTasks: args.totalTasks,
+    nextTaskIndex: 0,
+    okTaskCount: 0,
+    failedTaskCount: 0,
+    failedTaskKeys: [],
+    taskKeys: args.taskKeys,
+    done: args.totalTasks === 0,
+    updatedAtUtc: new Date().toISOString(),
+  };
+  await writeServerCacheSyncRunState(state);
+  return state;
+}
+
+export async function getSyncRunState() {
+  return readServerCacheSyncRunState();
+}
+
+export async function updateSyncRunStateAfterBatch(args: {
+  previous: ServerCacheSyncRunState;
+  batch: CacheSyncBatchResult;
+}) {
+  const okDelta = args.batch.results.filter((result) => result.ok).length;
+  const failed = args.batch.results.filter((result) => !result.ok);
+  const failedTaskKeys = Array.from(new Set([...(args.previous.failedTaskKeys || []), ...failed.map((item) => item.key)]));
+  const next: ServerCacheSyncRunState = {
+    ...args.previous,
+    nextTaskIndex: args.batch.nextIndex,
+    okTaskCount: Math.max(0, Number(args.previous.okTaskCount || 0) + okDelta),
+    failedTaskCount: Math.max(0, Number(args.previous.failedTaskCount || 0) + failed.length),
+    failedTaskKeys,
+    done: args.batch.done,
+    updatedAtUtc: new Date().toISOString(),
+  };
+  await writeServerCacheSyncRunState(next);
+  return next;
 }
 
 export async function writeFinalSyncStatusFromResults(
@@ -449,18 +589,35 @@ export async function writeFinalSyncStatusCounts(
 
 export async function syncWebsiteCache(options: SyncOptions = {}): Promise<CacheSyncResult> {
   const warmup = options.warmup !== false;
+  const syncMode = normalizeSyncMode(options.syncMode);
   const startedAt = Date.now();
   const startedAtUtc = new Date(startedAt).toISOString();
   const cleared = await clearWebsiteCaches();
   const tasks: CacheSyncTaskResult[] = [];
+  let dirtyMonthKeys: string[] | null = null;
+  let dirtyMode = false;
+  if (warmup) {
+    const dirtyPlan = await detectDirtyMonthSyncPlan(syncMode).catch(() => null);
+    if (dirtyPlan?.useDirtyMonths) {
+      dirtyMode = true;
+      dirtyMonthKeys = dirtyPlan.dirtyMonthKeys || [];
+    }
+  }
 
   if (warmup) {
     let cursor = 0;
     while (true) {
-      const batch = await runWarmupTaskBatch(cursor, 1);
+      const batch = await runWarmupTaskBatch(cursor, 6, syncMode, { dirtyMonthKeys });
       tasks.push(...batch.results);
       cursor = batch.nextIndex;
       if (batch.done) break;
+    }
+  }
+
+  if (warmup && dirtyMode) {
+    const failedTaskCount = tasks.filter((task) => !task.ok).length;
+    if (failedTaskCount === 0 && Array.isArray(dirtyMonthKeys) && dirtyMonthKeys.length) {
+      await resolveDirtyMonthKeys(dirtyMonthKeys).catch(() => undefined);
     }
   }
 
