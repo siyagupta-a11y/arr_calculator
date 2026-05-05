@@ -104,7 +104,7 @@ export default function HardRefreshButton() {
     }
   }
 
-  async function syncNow() {
+  async function syncNow(syncMode: "fast" | "full") {
     setSyncLoading(true);
     setMessage("");
     setSyncProgress("");
@@ -113,7 +113,7 @@ export default function HardRefreshButton() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
-        body: JSON.stringify({ action: "start", warmup: true }),
+        body: JSON.stringify({ action: "start", warmup: true, syncMode }),
       });
       if (!startRes.ok) {
         const text = await startRes.text();
@@ -127,6 +127,10 @@ export default function HardRefreshButton() {
         taskKeys?: string[];
         nextTaskIndex?: number;
         done?: boolean;
+        resumed?: boolean;
+        syncMode?: "fast" | "full";
+        okTaskCount?: number;
+        failedTaskCount?: number;
       };
       const startedAtUtc = String(startPayload?.startedAtUtc || "").trim() || new Date().toISOString();
       const totalTasks = Math.max(0, Number(startPayload?.totalTasks || 0));
@@ -135,13 +139,13 @@ export default function HardRefreshButton() {
         : [];
       let nextTaskIndex = Math.max(0, Number(startPayload?.nextTaskIndex || 0));
       let done = Boolean(startPayload?.done) || totalTasks === 0;
-      let okTaskCount = 0;
-      let failedTaskCount = 0;
+      let okTaskCount = Math.max(0, Number(startPayload?.okTaskCount || 0));
+      let failedTaskCount = Math.max(0, Number(startPayload?.failedTaskCount || 0));
       const failedTaskReasons = new Map<number, string>();
       const transportFailureIndexes = new Set<number>();
       let transportFailedTaskCount = 0;
 
-      const stepBatchSize = 3;
+      const stepBatchSize = 6;
       while (!done) {
         const stepEnd = Math.min(totalTasks, nextTaskIndex + stepBatchSize);
         setSyncProgress(`Running cache warmup tasks ${nextTaskIndex + 1}-${stepEnd}/${totalTasks}...`);
@@ -159,6 +163,7 @@ export default function HardRefreshButton() {
                 action: "step",
                 taskIndex: nextTaskIndex,
                 batchSize: stepBatchSize,
+                syncMode,
               }),
             });
           } catch (error: unknown) {
@@ -222,6 +227,8 @@ export default function HardRefreshButton() {
           const stepPayload = (await stepRes.json()) as {
             nextIndex?: number;
             done?: boolean;
+            okTaskCount?: number;
+            failedTaskCount?: number;
             results?: Array<{ ok?: boolean; key?: string; error?: string; status?: number }>;
           };
           const stepResults = Array.isArray(stepPayload?.results) ? stepPayload.results : [];
@@ -247,6 +254,10 @@ export default function HardRefreshButton() {
             Number(stepPayload?.nextIndex || currentTaskIndex + processedCount),
           );
           done = Boolean(stepPayload?.done) || nextTaskIndex >= totalTasks;
+          if (Number.isFinite(Number(stepPayload.okTaskCount)) && Number.isFinite(Number(stepPayload.failedTaskCount))) {
+            okTaskCount = Math.max(okTaskCount, Number(stepPayload.okTaskCount || 0));
+            failedTaskCount = Math.max(failedTaskCount, Number(stepPayload.failedTaskCount || 0));
+          }
           setLastSyncSummary(`${okTaskCount}/${okTaskCount + failedTaskCount} tasks`);
           stepProcessed = true;
         }
@@ -266,6 +277,7 @@ export default function HardRefreshButton() {
                 action: "step",
                 taskIndex: index,
                 batchSize: 1,
+                syncMode,
               }),
             });
           } catch {
@@ -294,6 +306,7 @@ export default function HardRefreshButton() {
         body: JSON.stringify({
           action: "complete",
           warmup: true,
+          syncMode,
           startedAtUtc,
           okTaskCount,
           failedTaskCount,
@@ -363,24 +376,44 @@ export default function HardRefreshButton() {
       ) : null}
       <div style={{ display: "flex", gap: 8 }}>
         {isAdmin ? (
-          <button
-            type="button"
-            onClick={() => void syncNow()}
-            disabled={syncLoading || loading}
-            style={{
-              borderRadius: 10,
-              border: "1px solid #1d4ed8",
-              background: syncLoading ? "#1e3a8a" : "#2563eb",
-              color: "#ffffff",
-              padding: "10px 12px",
-              fontSize: 13,
-              fontWeight: 700,
-              cursor: syncLoading || loading ? "wait" : "pointer",
-            }}
-            title="Recalculate and persist cache in private blob"
-          >
-            {syncLoading ? "Syncing..." : "Sync now"}
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => void syncNow("fast")}
+              disabled={syncLoading || loading}
+              style={{
+                borderRadius: 10,
+                border: "1px solid #1d4ed8",
+                background: syncLoading ? "#1e3a8a" : "#2563eb",
+                color: "#ffffff",
+                padding: "10px 12px",
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: syncLoading || loading ? "wait" : "pointer",
+              }}
+              title="Sync dirty changes only (fast incremental)"
+            >
+              {syncLoading ? "Syncing..." : "Sync now (dirty)"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void syncNow("full")}
+              disabled={syncLoading || loading}
+              style={{
+                borderRadius: 10,
+                border: "1px solid #475569",
+                background: syncLoading ? "#334155" : "#64748b",
+                color: "#ffffff",
+                padding: "10px 12px",
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: syncLoading || loading ? "wait" : "pointer",
+              }}
+              title="Full historical sync"
+            >
+              {syncLoading ? "Syncing..." : "Full sync"}
+            </button>
+          </>
         ) : null}
         <button
           type="button"
