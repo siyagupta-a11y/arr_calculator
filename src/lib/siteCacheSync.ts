@@ -183,6 +183,16 @@ function parseRetryAfterMsFromError(error: string | undefined): number | null {
   return null;
 }
 
+function readTaskTimeoutMsForMode(syncMode: SyncMode) {
+  const mode = normalizeSyncMode(syncMode);
+  const fullTimeoutMs = readIntEnv("CACHE_SYNC_TASK_TIMEOUT_MS_FULL", 600_000, 15_000, 3_600_000);
+  const fastTimeoutMs = readIntEnv("CACHE_SYNC_TASK_TIMEOUT_MS_FAST", 180_000, 15_000, 3_600_000);
+  const fallbackTimeoutMs = readIntEnv("CACHE_SYNC_TASK_TIMEOUT_MS", mode === "full" ? fullTimeoutMs : fastTimeoutMs, 15_000, 3_600_000);
+  return mode === "full"
+    ? Math.max(fallbackTimeoutMs, fullTimeoutMs)
+    : Math.max(15_000, Math.min(fastTimeoutMs, fallbackTimeoutMs));
+}
+
 function defaultRanges(syncMode: SyncMode) {
   const now = new Date();
   const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
@@ -252,11 +262,10 @@ async function invokeRoutePostWithRetry(
     serialRecovery?: boolean;
   },
 ) {
-  const timeoutMsRaw = Number(process.env.CACHE_SYNC_TASK_TIMEOUT_MS || 180000);
+  const syncMode = normalizeSyncMode(options?.syncMode);
   const timeoutMs = Number.isFinite(options?.timeoutMs)
     ? Math.max(15_000, Math.floor(Number(options?.timeoutMs)))
-    : (Number.isFinite(timeoutMsRaw) ? Math.max(15_000, Math.floor(timeoutMsRaw)) : 180_000);
-  const syncMode = normalizeSyncMode(options?.syncMode);
+    : readTaskTimeoutMsForMode(syncMode);
   const defaultMaxAttempts = syncMode === "full"
     ? readIntEnv("CACHE_SYNC_MAX_ATTEMPTS_FULL", 5, 1, 10)
     : readIntEnv("CACHE_SYNC_MAX_ATTEMPTS_FAST", 3, 1, 10);
@@ -661,7 +670,7 @@ export async function runWarmupTaskBatch(
   const adaptiveEnabled = String(process.env.CACHE_SYNC_ADAPTIVE_CONCURRENCY || "1").trim() !== "0";
   const downshiftThreshold = readIntEnv("CACHE_SYNC_ADAPTIVE_DOWNSHIFT_THRESHOLD", 2, 1, 6);
   const upliftSuccessThreshold = readIntEnv("CACHE_SYNC_ADAPTIVE_UPLIFT_SUCCESS_STREAK", 3, 1, 10);
-  const fullTimeoutMs = readIntEnv("CACHE_SYNC_TASK_TIMEOUT_MS", 180_000, 15_000, 2_400_000);
+  const taskTimeoutMs = readTaskTimeoutMsForMode(syncMode);
   let successWaveStreak = 0;
 
   while (pending.length) {
@@ -690,7 +699,7 @@ export async function runWarmupTaskBatch(
 
     const waveResults = await Promise.all(wave.map(async ({ localIndex, task }) => ({
       localIndex,
-      result: await invokeRoutePostWithRetry(task, { syncMode, timeoutMs: fullTimeoutMs }),
+      result: await invokeRoutePostWithRetry(task, { syncMode, timeoutMs: taskTimeoutMs }),
     })));
     let transientFailuresInWave = 0;
     for (const { localIndex, result } of waveResults) {
@@ -729,7 +738,10 @@ export async function runWarmupTaskBatch(
   const recoveryPasses = syncMode === "full"
     ? readIntEnv("CACHE_SYNC_TRANSIENT_RECOVERY_PASSES_FULL", 2, 0, 5)
     : readIntEnv("CACHE_SYNC_TRANSIENT_RECOVERY_PASSES_FAST", 1, 0, 3);
-  const recoveryTimeoutMs = readIntEnv("CACHE_SYNC_TRANSIENT_RECOVERY_TIMEOUT_MS", 240_000, 15_000, 3_600_000);
+  const recoveryTimeoutMs = Math.max(
+    readIntEnv("CACHE_SYNC_TRANSIENT_RECOVERY_TIMEOUT_MS", 240_000, 15_000, 3_600_000),
+    taskTimeoutMs,
+  );
   for (let pass = 1; pass <= recoveryPasses; pass += 1) {
     const transientFailureIndexes: number[] = [];
     for (let localIndex = 0; localIndex < orderedResults.length; localIndex += 1) {
