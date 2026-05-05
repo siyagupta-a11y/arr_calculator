@@ -7,10 +7,12 @@ import {
   type StripeBillingOverviewRequest,
 } from "@/lib/stripeBigquery";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
+import { readPrecomputedPayload, writePrecomputedPayload } from "@/lib/precomputedPayloadStore";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 const CACHE_TTL_MS = readTtlMs("API_STRIPE_BILLING_OVERVIEW_CACHE_TTL_MS", 60_000);
+const PRECOMPUTED_ENDPOINT_KEY = "stripe-billing-overview";
 
 const STRIPE_BILLING_OVERVIEW_OPTIONS: { profile: StripeBigQueryProfile } = {
   profile: "stripe_arr_correct",
@@ -87,9 +89,23 @@ function parsePayload(raw: Partial<ApiBody>): StripeBillingOverviewRequest {
 async function validateAndRun(body: Partial<ApiBody>) {
   const payload = parsePayload(body);
   const key = `api:stripe-billing-overview:${stableStringify(payload)}`;
-  return getOrSetCache(key, CACHE_TTL_MS, () =>
-    queryStripeBillingOverviewFromBigQuery(payload, STRIPE_BILLING_OVERVIEW_OPTIONS),
-  );
+  return getOrSetCache(key, CACHE_TTL_MS, async () => {
+    const precomputed = await readPrecomputedPayload<Awaited<ReturnType<typeof queryStripeBillingOverviewFromBigQuery>>>(
+      PRECOMPUTED_ENDPOINT_KEY,
+      key,
+    ).catch(() => null);
+    if (precomputed) return precomputed;
+    const built = await queryStripeBillingOverviewFromBigQuery(payload, STRIPE_BILLING_OVERVIEW_OPTIONS);
+    await writePrecomputedPayload({
+      endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+      cache_key: key,
+      start_date: payload.startDate,
+      end_date: payload.endDate,
+      grain: payload.grain,
+      payload_json: JSON.stringify(built),
+    }).catch(() => null);
+    return built;
+  });
 }
 
 export async function POST(req: Request) {

@@ -330,6 +330,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         displayMode: "arr",
         planGrain: "monthly",
         precomputeRangeOnly: true,
+        forceRefreshPrecomputed: true,
       },
     });
     tasks.push({
@@ -343,6 +344,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         displayMode: "arr",
         planGrain: "monthly",
         precomputeRangeOnly: true,
+        forceRefreshPrecomputed: true,
       },
     });
     tasks.push({
@@ -355,6 +357,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         grain: "monthly",
         includeCac: false,
         precomputeRangeOnly: true,
+        forceRefreshPrecomputed: true,
       },
     });
     tasks.push({
@@ -367,6 +370,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         grain: "monthly",
         includeCac: true,
         precomputeRangeOnly: true,
+        forceRefreshPrecomputed: true,
       },
     });
     tasks.push({
@@ -379,6 +383,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         combineMode: "grouped",
         groupBy: "month",
         precomputeRangeOnly: true,
+        forceRefreshPrecomputed: true,
       },
     });
     tasks.push({
@@ -391,6 +396,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         combineMode: "grouped",
         groupBy: "segment",
         precomputeRangeOnly: true,
+        forceRefreshPrecomputed: true,
       },
     });
     tasks.push({
@@ -403,6 +409,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         combineMode: "grouped",
         groupBy: "plan",
         precomputeRangeOnly: true,
+        forceRefreshPrecomputed: true,
       },
     });
     tasks.push({
@@ -415,6 +422,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         combineMode: "grouped",
         groupBy: "overall",
         precomputeRangeOnly: true,
+        forceRefreshPrecomputed: true,
       },
     });
     tasks.push({
@@ -427,6 +435,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         combineMode: "grouped",
         groupBy: "source",
         precomputeRangeOnly: true,
+        forceRefreshPrecomputed: true,
       },
     });
     tasks.push({
@@ -439,6 +448,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         combineMode: "grouped",
         groupBy: "plan",
         precomputeRangeOnly: true,
+        forceRefreshPrecomputed: true,
       },
     });
   }

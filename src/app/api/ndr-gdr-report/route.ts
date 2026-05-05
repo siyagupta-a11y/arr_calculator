@@ -375,7 +375,22 @@ async function validateAndRun(body: Partial<RequestBody>) {
   if (precomputeRangeOnly) {
     const rangePayload = { startDate, endDate, combineMode, groupBy };
     const rangeKey = `api:ndr-gdr:range:${stableStringify(rangePayload)}`;
-    return getOrSetCache(rangeKey, CACHE_TTL_MS, () => buildNdrGdrReport(rangePayload));
+    return getOrSetCache(rangeKey, CACHE_TTL_MS, async () => {
+      const precomputed = await readPrecomputedPayload<NdrGdrResponse>(PRECOMPUTED_ENDPOINT_KEY, rangeKey).catch(
+        () => null,
+      );
+      if (precomputed) return precomputed;
+      const built = await buildNdrGdrReport(rangePayload);
+      await writePrecomputedPayload({
+        endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+        cache_key: rangeKey,
+        start_date: startDate,
+        end_date: endDate,
+        grain: "monthly",
+        payload_json: JSON.stringify(built),
+      }).catch(() => null);
+      return built;
+    });
   }
 
   const today = new Date().toISOString().slice(0, 10);

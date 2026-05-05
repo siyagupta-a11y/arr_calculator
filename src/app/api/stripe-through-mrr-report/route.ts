@@ -7,10 +7,12 @@ import {
   type StripeThroughMrrReportRequest,
 } from "@/lib/stripeBigquery";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
+import { readPrecomputedPayload, writePrecomputedPayload } from "@/lib/precomputedPayloadStore";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 const CACHE_TTL_MS = readTtlMs("API_STRIPE_THROUGH_MRR_CACHE_TTL_MS", 60_000);
+const PRECOMPUTED_ENDPOINT_KEY = "stripe-through-mrr";
 
 const STRIPE_THROUGH_MRR_OPTIONS: { profile: StripeBigQueryProfile } = {
   profile: "stripe_arr_correct",
@@ -139,9 +141,23 @@ function parsePayload(raw: Partial<ApiBody>): StripeThroughMrrReportRequest {
 async function validateAndRun(body: Partial<ApiBody>) {
   const payload = parsePayload(body);
   const key = `api:stripe-through-mrr:${stableStringify(payload)}`;
-  return getOrSetCache(key, CACHE_TTL_MS, () =>
-    queryStripeThroughMrrReportFromBigQuery(payload, STRIPE_THROUGH_MRR_OPTIONS),
-  );
+  return getOrSetCache(key, CACHE_TTL_MS, async () => {
+    const precomputed = await readPrecomputedPayload<Awaited<ReturnType<typeof queryStripeThroughMrrReportFromBigQuery>>>(
+      PRECOMPUTED_ENDPOINT_KEY,
+      key,
+    ).catch(() => null);
+    if (precomputed) return precomputed;
+    const built = await queryStripeThroughMrrReportFromBigQuery(payload, STRIPE_THROUGH_MRR_OPTIONS);
+    await writePrecomputedPayload({
+      endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+      cache_key: key,
+      start_date: payload.startDate,
+      end_date: payload.endDate,
+      grain: String(payload.grain || "monthly"),
+      payload_json: JSON.stringify(built),
+    }).catch(() => null);
+    return built;
+  });
 }
 
 export async function POST(req: Request) {

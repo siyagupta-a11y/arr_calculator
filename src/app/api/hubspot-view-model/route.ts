@@ -2,12 +2,14 @@ import { NextResponse } from "next/server";
 import { generateReport } from "@/lib/report";
 import { canonicalCountryKey, canonicalCountryLabel, canonicalTerritoryLabel, resolveTerritoryLabel } from "@/lib/geo";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
+import { readPrecomputedPayload, writePrecomputedPayload } from "@/lib/precomputedPayloadStore";
 import type { Grain, HubspotPlan, ReportMode, ReportResponse, ReportRow } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 const CACHE_TTL_MS = readTtlMs("API_HUBSPOT_VIEW_MODEL_CACHE_TTL_MS", 60_000);
 const REPORT_SUBQUERY_CACHE_TTL_MS = readTtlMs("API_HUBSPOT_VIEW_MODEL_REPORT_SUBQUERY_CACHE_TTL_MS", 300_000);
+const PRECOMPUTED_ENDPOINT_KEY = "hubspot-view-model";
 
 type ArrDisplayScope = "all" | "cloud";
 type GroupField =
@@ -1110,7 +1112,23 @@ async function buildViewModel(payload: ParsedPayload) {
 async function validateAndRun(body: Partial<RequestBody>) {
   const payload = parsePayload(body);
   const key = `api:hubspot-view-model:${stableStringify(payload)}`;
-  return getOrSetCache(key, CACHE_TTL_MS, () => buildViewModel(payload));
+  return getOrSetCache(key, CACHE_TTL_MS, async () => {
+    const precomputed = await readPrecomputedPayload<ReturnType<typeof computeForPayload>>(
+      PRECOMPUTED_ENDPOINT_KEY,
+      key,
+    ).catch(() => null);
+    if (precomputed) return precomputed;
+    const built = await buildViewModel(payload);
+    await writePrecomputedPayload({
+      endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+      cache_key: key,
+      start_date: payload.startDate,
+      end_date: payload.endDate,
+      grain: payload.grain,
+      payload_json: JSON.stringify(built),
+    }).catch(() => null);
+    return built;
+  });
 }
 
 export async function POST(req: Request) {

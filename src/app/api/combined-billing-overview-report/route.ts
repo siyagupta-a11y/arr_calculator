@@ -219,6 +219,7 @@ type RequestBody = {
   accountNames?: string[];
   includeCac?: boolean;
   precomputeRangeOnly?: boolean;
+  forceRefreshPrecomputed?: boolean;
 };
 
 function round2(n: number) {
@@ -376,6 +377,187 @@ async function writePrecomputedCombinedBillingPayload(args: {
     }],
     options: { profile: "stripe_arr_correct" },
   });
+}
+
+const COMBINED_BILLING_CANONICAL_KEY_PREFIX = "api:combined-billing-overview:";
+const COMBINED_BILLING_RANGE_KEY_PREFIX = "api:combined-billing-overview:range:";
+
+function normalizeCachePayloadForCompare(raw: Record<string, unknown>) {
+  return {
+    grain: String(raw.grain || "monthly").trim().toLowerCase(),
+    includeCac: raw.includeCac !== false,
+    accountIds: normalizeIdList(Array.isArray(raw.accountIds) ? raw.accountIds : []).sort(),
+    accountNames: normalizeNames(Array.isArray(raw.accountNames) ? raw.accountNames : []).sort(),
+  };
+}
+
+function parsePayloadFromCombinedBillingCacheKey(cacheKey: string) {
+  const raw = String(cacheKey || "");
+  let encoded = "";
+  if (raw.startsWith(COMBINED_BILLING_RANGE_KEY_PREFIX)) {
+    encoded = raw.slice(COMBINED_BILLING_RANGE_KEY_PREFIX.length);
+  } else if (raw.startsWith(COMBINED_BILLING_CANONICAL_KEY_PREFIX)) {
+    encoded = raw.slice(COMBINED_BILLING_CANONICAL_KEY_PREFIX.length);
+  } else {
+    return null;
+  }
+  if (!encoded) return null;
+  try {
+    const parsed = JSON.parse(encoded) as Record<string, unknown>;
+    const startDate = String(parsed.startDate || "").trim();
+    const endDate = String(parsed.endDate || "").trim();
+    if (!isIsoDate(startDate) || !isIsoDate(endDate)) return null;
+    return {
+      startDate,
+      endDate,
+      ...normalizeCachePayloadForCompare(parsed),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function monthKeysBetween(startDate: string, endDate: string) {
+  const start = parseIsoDateOnly(startDate);
+  const end = parseIsoDateOnly(endDate);
+  if (!start || !end || end.getTime() < start.getTime()) return [];
+  const keys: string[] = [];
+  let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  const endMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+  while (cursor.getTime() <= endMonth.getTime()) {
+    keys.push(toIsoDateOnly(cursor).slice(0, 7));
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+  }
+  return keys;
+}
+
+function mergeMonthlySeriesByKey<T extends { key?: string; periodStart?: string; monthKey?: string; asOfDate?: string }>(
+  seriesList: T[][],
+): T[] {
+  const byKey = new Map<string, T>();
+  for (const rows of seriesList) {
+    for (const row of rows || []) {
+      const key = monthKeyFromPointLike(row);
+      if (!key) continue;
+      byKey.set(key, row);
+    }
+  }
+  return Array.from(byKey.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([, value]) => value);
+}
+
+async function buildMonthlyCombinedBillingFromChunkRows(args: {
+  startDate: string;
+  endDate: string;
+  includeCac: boolean;
+  comparePayload: Record<string, unknown>;
+}): Promise<Awaited<ReturnType<typeof buildCombinedBillingOverview>> | null> {
+  await ensurePrecomputedCombinedBillingTable();
+  const tableRef = precomputedCombinedBillingTableRef();
+  const rows = await runBigQuerySqlRows(
+    `
+SELECT
+  cache_key,
+  CAST(canonical_start_date AS STRING) AS canonical_start_date,
+  CAST(canonical_end_date AS STRING) AS canonical_end_date,
+  payload_json
+FROM ${tableRef}
+WHERE CAST(include_cac AS INT64) = @include_cac
+  AND canonical_end_date >= DATE(@start_date)
+  AND canonical_start_date <= DATE(@end_date)
+  AND STARTS_WITH(cache_key, @cache_prefix)
+QUALIFY ROW_NUMBER() OVER (PARTITION BY cache_key ORDER BY generated_at DESC) = 1
+ORDER BY canonical_start_date ASC, canonical_end_date ASC
+LIMIT 3000
+`,
+    [
+      { name: "include_cac", type: "INT64", value: args.includeCac ? "1" : "0" },
+      { name: "start_date", type: "STRING", value: args.startDate },
+      { name: "end_date", type: "STRING", value: args.endDate },
+      { name: "cache_prefix", type: "STRING", value: COMBINED_BILLING_RANGE_KEY_PREFIX },
+    ],
+    { profile: "stripe_arr_correct" },
+  ).catch(() => []);
+  if (!rows.length) return null;
+
+  const expectedMonths = monthKeysBetween(args.startDate, args.endDate);
+  if (!expectedMonths.length) return null;
+  const comparable = stableStringify(normalizeCachePayloadForCompare(args.comparePayload));
+  const chunks: Awaited<ReturnType<typeof buildCombinedBillingOverview>>[] = [];
+
+  for (const row of rows) {
+    const cacheKey = String(row.cache_key || "");
+    const keyPayload = parsePayloadFromCombinedBillingCacheKey(cacheKey);
+    if (!keyPayload) continue;
+    if (stableStringify(normalizeCachePayloadForCompare(keyPayload)) !== comparable) continue;
+    const payloadJson = String(row.payload_json || "");
+    if (!payloadJson) continue;
+    try {
+      const parsed = JSON.parse(payloadJson) as Awaited<ReturnType<typeof buildCombinedBillingOverview>>;
+      chunks.push(parsed);
+    } catch {
+      continue;
+    }
+  }
+  if (!chunks.length) return null;
+
+  const points = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.points || []));
+  const pointMonthSet = new Set(points.map((point) => monthKeyFromPointLike(point)));
+  if (expectedMonths.some((key) => !pointMonthSet.has(key))) return null;
+
+  const linePoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.linePoints || []));
+  const lineSourcePoints = {
+    salesled: mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.lineSourcePoints?.salesled || [])),
+    selfserve: mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.lineSourcePoints?.selfserve || [])),
+    aiSpend: mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.lineSourcePoints?.aiSpend || [])),
+  };
+  const arrPerEmployeePoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.arrPerEmployeePoints || []));
+  const salesCyclePoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.salesCyclePoints || []));
+  const retentionPoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.retentionPoints || []));
+  const ltvPoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.ltvPoints || []));
+  const cacPoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.cacPoints || []));
+  const cacCurrencyLayerPoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.cacCurrencyLayerPoints || []));
+  const cacCadPoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.cacCadPoints || []));
+  const aiSpendDailyPointBreakdown = mergeMonthlySeriesByKey(
+    chunks.map((chunk) => chunk.aiSpendDailyPointBreakdown || []),
+  );
+
+  const aiSpendExcludedEnterprisePrepaidCustomers = Array.from(
+    new Map(
+      chunks
+        .flatMap((chunk) => chunk.aiSpendExcludedEnterprisePrepaidCustomers || [])
+        .map((row) => [JSON.stringify(row), row]),
+    ).values(),
+  );
+  aiSpendExcludedEnterprisePrepaidCustomers.sort((a, b) =>
+    `${String(a.asOfDate || "")}:${String(a.customerId || "")}`.localeCompare(
+      `${String(b.asOfDate || "")}:${String(b.customerId || "")}`,
+    ),
+  );
+
+  const latest = chunks[chunks.length - 1];
+  const currentMrr = points.length ? round2(Number(points[points.length - 1].mrrEnd || 0)) : 0;
+  return {
+    ...latest,
+    startDate: args.startDate,
+    endDate: args.endDate,
+    grain: "monthly",
+    currentMrr,
+    currentArr: round2(currentMrr * 12),
+    points,
+    linePoints,
+    lineSourcePoints,
+    arrPerEmployeePoints,
+    salesCyclePoints,
+    retentionPoints,
+    ltvPoints,
+    cacPoints,
+    cacCurrencyLayerPoints,
+    cacCadPoints,
+    aiSpendExcludedEnterprisePrepaidCustomers,
+    aiSpendDailyPointBreakdown,
+  };
 }
 
 function previousPeriodRangeForGrain(startDate: string, grain: CombinedGrain) {
@@ -2525,6 +2707,7 @@ async function resolveCacSelectionForRole(payload: ReturnType<typeof parsePayloa
 
 async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
   const payload = parsePayload(body);
+  const forceRefreshPrecomputed = body.forceRefreshPrecomputed === true;
   const roleScopedSelection = await resolveCacSelectionForRole(payload, isAdmin);
   const cacheScopedSelection = payload.includeCac
     ? roleScopedSelection
@@ -2536,16 +2719,28 @@ async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
       accountNames: cacheScopedSelection.accountNames,
     };
     const key = `api:combined-billing-overview:range:${stableStringify(roleScopedPayload)}`;
-    return getOrSetCache(key, CACHE_TTL_MS, () =>
-      buildCombinedBillingOverview(
+    return getOrSetCache(key, CACHE_TTL_MS, async () => {
+      if (!forceRefreshPrecomputed) {
+        const precomputed = await readPrecomputedCombinedBillingPayload(key).catch(() => null);
+        if (precomputed) return precomputed;
+      }
+      const built = await buildCombinedBillingOverview(
         payload.startDate,
         payload.endDate,
         payload.grain,
         cacheScopedSelection.accountIds,
         cacheScopedSelection.accountNames,
         payload.includeCac,
-      ),
-    );
+      );
+      await writePrecomputedCombinedBillingPayload({
+        cacheKey: key,
+        includeCac: payload.includeCac,
+        canonicalStartDate: payload.startDate,
+        canonicalEndDate: payload.endDate,
+        payload: built,
+      }).catch(() => null);
+      return built;
+    });
   }
   if (payload.grain === "monthly") {
     const todayIso = toIsoDateOnly(new Date());
@@ -2564,6 +2759,22 @@ async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
     const canonical = await getOrSetCache(canonicalKey, CACHE_TTL_MS, async () => {
       const precomputed = await readPrecomputedCombinedBillingPayload(canonicalKey).catch(() => null);
       if (precomputed) return precomputed;
+      const stitched = await buildMonthlyCombinedBillingFromChunkRows({
+        startDate: canonicalStartDate,
+        endDate: canonicalEndDate,
+        includeCac: payload.includeCac,
+        comparePayload: canonicalPayload,
+      });
+      if (stitched) {
+        await writePrecomputedCombinedBillingPayload({
+          cacheKey: canonicalKey,
+          includeCac: payload.includeCac,
+          canonicalStartDate,
+          canonicalEndDate,
+          payload: stitched,
+        }).catch(() => null);
+        return stitched;
+      }
 
       const built = await buildCombinedBillingOverview(
         canonicalStartDate,

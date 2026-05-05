@@ -19,6 +19,15 @@ type PrecomputedPayloadRow = {
   payload_json: string;
 };
 
+export type PrecomputedPayloadRangeRow<T> = {
+  cacheKey: string;
+  startDate: string;
+  endDate: string;
+  grain: string;
+  generatedAt: string;
+  payload: T | null;
+};
+
 const PRECOMPUTED_TABLE_PROJECT = String(process.env.PRECOMPUTED_TABLES_PROJECT || "botpress-stripe-data-pipeline")
   .trim() || "botpress-stripe-data-pipeline";
 const PRECOMPUTED_TABLE_DATASET = String(process.env.PRECOMPUTED_TABLES_DATASET || "precomputed_tables")
@@ -139,3 +148,63 @@ WHERE endpoint_key = @endpoint_key
   });
 }
 
+export async function listLatestPrecomputedPayloadRows<T>(
+  endpointKey: string,
+  args: {
+    startDate?: string;
+    endDate?: string;
+    grain?: string;
+    cacheKeyPrefix?: string;
+    limit?: number;
+  },
+  options?: StoreOptions,
+): Promise<Array<PrecomputedPayloadRangeRow<T>>> {
+  await ensureTable(options);
+  const { tableRef } = tableParts();
+  const rows = await runBigQuerySqlRows(
+    `
+SELECT
+  cache_key,
+  CAST(start_date AS STRING) AS start_date,
+  CAST(end_date AS STRING) AS end_date,
+  grain,
+  CAST(generated_at AS STRING) AS generated_at,
+  payload_json
+FROM ${tableRef}
+WHERE endpoint_key = @endpoint_key
+  AND (@grain = "" OR grain = @grain)
+  AND (@start_date = "" OR end_date >= DATE(@start_date))
+  AND (@end_date = "" OR start_date <= DATE(@end_date))
+  AND (@cache_key_prefix = "" OR STARTS_WITH(cache_key, @cache_key_prefix))
+QUALIFY ROW_NUMBER() OVER (PARTITION BY cache_key ORDER BY generated_at DESC) = 1
+ORDER BY start_date ASC, end_date ASC
+LIMIT @limit
+`,
+    [
+      { name: "endpoint_key", type: "STRING", value: String(endpointKey || "").trim() },
+      { name: "grain", type: "STRING", value: String(args.grain || "").trim() },
+      { name: "start_date", type: "STRING", value: String(args.startDate || "").trim() },
+      { name: "end_date", type: "STRING", value: String(args.endDate || "").trim() },
+      { name: "cache_key_prefix", type: "STRING", value: String(args.cacheKeyPrefix || "").trim() },
+      { name: "limit", type: "INT64", value: String(Math.max(1, Math.min(5000, Number(args.limit || 500)))) },
+    ],
+    { profile: options?.profile || PRECOMPUTED_PROFILE },
+  );
+  return rows.map((row) => {
+    const payloadJson = String(row.payload_json || "");
+    let payload: T | null = null;
+    try {
+      payload = payloadJson ? (JSON.parse(payloadJson) as T) : null;
+    } catch {
+      payload = null;
+    }
+    return {
+      cacheKey: String(row.cache_key || ""),
+      startDate: String(row.start_date || ""),
+      endDate: String(row.end_date || ""),
+      grain: String(row.grain || ""),
+      generatedAt: String(row.generated_at || ""),
+      payload,
+    };
+  });
+}
