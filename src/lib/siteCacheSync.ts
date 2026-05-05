@@ -16,6 +16,8 @@ import { POST as hubspotViewModelPost } from "@/app/api/hubspot-view-model/route
 import { POST as stripeAiSpendPost } from "@/app/api/stripe-ai-spend-report/route";
 import { POST as stripeBillingOverviewPost } from "@/app/api/stripe-billing-overview-report/route";
 import { POST as stripeThroughMrrPost } from "@/app/api/stripe-through-mrr-report/route";
+import { POST as tofuPost } from "@/app/api/tofu-report/route";
+import { POST as ndrGdrPost } from "@/app/api/ndr-gdr-report/route";
 
 export type SyncMode = "fast" | "full";
 
@@ -120,6 +122,12 @@ function daysAgoIsoUtc(days: number) {
 
 function maxIsoDate(a: string, b: string) {
   return a >= b ? a : b;
+}
+
+function readConcurrencyLimit(envName: string, fallback: number, min: number, max: number) {
+  const raw = Number(process.env[envName] || "");
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(raw)));
 }
 
 function defaultRanges(syncMode: SyncMode) {
@@ -312,7 +320,20 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
 
   for (const chunk of chunks) {
     tasks.push({
-      key: `combined-all-subs:chunk:${chunk.label}`,
+      key: `combined-all-subs:simple:arr:chunk:${chunk.label}`,
+      handler: combinedAllSubsPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "simple",
+        displayMode: "arr",
+        planGrain: "monthly",
+        precomputeRangeOnly: true,
+      },
+    });
+    tasks.push({
+      key: `combined-all-subs:grouped:arr:chunk:${chunk.label}`,
       handler: combinedAllSubsPost,
       source: "bigquery",
       body: {
@@ -348,6 +369,78 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         precomputeRangeOnly: true,
       },
     });
+    tasks.push({
+      key: `tofu:month:chunk:${chunk.label}`,
+      handler: tofuPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "grouped",
+        groupBy: "month",
+        precomputeRangeOnly: true,
+      },
+    });
+    tasks.push({
+      key: `tofu:segment:chunk:${chunk.label}`,
+      handler: tofuPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "grouped",
+        groupBy: "segment",
+        precomputeRangeOnly: true,
+      },
+    });
+    tasks.push({
+      key: `tofu:plan:chunk:${chunk.label}`,
+      handler: tofuPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "grouped",
+        groupBy: "plan",
+        precomputeRangeOnly: true,
+      },
+    });
+    tasks.push({
+      key: `ndr-gdr:overall:chunk:${chunk.label}`,
+      handler: ndrGdrPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "grouped",
+        groupBy: "overall",
+        precomputeRangeOnly: true,
+      },
+    });
+    tasks.push({
+      key: `ndr-gdr:source:chunk:${chunk.label}`,
+      handler: ndrGdrPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "grouped",
+        groupBy: "source",
+        precomputeRangeOnly: true,
+      },
+    });
+    tasks.push({
+      key: `ndr-gdr:plan:chunk:${chunk.label}`,
+      handler: ndrGdrPost,
+      source: "bigquery",
+      body: {
+        startDate: chunk.startDate,
+        endDate: chunk.endDate,
+        combineMode: "grouped",
+        groupBy: "plan",
+        precomputeRangeOnly: true,
+      },
+    });
   }
 
   tasks.push(
@@ -360,6 +453,19 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         endDate: taskEnd,
         mode: "contracted",
         grain: "monthly",
+      },
+    },
+    {
+      key: "stripe-through-mrr:monthly:none",
+      handler: stripeThroughMrrPost,
+      source: "bigquery",
+      body: {
+        startDate: taskStart,
+        endDate: taskEnd,
+        grain: "monthly",
+        groupBy: "none",
+        page: 1,
+        pageSize: 250,
       },
     },
     {
@@ -438,11 +544,15 @@ export async function runWarmupTaskBatch(
   );
 
   const pending = Array.from({ length: scheduled.length }, (_, idx) => idx);
+  const bigQueryLimit = readConcurrencyLimit("CACHE_SYNC_BIGQUERY_CONCURRENCY", 3, 1, 6);
+  const hubspotLimit = readConcurrencyLimit("CACHE_SYNC_HUBSPOT_CONCURRENCY", 1, 1, 3);
+  const stripeApiLimit = readConcurrencyLimit("CACHE_SYNC_STRIPE_API_CONCURRENCY", 1, 1, 3);
+  const mixedLimit = readConcurrencyLimit("CACHE_SYNC_MIXED_CONCURRENCY", 1, 1, 2);
   const sourceLimits: Record<string, number> = {
-    bigquery: 2,
-    hubspot: 1,
-    stripe_api: 1,
-    mixed: 1,
+    bigquery: bigQueryLimit,
+    hubspot: hubspotLimit,
+    stripe_api: stripeApiLimit,
+    mixed: mixedLimit,
   };
 
   while (pending.length) {

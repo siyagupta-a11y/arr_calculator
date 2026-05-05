@@ -28,6 +28,9 @@ const WATERMARKS_TABLE = String(process.env.CACHE_SYNC_DIRTY_WATERMARKS_TABLE ||
 const STRIPE_SOURCE_PROJECT = String(process.env.STRIPE_SOURCE_PROJECT || "botpress-stripe-data-pipeline").trim()
   || "botpress-stripe-data-pipeline";
 const STRIPE_SOURCE_DATASET = String(process.env.STRIPE_SOURCE_DATASET || "stripe").trim() || "stripe";
+const HUBSPOT_SOURCE_PROJECT = String(process.env.HUBSPOT_SOURCE_PROJECT || "botpress-stripe-data-pipeline").trim()
+  || "botpress-stripe-data-pipeline";
+const HUBSPOT_SOURCE_DATASET = String(process.env.HUBSPOT_SOURCE_DATASET || "hubspot").trim() || "hubspot";
 const PROFILE: StripeBigQueryProfile = "stripe_arr_correct";
 
 let ensured = false;
@@ -59,6 +62,13 @@ function precomputedTableRef(tableName: string) {
 function stripeTableRef(tableName: string) {
   const project = validateProject(STRIPE_SOURCE_PROJECT, "botpress-stripe-data-pipeline");
   const dataset = validateIdentifier(STRIPE_SOURCE_DATASET, "stripe");
+  const table = validateIdentifier(tableName, tableName);
+  return `\`${project}.${dataset}.${table}\``;
+}
+
+function hubspotTableRef(tableName: string) {
+  const project = validateProject(HUBSPOT_SOURCE_PROJECT, "botpress-stripe-data-pipeline");
+  const dataset = validateIdentifier(HUBSPOT_SOURCE_DATASET, "hubspot");
   const table = validateIdentifier(tableName, tableName);
   return `\`${project}.${dataset}.${table}\``;
 }
@@ -97,6 +107,19 @@ function sourceConfigs(): SourceConfig[] {
       monthDateExpr: "DATE(COALESCE(batch_timestamp, created))",
       forceFullOnChange: true,
     },
+    {
+      source: "hubspot_deals",
+      tableRef: hubspotTableRef("deals_view"),
+      watermarkExpr: "received_at",
+      monthDateExpr: "COALESCE(SAFE_CAST(SUBSTR(NULLIF(TRIM(closedate), ''), 1, 10) AS DATE), SAFE_CAST(SUBSTR(NULLIF(TRIM(createdate), ''), 1, 10) AS DATE), DATE(received_at))",
+    },
+    {
+      source: "hubspot_companies",
+      tableRef: hubspotTableRef("companies_view"),
+      watermarkExpr: "received_at",
+      monthDateExpr: "COALESCE(SAFE_CAST(SUBSTR(NULLIF(TRIM(createdate), ''), 1, 10) AS DATE), DATE(received_at))",
+      forceFullOnChange: true,
+    },
   ];
 }
 
@@ -124,6 +147,17 @@ function currentAndPreviousMonthKeysUtc() {
   const current = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const previous = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
   return [toMonthKey(previous), toMonthKey(current)];
+}
+
+function rollingMonthKeysUtc(monthCount: number) {
+  const safe = Number.isFinite(monthCount) ? Math.max(1, Math.floor(monthCount)) : 2;
+  const now = new Date();
+  const out: string[] = [];
+  for (let i = 0; i < safe; i += 1) {
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    out.push(toMonthKey(monthStart));
+  }
+  return Array.from(new Set(out));
 }
 
 async function ensureTables() {
@@ -346,6 +380,10 @@ export async function detectDirtyMonthSyncPlan(syncMode: SyncMode): Promise<Dirt
   const bootstrapSources: string[] = [];
   const forceFullSources: string[] = [];
   const configs = sourceConfigs();
+  const nonBigQuerySafetyWindowRaw = Number(process.env.CACHE_SYNC_NON_BQ_SAFETY_WINDOW_MONTHS || 2);
+  const nonBigQuerySafetyWindowMonths = Number.isFinite(nonBigQuerySafetyWindowRaw)
+    ? Math.max(1, Math.min(12, Math.floor(nonBigQuerySafetyWindowRaw)))
+    : 2;
 
   for (const cfg of configs) {
     const currentWatermark = await queryCurrentWatermark(cfg);
@@ -392,6 +430,9 @@ export async function detectDirtyMonthSyncPlan(syncMode: SyncMode): Promise<Dirt
     for (const monthKey of currentAndPreviousMonthKeysUtc()) {
       markOps.push(markDirtyMonth("upcoming_invoice_line_snapshots", monthKey, "snapshot-safety-window"));
     }
+  }
+  for (const monthKey of rollingMonthKeysUtc(nonBigQuerySafetyWindowMonths)) {
+    markOps.push(markDirtyMonth("non_bq_sources", monthKey, "external-source-safety-window"));
   }
 
   await Promise.all([...markOps, ...watermarkUpdateOps]);
