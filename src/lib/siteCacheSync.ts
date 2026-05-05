@@ -36,6 +36,10 @@ export type CacheSyncTaskResult = {
   status?: number;
   tookMs: number;
   error?: string;
+  transient?: boolean;
+  attempts?: number;
+  retryAfterMs?: number;
+  source?: "bigquery" | "hubspot" | "stripe_api" | "mixed";
 };
 
 export type CacheSyncResult = {
@@ -130,6 +134,55 @@ function readConcurrencyLimit(envName: string, fallback: number, min: number, ma
   return Math.max(min, Math.min(max, Math.floor(raw)));
 }
 
+function readIntEnv(name: string, fallback: number, min: number, max: number) {
+  const raw = Number(process.env[name] || "");
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(raw)));
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(value: string | null): number | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const asSeconds = Number(raw);
+  if (Number.isFinite(asSeconds)) return Math.max(0, Math.floor(asSeconds * 1000));
+  const asDate = Date.parse(raw);
+  if (!Number.isFinite(asDate)) return null;
+  return Math.max(0, asDate - Date.now());
+}
+
+function classifyTransientFailure(result: Pick<CacheSyncTaskResult, "status" | "error" | "ok">): boolean {
+  if (result.ok) return false;
+  const status = Number(result.status || 0);
+  if (status === 408 || status === 409 || status === 425 || status === 429) return true;
+  if (status >= 500) return true;
+  const message = String(result.error || "").toLowerCase();
+  if (!message) return false;
+  return (
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("econnreset") ||
+    message.includes("socket hang up") ||
+    message.includes("could not resolve host") ||
+    message.includes("fetch failed") ||
+    message.includes("server returned html error page") ||
+    message.includes("internal error")
+  );
+}
+
+function parseRetryAfterMsFromError(error: string | undefined): number | null {
+  const text = String(error || "");
+  if (!text) return null;
+  const direct = /retry-?after[^0-9]*(\d+)/i.exec(text);
+  if (direct && Number.isFinite(Number(direct[1]))) {
+    return Math.max(0, Math.floor(Number(direct[1]) * 1000));
+  }
+  return null;
+}
+
 function defaultRanges(syncMode: SyncMode) {
   const now = new Date();
   const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
@@ -167,6 +220,7 @@ async function invokeRoutePost(label: string, handler: RoutePostHandler, body: R
       } as CacheSyncTaskResult;
     }
 
+    const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
     const text = await res.text();
     return {
       key: label,
@@ -174,20 +228,44 @@ async function invokeRoutePost(label: string, handler: RoutePostHandler, body: R
       status: res.status,
       tookMs: Date.now() - t0,
       error: text.slice(0, 300),
+      transient: classifyTransientFailure({ ok: false, status: res.status, error: text }),
+      ...(retryAfterMs !== null ? { retryAfterMs } : {}),
     } as CacheSyncTaskResult;
   } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
     return {
       key: label,
       ok: false,
       tookMs: Date.now() - t0,
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
+      transient: classifyTransientFailure({ ok: false, error: message }),
     } as CacheSyncTaskResult;
   }
 }
 
-async function invokeRoutePostWithRetry(task: WarmupTaskDefinition) {
+async function invokeRoutePostWithRetry(
+  task: WarmupTaskDefinition,
+  options?: {
+    syncMode?: SyncMode;
+    timeoutMs?: number;
+    maxAttempts?: number;
+    serialRecovery?: boolean;
+  },
+) {
   const timeoutMsRaw = Number(process.env.CACHE_SYNC_TASK_TIMEOUT_MS || 180000);
-  const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(15_000, Math.floor(timeoutMsRaw)) : 180_000;
+  const timeoutMs = Number.isFinite(options?.timeoutMs)
+    ? Math.max(15_000, Math.floor(Number(options?.timeoutMs)))
+    : (Number.isFinite(timeoutMsRaw) ? Math.max(15_000, Math.floor(timeoutMsRaw)) : 180_000);
+  const syncMode = normalizeSyncMode(options?.syncMode);
+  const defaultMaxAttempts = syncMode === "full"
+    ? readIntEnv("CACHE_SYNC_MAX_ATTEMPTS_FULL", 5, 1, 10)
+    : readIntEnv("CACHE_SYNC_MAX_ATTEMPTS_FAST", 3, 1, 10);
+  const maxAttempts = Number.isFinite(options?.maxAttempts)
+    ? Math.max(1, Math.min(10, Math.floor(Number(options?.maxAttempts))))
+    : defaultMaxAttempts;
+  const baseBackoffMs = readIntEnv("CACHE_SYNC_RETRY_BASE_MS", 500, 100, 60_000);
+  const maxBackoffMs = readIntEnv("CACHE_SYNC_RETRY_MAX_MS", 20_000, 1000, 180_000);
+
   const withTimeout = <T>(promise: Promise<T>): Promise<T> =>
     new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`Task timed out after ${Math.floor(timeoutMs / 1000)}s`)), timeoutMs);
@@ -203,30 +281,44 @@ async function invokeRoutePostWithRetry(task: WarmupTaskDefinition) {
     });
 
   let attempt = 1;
-  let result = await withTimeout(invokeRoutePost(task.key, task.handler, task.body)).catch((error: unknown) => ({
+  let result: CacheSyncTaskResult = await withTimeout(invokeRoutePost(task.key, task.handler, task.body)).catch((error: unknown) => ({
     key: task.key,
     ok: false,
     tookMs: 0,
     error: error instanceof Error ? error.message : String(error),
+    transient: true,
   }));
-  while (!result.ok && attempt < 3) {
+  result.source = task.source || "mixed";
+  result.transient = classifyTransientFailure(result);
+  while (!result.ok && attempt < maxAttempts) {
+    if (!classifyTransientFailure(result)) break;
     attempt += 1;
-    const backoffMs = Math.min(2000, 250 * 2 ** (attempt - 2));
-    await new Promise((resolve) => setTimeout(resolve, backoffMs + Math.floor(Math.random() * 150)));
+    const jitterMs = Math.floor(Math.random() * 500);
+    const exponentialBackoffMs = Math.min(maxBackoffMs, baseBackoffMs * 2 ** (attempt - 2));
+    const retryAfterMs = parseRetryAfterMsFromError(result.error);
+    const waitMs = Math.max(exponentialBackoffMs + jitterMs, retryAfterMs || 0);
+    await sleep(waitMs);
     result = await withTimeout(invokeRoutePost(task.key, task.handler, task.body)).catch((error: unknown) => ({
       key: task.key,
       ok: false,
       tookMs: 0,
       error: error instanceof Error ? error.message : String(error),
+      transient: true,
     }));
+    result.source = task.source || "mixed";
+    result.transient = classifyTransientFailure(result);
   }
   if (!result.ok && attempt > 1) {
     return {
       ...result,
-      error: `${result.error || "task failed"} (after ${attempt} attempts)`,
+      error: `${result.error || "task failed"} (after ${attempt} attempts${options?.serialRecovery ? ", serial recovery" : ""})`,
+      attempts: attempt,
     };
   }
-  return result;
+  return {
+    ...result,
+    attempts: attempt,
+  };
 }
 
 type WarmupRangeChunk = {
@@ -558,17 +650,24 @@ export async function runWarmupTaskBatch(
   const hubspotLimit = readConcurrencyLimit("CACHE_SYNC_HUBSPOT_CONCURRENCY", 1, 1, 3);
   const stripeApiLimit = readConcurrencyLimit("CACHE_SYNC_STRIPE_API_CONCURRENCY", 1, 1, 3);
   const mixedLimit = readConcurrencyLimit("CACHE_SYNC_MIXED_CONCURRENCY", 1, 1, 2);
-  const sourceLimits: Record<string, number> = {
+  const sourceLimitsBase: Record<string, number> = {
     bigquery: bigQueryLimit,
     hubspot: hubspotLimit,
     stripe_api: stripeApiLimit,
     mixed: mixedLimit,
   };
+  const sourceLimits: Record<string, number> = { ...sourceLimitsBase };
+  let adaptiveWaveLimit = safeBatchSize;
+  const adaptiveEnabled = String(process.env.CACHE_SYNC_ADAPTIVE_CONCURRENCY || "1").trim() !== "0";
+  const downshiftThreshold = readIntEnv("CACHE_SYNC_ADAPTIVE_DOWNSHIFT_THRESHOLD", 2, 1, 6);
+  const upliftSuccessThreshold = readIntEnv("CACHE_SYNC_ADAPTIVE_UPLIFT_SUCCESS_STREAK", 3, 1, 10);
+  const fullTimeoutMs = readIntEnv("CACHE_SYNC_TASK_TIMEOUT_MS", 180_000, 15_000, 2_400_000);
+  let successWaveStreak = 0;
 
   while (pending.length) {
     const wave: Array<{ localIndex: number; task: WarmupTaskDefinition }> = [];
     const sourceUsed: Record<string, number> = {};
-    for (let i = 0; i < pending.length && wave.length < safeBatchSize; ) {
+    for (let i = 0; i < pending.length && wave.length < adaptiveWaveLimit; ) {
       const localIndex = pending[i];
       const task = scheduled[localIndex].task;
       const source = String(task.source || "mixed");
@@ -591,9 +690,69 @@ export async function runWarmupTaskBatch(
 
     const waveResults = await Promise.all(wave.map(async ({ localIndex, task }) => ({
       localIndex,
-      result: await invokeRoutePostWithRetry(task),
+      result: await invokeRoutePostWithRetry(task, { syncMode, timeoutMs: fullTimeoutMs }),
     })));
-    for (const { localIndex, result } of waveResults) orderedResults[localIndex] = result;
+    let transientFailuresInWave = 0;
+    for (const { localIndex, result } of waveResults) {
+      const normalized = {
+        ...result,
+        transient: classifyTransientFailure(result),
+        source: result.source || scheduled[localIndex].task.source || "mixed",
+      } as CacheSyncTaskResult;
+      orderedResults[localIndex] = normalized;
+      if (!normalized.ok && normalized.transient) transientFailuresInWave += 1;
+    }
+
+    if (adaptiveEnabled) {
+      if (transientFailuresInWave >= downshiftThreshold) {
+        successWaveStreak = 0;
+        adaptiveWaveLimit = Math.max(1, adaptiveWaveLimit - 1);
+        for (const { localIndex } of waveResults) {
+          const source = String(scheduled[localIndex].task.source || "mixed");
+          sourceLimits[source] = Math.max(1, (sourceLimits[source] || 1) - 1);
+        }
+      } else if (transientFailuresInWave === 0) {
+        successWaveStreak += 1;
+        if (successWaveStreak >= upliftSuccessThreshold) {
+          successWaveStreak = 0;
+          adaptiveWaveLimit = Math.min(safeBatchSize, adaptiveWaveLimit + 1);
+          for (const source of Object.keys(sourceLimitsBase)) {
+            sourceLimits[source] = Math.min(sourceLimitsBase[source], (sourceLimits[source] || 1) + 1);
+          }
+        }
+      } else {
+        successWaveStreak = 0;
+      }
+    }
+  }
+
+  const recoveryPasses = syncMode === "full"
+    ? readIntEnv("CACHE_SYNC_TRANSIENT_RECOVERY_PASSES_FULL", 2, 0, 5)
+    : readIntEnv("CACHE_SYNC_TRANSIENT_RECOVERY_PASSES_FAST", 1, 0, 3);
+  const recoveryTimeoutMs = readIntEnv("CACHE_SYNC_TRANSIENT_RECOVERY_TIMEOUT_MS", 240_000, 15_000, 3_600_000);
+  for (let pass = 1; pass <= recoveryPasses; pass += 1) {
+    const transientFailureIndexes: number[] = [];
+    for (let localIndex = 0; localIndex < orderedResults.length; localIndex += 1) {
+      const result = orderedResults[localIndex];
+      if (!result || result.ok) continue;
+      if (!classifyTransientFailure(result)) continue;
+      transientFailureIndexes.push(localIndex);
+    }
+    if (!transientFailureIndexes.length) break;
+    for (const localIndex of transientFailureIndexes) {
+      const task = scheduled[localIndex].task;
+      const recovered = await invokeRoutePostWithRetry(task, {
+        syncMode,
+        timeoutMs: recoveryTimeoutMs,
+        maxAttempts: 2,
+        serialRecovery: true,
+      });
+      orderedResults[localIndex] = {
+        ...recovered,
+        transient: classifyTransientFailure(recovered),
+        source: recovered.source || task.source || "mixed",
+      };
+    }
   }
 
   const results = orderedResults.filter((value): value is CacheSyncTaskResult => Boolean(value));
@@ -731,6 +890,24 @@ export async function syncWebsiteCache(options: SyncOptions = {}): Promise<Cache
       tasks.push(...batch.results);
       cursor = batch.nextIndex;
       if (batch.done) break;
+    }
+  }
+
+  if (warmup) {
+    const finalTransientSweepPasses = syncMode === "full"
+      ? readIntEnv("CACHE_SYNC_FINAL_TRANSIENT_SWEEP_PASSES_FULL", 2, 0, 5)
+      : readIntEnv("CACHE_SYNC_FINAL_TRANSIENT_SWEEP_PASSES_FAST", 1, 0, 3);
+    for (let pass = 1; pass <= finalTransientSweepPasses; pass += 1) {
+      const failedIndexes = tasks
+        .map((task, index) => ({ task, index }))
+        .filter(({ task }) => !task.ok && classifyTransientFailure(task))
+        .map(({ index }) => index);
+      if (!failedIndexes.length) break;
+      for (const index of failedIndexes) {
+        const retried = await runWarmupTaskBatch(index, 1, syncMode, { dirtyMonthKeys });
+        const next = retried.results[0];
+        if (next) tasks[index] = next;
+      }
     }
   }
 
