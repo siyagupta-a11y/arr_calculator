@@ -87,7 +87,8 @@ export async function POST(req: NextRequest) {
       const dirtyPlan = warmup ? await detectDirtyMonthSyncPlan(syncMode).catch(() => null) : null;
       const dirtyMode = Boolean(dirtyPlan?.useDirtyMonths);
       const dirtyMonthKeys = dirtyMode ? (dirtyPlan?.dirtyMonthKeys || []) : [];
-      const taskDefinitions = warmup ? buildWarmupTaskDefinitions(syncMode, { dirtyMonthKeys }) : [];
+      const warmupDirtyMonthKeys = dirtyMode ? dirtyMonthKeys : null;
+      const taskDefinitions = warmup ? buildWarmupTaskDefinitions(syncMode, { dirtyMonthKeys: warmupDirtyMonthKeys }) : [];
       const totalTasks = taskDefinitions.length;
       const taskKeys = taskDefinitions.map((task) => task.key);
       if (warmup) {
@@ -132,7 +133,7 @@ export async function POST(req: NextRequest) {
       const dirtyMonthKeys =
         currentState && !currentState.done && currentState.syncMode === syncMode && currentState.dirtyMode
           ? currentState.dirtyMonthKeys || []
-          : [];
+          : null;
       const batchSize = Number(body.batchSize || 1);
       const batch = await runWarmupTaskBatch(taskIndex, batchSize, syncMode, { dirtyMonthKeys });
       let okTaskCount = 0;
