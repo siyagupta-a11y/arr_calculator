@@ -130,6 +130,13 @@ function splitIntoChunks<T>(values: T[], size: number) {
   return out;
 }
 
+function toBigQueryNumeric(value: unknown): string {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return "0";
+  // BigQuery NUMERIC supports up to 9 fractional digits.
+  return n.toFixed(9).replace(/\.?0+$/, "");
+}
+
 async function insertRowsChunked(table: string, rows: Array<Record<string, unknown>>, chunkSize = 5000) {
   if (!rows.length) return 0;
   const chunks = splitIntoChunks(rows, chunkSize);
@@ -410,8 +417,8 @@ async function syncCustomerArrPeriodic(startDate: string, endDate: string, grain
         plan,
         sales_assist: salesAssist,
         desk_early_access: deskEarlyAccess,
-        arr_end: arrEnd,
-        mrr_end: arrEnd / 12,
+        arr_end: toBigQueryNumeric(arrEnd),
+        mrr_end: toBigQueryNumeric(arrEnd / 12),
         month_key: periodDateIso.slice(0, 7),
         sync_run_id: syncRunId,
         updated_at: new Date().toISOString(),
@@ -438,13 +445,13 @@ async function syncTofuMonthly(startDate: string, endDate: string, syncRunId: st
       period_date: toIsoDate(d),
       group_type: "overall",
       group_value: "overall",
-      beginning_arr: Number(row.beginningArr || 0),
-      new_arr: Number(row.newArr || 0),
-      expansion_arr: Number(row.expansionArr || 0),
-      contraction_arr: Number(row.contractionArr || 0),
-      churn_arr: Number(row.churnArr || 0),
-      net_plan_change_arr: 0,
-      ending_arr: Number(row.endingArr || 0),
+      beginning_arr: toBigQueryNumeric(row.beginningArr),
+      new_arr: toBigQueryNumeric(row.newArr),
+      expansion_arr: toBigQueryNumeric(row.expansionArr),
+      contraction_arr: toBigQueryNumeric(row.contractionArr),
+      churn_arr: toBigQueryNumeric(row.churnArr),
+      net_plan_change_arr: toBigQueryNumeric(0),
+      ending_arr: toBigQueryNumeric(row.endingArr),
       sync_run_id: syncRunId,
       updated_at: new Date().toISOString(),
     });
@@ -464,13 +471,13 @@ async function syncTofuMonthly(startDate: string, endDate: string, syncRunId: st
       period_date: toIsoDate(d),
       group_type: "segment",
       group_value: String(row.segment || "unknown"),
-      beginning_arr: Number(row.beginningArr || 0),
-      new_arr: Number(row.newArr || 0),
-      expansion_arr: Number(row.expansionArr || 0),
-      contraction_arr: Number(row.contractionArr || 0),
-      churn_arr: Number(row.churnArr || 0),
-      net_plan_change_arr: 0,
-      ending_arr: Number(row.endingArr || 0),
+      beginning_arr: toBigQueryNumeric(row.beginningArr),
+      new_arr: toBigQueryNumeric(row.newArr),
+      expansion_arr: toBigQueryNumeric(row.expansionArr),
+      contraction_arr: toBigQueryNumeric(row.contractionArr),
+      churn_arr: toBigQueryNumeric(row.churnArr),
+      net_plan_change_arr: toBigQueryNumeric(0),
+      ending_arr: toBigQueryNumeric(row.endingArr),
       sync_run_id: syncRunId,
       updated_at: new Date().toISOString(),
     });
@@ -490,13 +497,13 @@ async function syncTofuMonthly(startDate: string, endDate: string, syncRunId: st
       period_date: toIsoDate(d),
       group_type: "plan",
       group_value: String(row.plan || "free"),
-      beginning_arr: Number(row.beginningArr || 0),
-      new_arr: Number(row.newArr || 0),
-      expansion_arr: Number(row.expansionArr || 0),
-      contraction_arr: Number(row.contractionArr || 0),
-      churn_arr: Number(row.churnArr || 0),
-      net_plan_change_arr: Number(row.netPlanChangeArr || 0),
-      ending_arr: Number(row.endingArr || 0),
+      beginning_arr: toBigQueryNumeric(row.beginningArr),
+      new_arr: toBigQueryNumeric(row.newArr),
+      expansion_arr: toBigQueryNumeric(row.expansionArr),
+      contraction_arr: toBigQueryNumeric(row.contractionArr),
+      churn_arr: toBigQueryNumeric(row.churnArr),
+      net_plan_change_arr: toBigQueryNumeric(row.netPlanChangeArr),
+      ending_arr: toBigQueryNumeric(row.endingArr),
       sync_run_id: syncRunId,
       updated_at: new Date().toISOString(),
     });
@@ -519,9 +526,9 @@ async function syncAiSpendDailyAgg(startDate: string, endDate: string, syncRunId
   const rows = (result.points || []).map((point) => ({
     date: point.snapshotDate,
     snapshot_timestamp_utc: String(point.snapshotTimestampUtc || "").trim() || null,
-    ai_spend_without_exclusions: Number(point.annualizedArrWithoutExclusions || 0),
-    ai_spend_with_exclusions: Number(point.annualizedArr || 0),
-    ai_spend_excluded: Number(point.annualizedArrExcluded || 0),
+    ai_spend_without_exclusions: toBigQueryNumeric(point.annualizedArrWithoutExclusions),
+    ai_spend_with_exclusions: toBigQueryNumeric(point.annualizedArr),
+    ai_spend_excluded: toBigQueryNumeric(point.annualizedArrExcluded),
     line_count: Number(point.lineCount || 0),
     customer_count: Number(point.customerCount || 0),
     sync_run_id: syncRunId,
