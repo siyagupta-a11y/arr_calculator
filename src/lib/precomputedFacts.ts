@@ -23,6 +23,9 @@ const TABLE_FACT_CUSTOMER_ARR = "fact_customer_arr_periodic";
 const TABLE_FACT_TOFU_MONTHLY = "fact_tofu_monthly";
 const TABLE_FACT_AI_SPEND_DAILY = "fact_ai_spend_daily_agg";
 const TABLE_FACT_SYNC_RUNS = "fact_sync_runs";
+const VIEW_FACT_CUSTOMER_ARR_CURRENT = "vw_fact_customer_arr_periodic_current";
+const VIEW_FACT_TOFU_MONTHLY_CURRENT = "vw_fact_tofu_monthly_current";
+const VIEW_FACT_AI_SPEND_DAILY_CURRENT = "vw_fact_ai_spend_daily_agg_current";
 
 type SyncMode = "full" | "dirty";
 type FactGrain = "daily" | "monthly";
@@ -48,6 +51,7 @@ export type PrecomputedFactsSyncResult = {
   mode: SyncMode;
   startDate: string;
   endDate: string;
+  syncRunId: string;
   includeDaily: boolean;
   includeMonthly: boolean;
   startedAtUtc: string;
@@ -178,6 +182,7 @@ CREATE TABLE IF NOT EXISTS ${tableRef(TABLE_FACT_CUSTOMER_ARR)} (
   arr_end NUMERIC NOT NULL,
   mrr_end NUMERIC NOT NULL,
   month_key STRING NOT NULL,
+  sync_run_id STRING,
   updated_at TIMESTAMP NOT NULL
 )
 PARTITION BY period_date
@@ -201,6 +206,7 @@ CREATE TABLE IF NOT EXISTS ${tableRef(TABLE_FACT_TOFU_MONTHLY)} (
   churn_arr NUMERIC NOT NULL,
   net_plan_change_arr NUMERIC NOT NULL,
   ending_arr NUMERIC NOT NULL,
+  sync_run_id STRING,
   updated_at TIMESTAMP NOT NULL
 )
 PARTITION BY period_date
@@ -220,6 +226,7 @@ CREATE TABLE IF NOT EXISTS ${tableRef(TABLE_FACT_AI_SPEND_DAILY)} (
   ai_spend_excluded NUMERIC NOT NULL,
   line_count INT64 NOT NULL,
   customer_count INT64 NOT NULL,
+  sync_run_id STRING,
   updated_at TIMESTAMP NOT NULL
 )
 PARTITION BY date
@@ -248,6 +255,89 @@ CLUSTER BY mode, start_date, end_date
     [],
     { profile: PROFILE },
   );
+
+  // Keep schema forward-compatible without DML rewrites.
+  await runBigQuerySqlStatement(
+    `
+ALTER TABLE ${tableRef(TABLE_FACT_CUSTOMER_ARR)}
+ADD COLUMN IF NOT EXISTS sync_run_id STRING
+`,
+    [],
+    { profile: PROFILE },
+  );
+  await runBigQuerySqlStatement(
+    `
+ALTER TABLE ${tableRef(TABLE_FACT_TOFU_MONTHLY)}
+ADD COLUMN IF NOT EXISTS sync_run_id STRING
+`,
+    [],
+    { profile: PROFILE },
+  );
+  await runBigQuerySqlStatement(
+    `
+ALTER TABLE ${tableRef(TABLE_FACT_AI_SPEND_DAILY)}
+ADD COLUMN IF NOT EXISTS sync_run_id STRING
+`,
+    [],
+    { profile: PROFILE },
+  );
+
+  await runBigQuerySqlStatement(
+    `
+CREATE OR REPLACE VIEW ${tableRef(VIEW_FACT_CUSTOMER_ARR_CURRENT)} AS
+SELECT * EXCEPT(rn)
+FROM (
+  SELECT
+    t.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY t.period_date, t.grain, t.customer_key
+      ORDER BY t.updated_at DESC, t.sync_run_id DESC
+    ) AS rn
+  FROM ${tableRef(TABLE_FACT_CUSTOMER_ARR)} t
+)
+WHERE rn = 1
+`,
+    [],
+    { profile: PROFILE },
+  );
+
+  await runBigQuerySqlStatement(
+    `
+CREATE OR REPLACE VIEW ${tableRef(VIEW_FACT_TOFU_MONTHLY_CURRENT)} AS
+SELECT * EXCEPT(rn)
+FROM (
+  SELECT
+    t.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY t.period_date, t.group_type, t.group_value
+      ORDER BY t.updated_at DESC, t.sync_run_id DESC
+    ) AS rn
+  FROM ${tableRef(TABLE_FACT_TOFU_MONTHLY)} t
+)
+WHERE rn = 1
+`,
+    [],
+    { profile: PROFILE },
+  );
+
+  await runBigQuerySqlStatement(
+    `
+CREATE OR REPLACE VIEW ${tableRef(VIEW_FACT_AI_SPEND_DAILY_CURRENT)} AS
+SELECT * EXCEPT(rn)
+FROM (
+  SELECT
+    t.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY t.date
+      ORDER BY t.updated_at DESC, t.sync_run_id DESC
+    ) AS rn
+  FROM ${tableRef(TABLE_FACT_AI_SPEND_DAILY)} t
+)
+WHERE rn = 1
+`,
+    [],
+    { profile: PROFILE },
+  );
 }
 
 async function syncDateDimension(startDate: string, endDate: string) {
@@ -256,8 +346,23 @@ async function syncDateDimension(startDate: string, endDate: string) {
   if (!start || !end || end.getTime() < start.getTime()) return 0;
   await runBigQuerySqlStatement(
     `
-DELETE FROM ${tableRef(TABLE_DIM_DATE)}
-WHERE date BETWEEN DATE(@start_date) AND DATE(@end_date)
+INSERT INTO ${tableRef(TABLE_DIM_DATE)}
+  (date, month_key, quarter_key, year, month, day_of_month, days_in_month, month_start, month_end, updated_at)
+SELECT
+  d AS date,
+  FORMAT_DATE('%Y-%m', d) AS month_key,
+  FORMAT('%d-Q%d', EXTRACT(YEAR FROM d), CAST(CEIL(EXTRACT(MONTH FROM d) / 3.0) AS INT64)) AS quarter_key,
+  EXTRACT(YEAR FROM d) AS year,
+  EXTRACT(MONTH FROM d) AS month,
+  EXTRACT(DAY FROM d) AS day_of_month,
+  EXTRACT(DAY FROM DATE_SUB(DATE_ADD(DATE_TRUNC(d, MONTH), INTERVAL 1 MONTH), INTERVAL 1 DAY)) AS days_in_month,
+  DATE_TRUNC(d, MONTH) AS month_start,
+  DATE_SUB(DATE_ADD(DATE_TRUNC(d, MONTH), INTERVAL 1 MONTH), INTERVAL 1 DAY) AS month_end,
+  CURRENT_TIMESTAMP() AS updated_at
+FROM UNNEST(GENERATE_DATE_ARRAY(DATE(@start_date), DATE(@end_date))) AS d
+LEFT JOIN ${tableRef(TABLE_DIM_DATE)} existing
+  ON existing.date = d
+WHERE existing.date IS NULL
 `,
     [
       { name: "start_date", type: "STRING", value: startDate },
@@ -265,34 +370,10 @@ WHERE date BETWEEN DATE(@start_date) AND DATE(@end_date)
     ],
     { profile: PROFILE },
   );
-
-  const rows: Array<Record<string, unknown>> = [];
-  for (let d = new Date(start.getTime()); d.getTime() <= end.getTime(); d = new Date(Date.UTC(
-    d.getUTCFullYear(),
-    d.getUTCMonth(),
-    d.getUTCDate() + 1,
-  ))) {
-    const monthStart = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
-    const monthEnd = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
-    const quarter = Math.floor(d.getUTCMonth() / 3) + 1;
-    rows.push({
-      date: toIsoDate(d),
-      month_key: toIsoDate(d).slice(0, 7),
-      quarter_key: `${d.getUTCFullYear()}-Q${quarter}`,
-      year: d.getUTCFullYear(),
-      month: d.getUTCMonth() + 1,
-      day_of_month: d.getUTCDate(),
-      days_in_month: monthEnd.getUTCDate(),
-      month_start: toIsoDate(monthStart),
-      month_end: toIsoDate(monthEnd),
-      updated_at: new Date().toISOString(),
-    });
-  }
-
-  return insertRowsChunked(TABLE_DIM_DATE, rows, 5000);
+  return Math.floor((end.getTime() - start.getTime()) / 86400000) + 1;
 }
 
-async function syncCustomerArrPeriodic(startDate: string, endDate: string, grain: FactGrain) {
+async function syncCustomerArrPeriodic(startDate: string, endDate: string, grain: FactGrain, syncRunId: string) {
   const report = await generateCombinedAllSubsReport({
     startDate,
     endDate,
@@ -303,20 +384,6 @@ async function syncCustomerArrPeriodic(startDate: string, endDate: string, grain
     groupedMatchStrategy: "full",
     includeSalesAssist: true,
   });
-
-  await runBigQuerySqlStatement(
-    `
-DELETE FROM ${tableRef(TABLE_FACT_CUSTOMER_ARR)}
-WHERE grain = @grain
-  AND period_date BETWEEN DATE(@start_date) AND DATE(@end_date)
-`,
-    [
-      { name: "grain", type: "STRING", value: grain },
-      { name: "start_date", type: "STRING", value: startDate },
-      { name: "end_date", type: "STRING", value: endDate },
-    ],
-    { profile: PROFILE },
-  );
 
   const rows: Array<Record<string, unknown>> = [];
   for (const row of report.rows || []) {
@@ -346,6 +413,7 @@ WHERE grain = @grain
         arr_end: arrEnd,
         mrr_end: arrEnd / 12,
         month_key: periodDateIso.slice(0, 7),
+        sync_run_id: syncRunId,
         updated_at: new Date().toISOString(),
       });
     }
@@ -354,19 +422,7 @@ WHERE grain = @grain
   return insertRowsChunked(TABLE_FACT_CUSTOMER_ARR, rows, 5000);
 }
 
-async function syncTofuMonthly(startDate: string, endDate: string) {
-  await runBigQuerySqlStatement(
-    `
-DELETE FROM ${tableRef(TABLE_FACT_TOFU_MONTHLY)}
-WHERE period_date BETWEEN DATE(@start_date) AND DATE(@end_date)
-`,
-    [
-      { name: "start_date", type: "STRING", value: startDate },
-      { name: "end_date", type: "STRING", value: endDate },
-    ],
-    { profile: PROFILE },
-  );
-
+async function syncTofuMonthly(startDate: string, endDate: string, syncRunId: string) {
   const rows: Array<Record<string, unknown>> = [];
   const monthReport = await generateTofuReport({
     startDate,
@@ -389,6 +445,7 @@ WHERE period_date BETWEEN DATE(@start_date) AND DATE(@end_date)
       churn_arr: Number(row.churnArr || 0),
       net_plan_change_arr: 0,
       ending_arr: Number(row.endingArr || 0),
+      sync_run_id: syncRunId,
       updated_at: new Date().toISOString(),
     });
   }
@@ -414,6 +471,7 @@ WHERE period_date BETWEEN DATE(@start_date) AND DATE(@end_date)
       churn_arr: Number(row.churnArr || 0),
       net_plan_change_arr: 0,
       ending_arr: Number(row.endingArr || 0),
+      sync_run_id: syncRunId,
       updated_at: new Date().toISOString(),
     });
   }
@@ -439,6 +497,7 @@ WHERE period_date BETWEEN DATE(@start_date) AND DATE(@end_date)
       churn_arr: Number(row.churnArr || 0),
       net_plan_change_arr: Number(row.netPlanChangeArr || 0),
       ending_arr: Number(row.endingArr || 0),
+      sync_run_id: syncRunId,
       updated_at: new Date().toISOString(),
     });
   }
@@ -446,7 +505,7 @@ WHERE period_date BETWEEN DATE(@start_date) AND DATE(@end_date)
   return insertRowsChunked(TABLE_FACT_TOFU_MONTHLY, rows, 5000);
 }
 
-async function syncAiSpendDailyAgg(startDate: string, endDate: string) {
+async function syncAiSpendDailyAgg(startDate: string, endDate: string, syncRunId: string) {
   const result = await queryStripeAiSpendDailyAnnualizedFromUpcomingSnapshotsFromBigQuery(
     {
       startDate,
@@ -454,18 +513,6 @@ async function syncAiSpendDailyAgg(startDate: string, endDate: string) {
       targetCurrency: "usd",
       productDescriptionIncludes: AI_PRODUCT_TERMS,
     },
-    { profile: PROFILE },
-  );
-
-  await runBigQuerySqlStatement(
-    `
-DELETE FROM ${tableRef(TABLE_FACT_AI_SPEND_DAILY)}
-WHERE date BETWEEN DATE(@start_date) AND DATE(@end_date)
-`,
-    [
-      { name: "start_date", type: "STRING", value: startDate },
-      { name: "end_date", type: "STRING", value: endDate },
-    ],
     { profile: PROFILE },
   );
 
@@ -477,6 +524,7 @@ WHERE date BETWEEN DATE(@start_date) AND DATE(@end_date)
     ai_spend_excluded: Number(point.annualizedArrExcluded || 0),
     line_count: Number(point.lineCount || 0),
     customer_count: Number(point.customerCount || 0),
+    sync_run_id: syncRunId,
     updated_at: new Date().toISOString(),
   }));
   return insertRowsChunked(TABLE_FACT_AI_SPEND_DAILY, rows, 5000);
@@ -544,6 +592,7 @@ export function resolveSyncWindow(request: PrecomputedFactsSyncRequest) {
 export async function syncPrecomputedFacts(request: PrecomputedFactsSyncRequest): Promise<PrecomputedFactsSyncResult> {
   const window = resolveSyncWindow(request);
   const startedAtUtc = new Date().toISOString();
+  const syncRunId = `${window.mode}:${startedAtUtc}:${Math.random().toString(36).slice(2, 10)}`;
   const steps: PrecomputedFactsSyncStepResult[] = [];
 
   const runStep = async (step: string, fn: () => Promise<number | string | void>) => {
@@ -577,12 +626,12 @@ export async function syncPrecomputedFacts(request: PrecomputedFactsSyncRequest)
     });
     await runStep("sync_dim_date", () => syncDateDimension(window.startDate, window.endDate));
     if (window.includeDaily) {
-      await runStep("sync_customer_arr_daily", () => syncCustomerArrPeriodic(window.startDate, window.endDate, "daily"));
-      await runStep("sync_ai_spend_daily_agg", () => syncAiSpendDailyAgg(window.startDate, window.endDate));
+      await runStep("sync_customer_arr_daily", () => syncCustomerArrPeriodic(window.startDate, window.endDate, "daily", syncRunId));
+      await runStep("sync_ai_spend_daily_agg", () => syncAiSpendDailyAgg(window.startDate, window.endDate, syncRunId));
     }
     if (window.includeMonthly) {
-      await runStep("sync_customer_arr_monthly", () => syncCustomerArrPeriodic(window.startDate, window.endDate, "monthly"));
-      await runStep("sync_tofu_monthly", () => syncTofuMonthly(window.startDate, window.endDate));
+      await runStep("sync_customer_arr_monthly", () => syncCustomerArrPeriodic(window.startDate, window.endDate, "monthly", syncRunId));
+      await runStep("sync_tofu_monthly", () => syncTofuMonthly(window.startDate, window.endDate, syncRunId));
     }
   } finally {
     const finishedAtUtc = new Date().toISOString();
@@ -590,6 +639,7 @@ export async function syncPrecomputedFacts(request: PrecomputedFactsSyncRequest)
       mode: window.mode,
       startDate: window.startDate,
       endDate: window.endDate,
+      syncRunId,
       includeDaily: window.includeDaily,
       includeMonthly: window.includeMonthly,
       startedAtUtc,
@@ -604,6 +654,7 @@ export async function syncPrecomputedFacts(request: PrecomputedFactsSyncRequest)
     mode: window.mode,
     startDate: window.startDate,
     endDate: window.endDate,
+    syncRunId,
     includeDaily: window.includeDaily,
     includeMonthly: window.includeMonthly,
     startedAtUtc,
