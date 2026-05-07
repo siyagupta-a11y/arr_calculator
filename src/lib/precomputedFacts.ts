@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS ${tableRef(TABLE_FACT_CUSTOMER_ARR)} (
   updated_at TIMESTAMP NOT NULL
 )
 PARTITION BY period_date
-CLUSTER BY grain, source, segment, plan, customer_key
+CLUSTER BY grain, segment, plan, customer_key
 `,
     [],
     { profile: PROFILE },
