@@ -1,5 +1,7 @@
 import { clearHubspotMemoryCache } from "@/lib/hubspot";
 import { detectDirtyMonthSyncPlan, resolveDirtyMonthKeys } from "@/lib/dirtyDateSync";
+import { syncPrecomputedFacts } from "@/lib/precomputedFacts";
+import { factSyncInMainSyncEnabled, legacyPrecomputeWarmupEnabled } from "@/lib/factTableFlags";
 import {
   clearPersistentServerResponseCache,
   clearServerResponseCache,
@@ -212,6 +214,46 @@ function defaultRanges(syncMode: SyncMode) {
   };
 }
 
+async function precomputedFactsSyncPost(req: never) {
+  try {
+    const request = req as unknown as Request;
+    const raw = await request.text();
+    const body = (raw ? JSON.parse(raw) : {}) as {
+      mode?: "full" | "dirty";
+      startDate?: string;
+      endDate?: string;
+      includeDaily?: boolean;
+      includeMonthly?: boolean;
+      dirtyMonthKeys?: string[] | null;
+    };
+    const result = await syncPrecomputedFacts({
+      mode: body.mode || "dirty",
+      startDate: body.startDate,
+      endDate: body.endDate,
+      includeDaily: body.includeDaily,
+      includeMonthly: body.includeMonthly,
+      dirtyMonthKeys: body.dirtyMonthKeys,
+    });
+    const ok = (result.steps || []).every((step) => step.ok);
+    return new Response(
+      JSON.stringify({
+        ok,
+        ...result,
+      }),
+      {
+        status: ok ? 200 : 500,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return new Response(JSON.stringify({ ok: false, error: message }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+}
+
 async function invokeRoutePost(label: string, handler: RoutePostHandler, body: Record<string, unknown>) {
   const t0 = Date.now();
   try {
@@ -419,7 +461,24 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
   const taskEnd = chunks[chunks.length - 1].endDate;
   const tasks: WarmupTaskDefinition[] = [];
 
-  for (const chunk of chunks) {
+  if (factSyncInMainSyncEnabled()) {
+    tasks.push({
+      key: "precomputed-facts:sync",
+      handler: precomputedFactsSyncPost,
+      source: "bigquery",
+      body: {
+        mode: normalizedMode === "full" ? "full" : "dirty",
+        startDate: taskStart,
+        endDate: taskEnd,
+        includeDaily: true,
+        includeMonthly: true,
+        dirtyMonthKeys: dirtyMonthKeys || null,
+      },
+    });
+  }
+
+  if (legacyPrecomputeWarmupEnabled()) {
+    for (const chunk of chunks) {
     tasks.push({
       key: `combined-all-subs:simple:arr:chunk:${chunk.label}`,
       handler: combinedAllSubsPost,
@@ -552,6 +611,7 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
         forceRefreshPrecomputed: true,
       },
     });
+  }
   }
 
   tasks.push(

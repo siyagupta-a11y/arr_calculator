@@ -26,6 +26,7 @@ export default function HardRefreshButton() {
   const pathname = usePathname();
   const [loading, setLoading] = useState(false);
   const [syncLoading, setSyncLoading] = useState(false);
+  const [backfillLoading, setBackfillLoading] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [lastSyncAtUtc, setLastSyncAtUtc] = useState("");
   const [lastSyncSummary, setLastSyncSummary] = useState("");
@@ -332,6 +333,144 @@ export default function HardRefreshButton() {
     }
   }
 
+  function toIsoDateUtc(date: Date) {
+    return date.toISOString().slice(0, 10);
+  }
+
+  function addMonthsUtc(date: Date, months: number) {
+    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1));
+  }
+
+  function endOfMonthUtc(date: Date) {
+    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0));
+  }
+
+  function buildMonthChunks(startDateIso: string, endDateIso: string, monthsPerChunk: number) {
+    const start = new Date(`${startDateIso}T00:00:00.000Z`);
+    const end = new Date(`${endDateIso}T00:00:00.000Z`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end.getTime() < start.getTime()) return [];
+    const chunks: Array<{ startDate: string; endDate: string; label: string }> = [];
+    const chunkMonths = Math.max(1, Math.floor(monthsPerChunk));
+    let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+    while (cursor.getTime() <= end.getTime()) {
+      const chunkStart = cursor;
+      const chunkEndCandidate = endOfMonthUtc(addMonthsUtc(chunkStart, chunkMonths - 1));
+      const chunkEnd = chunkEndCandidate.getTime() > end.getTime() ? end : chunkEndCandidate;
+      const startDate = toIsoDateUtc(chunkStart);
+      const endDate = toIsoDateUtc(chunkEnd);
+      chunks.push({ startDate, endDate, label: `${startDate}..${endDate}` });
+      cursor = addMonthsUtc(chunkStart, chunkMonths);
+    }
+    return chunks;
+  }
+
+  function sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function backfillFacts() {
+    setBackfillLoading(true);
+    setMessage("");
+    setSyncProgress("");
+    try {
+      const fullHistoryStart = "2023-01-01";
+      const endDate = toIsoDateUtc(new Date());
+      const chunkSizeMonths = 2;
+      const chunks = buildMonthChunks(fullHistoryStart, endDate, chunkSizeMonths);
+      if (!chunks.length) {
+        setMessage("No backfill chunks to run.");
+        return;
+      }
+
+      let okChunks = 0;
+      let failedChunks = 0;
+      const failedDetails: string[] = [];
+
+      for (let i = 0; i < chunks.length; i += 1) {
+        const chunk = chunks[i];
+        setSyncProgress(`Backfilling fact tables ${i + 1}/${chunks.length}: ${chunk.label}`);
+        let lastError = "";
+        let completed = false;
+        for (let attempt = 1; attempt <= 3 && !completed; attempt += 1) {
+          try {
+            const res = await fetch("/api/precomputed-facts/sync", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              cache: "no-store",
+              body: JSON.stringify({
+                mode: "full",
+                startDate: chunk.startDate,
+                endDate: chunk.endDate,
+                includeDaily: true,
+                includeMonthly: true,
+              }),
+            });
+            const text = await res.text();
+            let payload: unknown = null;
+            try {
+              payload = text ? JSON.parse(text) : null;
+            } catch {
+              payload = null;
+            }
+            if (!res.ok) {
+              const errorMessage =
+                payload && typeof payload === "object" && "error" in payload
+                  ? String((payload as { error?: unknown }).error || "")
+                  : text;
+              lastError = errorMessage || `HTTP ${res.status}`;
+              if (attempt < 3) {
+                await sleep(Math.min(10_000, 1_000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 400)));
+                continue;
+              }
+              throw new Error(lastError);
+            }
+
+            const ok = Boolean(payload && typeof payload === "object" && "ok" in payload ? (payload as { ok?: unknown }).ok : true);
+            if (!ok) {
+              lastError =
+                payload && typeof payload === "object" && "error" in payload
+                  ? String((payload as { error?: unknown }).error || "Backfill step failed")
+                  : "Backfill step failed";
+              if (attempt < 3) {
+                await sleep(Math.min(10_000, 1_000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 400)));
+                continue;
+              }
+              throw new Error(lastError);
+            }
+            completed = true;
+            okChunks += 1;
+          } catch (error: unknown) {
+            lastError = error instanceof Error ? error.message : "Unknown error";
+            if (attempt >= 3) {
+              failedChunks += 1;
+              failedDetails.push(`${chunk.label}: ${lastError}`);
+            } else {
+              await sleep(Math.min(10_000, 1_000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 400)));
+            }
+          }
+        }
+
+        // Small cooldown between chunks to reduce upstream pressure.
+        await sleep(350);
+      }
+
+      if (failedChunks > 0) {
+        setMessage(
+          `Fact backfill finished with ${failedChunks} failed chunk(s). ` +
+            `Succeeded: ${okChunks}/${chunks.length}. ` +
+            `Failed: ${failedDetails.slice(0, 3).join(" | ")}`,
+        );
+      } else {
+        setMessage(`Fact backfill completed successfully (${okChunks}/${chunks.length} chunks).`);
+      }
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "Fact backfill failed");
+    } finally {
+      setSyncProgress("");
+      setBackfillLoading(false);
+    }
+  }
+
   return (
     <div
       style={{
@@ -380,7 +519,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void syncNow("fast")}
-              disabled={syncLoading || loading}
+              disabled={syncLoading || backfillLoading || loading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #1d4ed8",
@@ -389,7 +528,7 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || loading ? "wait" : "pointer",
+                cursor: syncLoading || backfillLoading || loading ? "wait" : "pointer",
               }}
               title="Sync dirty changes only (fast incremental)"
             >
@@ -398,7 +537,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void syncNow("full")}
-              disabled={syncLoading || loading}
+              disabled={syncLoading || backfillLoading || loading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #475569",
@@ -407,18 +546,36 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || loading ? "wait" : "pointer",
+                cursor: syncLoading || backfillLoading || loading ? "wait" : "pointer",
               }}
               title="Full historical sync"
             >
               {syncLoading ? "Syncing..." : "Full sync"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void backfillFacts()}
+              disabled={backfillLoading || syncLoading || loading}
+              style={{
+                borderRadius: 10,
+                border: "1px solid #065f46",
+                background: backfillLoading ? "#065f46" : "#0f766e",
+                color: "#ffffff",
+                padding: "10px 12px",
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: backfillLoading || syncLoading || loading ? "wait" : "pointer",
+              }}
+              title="Chunked full backfill into fact tables (safe retries)"
+            >
+              {backfillLoading ? "Backfilling..." : "Backfill facts"}
             </button>
           </>
         ) : null}
         <button
           type="button"
           onClick={() => void hardRefresh()}
-          disabled={loading || syncLoading}
+          disabled={loading || syncLoading || backfillLoading}
           style={{
             borderRadius: 10,
             border: "1px solid #0f172a",
@@ -427,7 +584,7 @@ export default function HardRefreshButton() {
             padding: "10px 12px",
             fontSize: 13,
             fontWeight: 700,
-            cursor: loading || syncLoading ? "wait" : "pointer",
+            cursor: loading || syncLoading || backfillLoading ? "wait" : "pointer",
           }}
           title="Clear server caches and reload all data from scratch"
         >
