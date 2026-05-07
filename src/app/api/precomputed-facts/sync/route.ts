@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import { assertAdmin, syncPrecomputedFacts, type PrecomputedFactsSyncRequest } from "@/lib/precomputedFacts";
 
 export const runtime = "nodejs";
-export const maxDuration = 900;
+export const maxDuration = 800;
 
 export async function POST(req: NextRequest) {
   try {
@@ -23,4 +23,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: message }, { status });
   }
 }
-
