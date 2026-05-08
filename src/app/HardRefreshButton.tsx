@@ -399,6 +399,31 @@ export default function HardRefreshButton() {
     return chunks;
   }
 
+  function buildDayChunks(startDateIso: string, endDateIso: string, daysPerChunk: number) {
+    const start = new Date(`${startDateIso}T00:00:00.000Z`);
+    const end = new Date(`${endDateIso}T00:00:00.000Z`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end.getTime() < start.getTime()) return [];
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const chunkDays = Math.max(1, Math.floor(daysPerChunk));
+    const chunks: Array<{ startDate: string; endDate: string; label: string }> = [];
+    let cursorMs = start.getTime();
+    const endMs = end.getTime();
+    while (cursorMs <= endMs) {
+      const chunkStart = new Date(cursorMs);
+      const chunkEndMs = Math.min(endMs, cursorMs + (chunkDays - 1) * DAY_MS);
+      const chunkEnd = new Date(chunkEndMs);
+      const chunkStartIso = toIsoDateUtc(chunkStart);
+      const chunkEndIso = toIsoDateUtc(chunkEnd);
+      chunks.push({
+        startDate: chunkStartIso,
+        endDate: chunkEndIso,
+        label: `${chunkStartIso}..${chunkEndIso}`,
+      });
+      cursorMs = chunkEndMs + DAY_MS;
+    }
+    return chunks;
+  }
+
   function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -410,25 +435,24 @@ export default function HardRefreshButton() {
     try {
       const fullHistoryStart = "2023-01-01";
       const endDate = toIsoDateUtc(new Date());
-      const chunkSizeMonths = 1;
-      const chunks = buildMonthChunks(fullHistoryStart, endDate, chunkSizeMonths);
-      if (!chunks.length) {
+      const monthChunks = buildMonthChunks(fullHistoryStart, endDate, 1);
+      if (!monthChunks.length) {
         setMessage("No backfill chunks to run.");
         return;
       }
 
-      let okChunks = 0;
-      let failedChunks = 0;
+      const dailyChunkDays = 15;
+      let okRuns = 0;
+      let failedRuns = 0;
       const failedDetails: string[] = [];
-      const pendingChunks = [...chunks];
       const DAY_MS = 24 * 60 * 60 * 1000;
 
-      const splitChunk = (chunk: { startDate: string; endDate: string; label: string }) => {
+      const splitChunk = (chunk: { startDate: string; endDate: string; label: string }, minDays = 1) => {
         const start = new Date(`${chunk.startDate}T00:00:00.000Z`);
         const end = new Date(`${chunk.endDate}T00:00:00.000Z`);
         if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end.getTime() < start.getTime()) return null;
         const spanDays = Math.floor((end.getTime() - start.getTime()) / DAY_MS) + 1;
-        if (spanDays <= 7) return null;
+        if (spanDays <= Math.max(2, minDays)) return null;
 
         const firstSpanDays = Math.floor(spanDays / 2);
         if (firstSpanDays <= 0 || firstSpanDays >= spanDays) return null;
@@ -449,60 +473,100 @@ export default function HardRefreshButton() {
         return [first, second];
       };
 
-      let processedChunkCount = 0;
-      while (pendingChunks.length > 0) {
-        const chunk = pendingChunks.shift()!;
-        const currentTotal = processedChunkCount + pendingChunks.length + 1;
-        setSyncProgress(`Backfilling fact tables ${processedChunkCount + 1}/${currentTotal}: ${chunk.label}`);
+      const runPhase = async (
+        phase: "daily" | "monthly",
+        chunk: { startDate: string; endDate: string; label: string },
+        attempt: number,
+      ) => {
+        const res = await fetch("/api/precomputed-facts/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({
+            mode: "full",
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            includeDaily: phase === "daily",
+            includeMonthly: phase === "monthly",
+          }),
+        });
+        const text = await res.text();
+        let payload: unknown = null;
+        try {
+          payload = text ? JSON.parse(text) : null;
+        } catch {
+          payload = null;
+        }
+        if (!res.ok) {
+          const snippet = text.replace(/\s+/g, " ").slice(0, 220);
+          const looksLikeHtml = snippet.toLowerCase().includes("<!doctype html");
+          const errorMessage =
+            payload && typeof payload === "object" && "error" in payload
+              ? String((payload as { error?: unknown }).error || "")
+              : looksLikeHtml
+                ? "Server returned HTML error page (usually timeout/runtime crash)."
+                : snippet;
+          throw new Error(errorMessage || `HTTP ${res.status}`);
+        }
+        const ok = Boolean(payload && typeof payload === "object" && "ok" in payload ? (payload as { ok?: unknown }).ok : true);
+        if (!ok) {
+          const errorMessage =
+            payload && typeof payload === "object" && "error" in payload
+              ? String((payload as { error?: unknown }).error || "")
+              : "";
+          throw new Error(errorMessage || `${phase} phase failed`);
+        }
+        if (attempt > 1) {
+          setSyncProgress(`${phase.toUpperCase()} succeeded after retry: ${chunk.label}`);
+        }
+      };
+
+      for (let monthIndex = 0; monthIndex < monthChunks.length; monthIndex += 1) {
+        const monthChunk = monthChunks[monthIndex];
+        const dailyBaseChunks = buildDayChunks(monthChunk.startDate, monthChunk.endDate, dailyChunkDays);
+        const dailyPendingChunks = [...dailyBaseChunks];
+
+        while (dailyPendingChunks.length > 0) {
+          const chunk = dailyPendingChunks.shift()!;
+          setSyncProgress(
+            `Backfill daily (${monthIndex + 1}/${monthChunks.length} month): ${chunk.label}`,
+          );
+          let lastError = "";
+          let completed = false;
+          for (let attempt = 1; attempt <= 3 && !completed; attempt += 1) {
+            try {
+              await runPhase("daily", chunk, attempt);
+              completed = true;
+              okRuns += 1;
+            } catch (error: unknown) {
+              lastError = error instanceof Error ? error.message : "Unknown error";
+              if (attempt < 3) {
+                await sleep(Math.min(10_000, 1_000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 400)));
+              }
+            }
+          }
+          if (!completed) {
+            const split = splitChunk(chunk, 2);
+            if (split) {
+              dailyPendingChunks.unshift(split[1], split[0]);
+              setSyncProgress(`Split daily chunk ${chunk.label} into smaller windows...`);
+              await sleep(250);
+              continue;
+            }
+            failedRuns += 1;
+            failedDetails.push(`daily ${chunk.label}: ${lastError || "Unknown error"}`);
+          }
+          await sleep(250);
+        }
+
+        setSyncProgress(`Backfill monthly (${monthIndex + 1}/${monthChunks.length} month): ${monthChunk.label}`);
         let lastError = "";
         let completed = false;
         for (let attempt = 1; attempt <= 3 && !completed; attempt += 1) {
           try {
-            const runPhase = async (phase: "daily" | "monthly") => {
-              const res = await fetch("/api/precomputed-facts/sync", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                cache: "no-store",
-                body: JSON.stringify({
-                  mode: "full",
-                  startDate: chunk.startDate,
-                  endDate: chunk.endDate,
-                  includeDaily: phase === "daily",
-                  includeMonthly: phase === "monthly",
-                }),
-              });
-              const text = await res.text();
-              let payload: unknown = null;
-              try {
-                payload = text ? JSON.parse(text) : null;
-              } catch {
-                payload = null;
-              }
-              if (!res.ok) {
-                const snippet = text.replace(/\s+/g, " ").slice(0, 220);
-                const looksLikeHtml = snippet.toLowerCase().includes("<!doctype html");
-                const errorMessage =
-                  payload && typeof payload === "object" && "error" in payload
-                    ? String((payload as { error?: unknown }).error || "")
-                    : looksLikeHtml
-                      ? "Server returned HTML error page (usually timeout/runtime crash)."
-                      : snippet;
-                throw new Error(errorMessage || `HTTP ${res.status}`);
-              }
-              const ok = Boolean(payload && typeof payload === "object" && "ok" in payload ? (payload as { ok?: unknown }).ok : true);
-              if (!ok) {
-                const errorMessage =
-                  payload && typeof payload === "object" && "error" in payload
-                    ? String((payload as { error?: unknown }).error || "")
-                    : "";
-                throw new Error(errorMessage || `${phase} phase failed`);
-              }
-            };
-
-            await runPhase("daily");
-            await runPhase("monthly");
+            await runPhase("monthly", monthChunk, attempt);
             completed = true;
-            okChunks += 1;
+            okRuns += 1;
           } catch (error: unknown) {
             lastError = error instanceof Error ? error.message : "Unknown error";
             if (attempt < 3) {
@@ -510,31 +574,27 @@ export default function HardRefreshButton() {
             }
           }
         }
-
         if (!completed) {
-          const split = splitChunk(chunk);
+          const split = splitChunk(monthChunk, 7);
           if (split) {
-            pendingChunks.unshift(split[1], split[0]);
-            setSyncProgress(`Split ${chunk.label} into smaller chunks after retries...`);
-            await sleep(350);
-            continue;
+            monthChunks.splice(monthIndex + 1, 0, split[0], split[1]);
+            setSyncProgress(`Split monthly chunk ${monthChunk.label} into smaller windows...`);
+          } else {
+            failedRuns += 1;
+            failedDetails.push(`monthly ${monthChunk.label}: ${lastError || "Unknown error"}`);
           }
-          failedChunks += 1;
-          failedDetails.push(`${chunk.label}: ${lastError || "Unknown error"}`);
         }
-
-        processedChunkCount += 1;
         await sleep(350);
       }
 
-      if (failedChunks > 0) {
+      if (failedRuns > 0) {
         setMessage(
-          `Fact backfill finished with ${failedChunks} failed chunk(s). ` +
-            `Succeeded: ${okChunks}. ` +
+          `Fact backfill finished with ${failedRuns} failed run(s). ` +
+            `Succeeded: ${okRuns}. ` +
             `Failed: ${failedDetails.slice(0, 3).join(" | ")}`,
         );
       } else {
-        setMessage(`Fact backfill completed successfully (${okChunks} chunks).`);
+        setMessage(`Fact backfill completed successfully (${okRuns} runs).`);
       }
     } catch (error: unknown) {
       setMessage(error instanceof Error ? error.message : "Fact backfill failed");
