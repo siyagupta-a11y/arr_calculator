@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import { downloadSvgAsPng } from "@/lib/chartDownload";
 import { canonicalCountryKey, canonicalCountryLabel, canonicalTerritoryLabel, resolveTerritoryLabel } from "@/lib/geo";
 import type { ReportResponse, ReportRow, Grain, ReportMode, HubspotPlan } from "@/lib/types";
@@ -1733,19 +1733,6 @@ export default function Home() {
     return order.filter((value) => present.has(value));
   }, [hubspotVm, data]);
 
-  const selectedOtherWeekRow = useMemo(() => {
-    if (!weeklyPipeline || !selectedOtherWeekKey) return null;
-    return (
-      weeklyPipeline.rows.find((row) => `${row.weekStart}:${row.weekEnd}` === selectedOtherWeekKey) || null
-    );
-  }, [weeklyPipeline, selectedOtherWeekKey]);
-
-  useEffect(() => {
-    if (!selectedOtherWeekKey || !weeklyPipeline) return;
-    if (weeklyPipeline.rows.some((row) => `${row.weekStart}:${row.weekEnd}` === selectedOtherWeekKey)) return;
-    setSelectedOtherWeekKey(null);
-  }, [weeklyPipeline, selectedOtherWeekKey]);
-
   const buildFilteredLineItemRows = useCallback((
     sourceData: ReportResponse | null,
     options?: { forceCloudOnly?: boolean },
@@ -2674,95 +2661,102 @@ export default function Home() {
                     </tr>
                   </thead>
                   <tbody>
-                    {weeklyPipeline.rows.map((row) => (
-                      <tr key={`${row.weekStart}:${row.weekEnd}`}>
-                        <td>{row.weekStart}</td>
-                        <td>{row.weekEnd}</td>
-                        <td className="stripe-ui__num">{row.dealCount}</td>
-                        <td className="stripe-ui__num">{row.enterpriseDealCount}</td>
-                        <td className="stripe-ui__num">{row.managedDealCount}</td>
-                        <td className="stripe-ui__num">{row.teamDealCount}</td>
-                        <td className="stripe-ui__num">{row.plusDealCount}</td>
-                        <td className="stripe-ui__num">{row.deskDealCount}</td>
-                        <td className="stripe-ui__num">
-                          {row.otherDealCount > 0 ? (
-                            <button
-                              type="button"
-                              className="stripe-ui__btn stripe-ui__btn--ghost"
-                              style={{ padding: "0.1rem 0.35rem", minHeight: "1.7rem" }}
-                              onClick={() =>
-                                setSelectedOtherWeekKey((prev) =>
-                                  prev === `${row.weekStart}:${row.weekEnd}` ? null : `${row.weekStart}:${row.weekEnd}`,
-                                )
-                              }
-                            >
-                              {row.otherDealCount}
-                            </button>
-                          ) : (
-                            0
+                    {weeklyPipeline.rows.map((row) => {
+                      const rowKey = `${row.weekStart}:${row.weekEnd}`;
+                      const isOpen = selectedOtherWeekKey === rowKey;
+                      const otherDeals = Array.isArray(row.otherDeals) ? row.otherDeals : [];
+                      return (
+                        <React.Fragment key={rowKey}>
+                          <tr>
+                            <td>{row.weekStart}</td>
+                            <td>{row.weekEnd}</td>
+                            <td className="stripe-ui__num">{row.dealCount}</td>
+                            <td className="stripe-ui__num">{row.enterpriseDealCount}</td>
+                            <td className="stripe-ui__num">{row.managedDealCount}</td>
+                            <td className="stripe-ui__num">{row.teamDealCount}</td>
+                            <td className="stripe-ui__num">{row.plusDealCount}</td>
+                            <td className="stripe-ui__num">{row.deskDealCount}</td>
+                            <td className="stripe-ui__num">
+                              {row.otherDealCount > 0 ? (
+                                <button
+                                  type="button"
+                                  className="stripe-ui__btn stripe-ui__btn--ghost"
+                                  style={{ padding: "0.1rem 0.35rem", minHeight: "1.7rem" }}
+                                  onClick={() => setSelectedOtherWeekKey((prev) => (prev === rowKey ? null : rowKey))}
+                                >
+                                  {row.otherDealCount}
+                                </button>
+                              ) : (
+                                0
+                              )}
+                            </td>
+                            <td className="stripe-ui__num">{fmtMoney(scaleCurrency(row.pipelineValue), currencyDisplay)}</td>
+                          </tr>
+
+                          {isOpen && (
+                            <tr>
+                              <td colSpan={10} style={{ padding: 0 }}>
+                                <div className="stripe-ui__panel" style={{ margin: "0.55rem", padding: "0.75rem" }}>
+                                  <div className="stripe-ui__section-head">
+                                    <div>
+                                      <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.15rem" }}>
+                                        {`Other deals: ${row.weekStart} to ${row.weekEnd}`}
+                                      </h3>
+                                      <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+                                        Deals classified as other for this 7-day bucket.
+                                      </p>
+                                    </div>
+                                    <button
+                                      className="stripe-ui__btn stripe-ui__btn--ghost"
+                                      type="button"
+                                      onClick={() => setSelectedOtherWeekKey(null)}
+                                    >
+                                      Close
+                                    </button>
+                                  </div>
+
+                                  <div className="stripe-ui__table-wrap" style={{ marginTop: "0.6rem" }}>
+                                    <table className="stripe-ui__table">
+                                      <thead>
+                                        <tr>
+                                          <th>Deal name</th>
+                                          <th>Deal ID</th>
+                                          <th>Created date</th>
+                                          <th className="stripe-ui__num">{`Amount${currencySuffix()}`}</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {otherDeals.length > 0 ? (
+                                          otherDeals.map((deal) => (
+                                            <tr key={`${deal.dealId}:${deal.createdDate}:${deal.dealName}`}>
+                                              <td>{deal.dealName}</td>
+                                              <td>{deal.dealId}</td>
+                                              <td>{deal.createdDate}</td>
+                                              <td className="stripe-ui__num">
+                                                {fmtMoney(scaleCurrency(deal.pipelineValue), currencyDisplay)}
+                                              </td>
+                                            </tr>
+                                          ))
+                                        ) : (
+                                          <tr>
+                                            <td colSpan={4} className="stripe-ui__hint">
+                                              No other deals in this week.
+                                            </td>
+                                          </tr>
+                                        )}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
                           )}
-                        </td>
-                        <td className="stripe-ui__num">{fmtMoney(scaleCurrency(row.pipelineValue), currencyDisplay)}</td>
-                      </tr>
-                    ))}
+                        </React.Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
-
-              {selectedOtherWeekRow && (
-                <div className="stripe-ui__panel" style={{ marginTop: "0.8rem", padding: "0.75rem" }}>
-                  <div className="stripe-ui__section-head">
-                    <div>
-                      <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.15rem" }}>
-                        {`Other deals: ${selectedOtherWeekRow.weekStart} to ${selectedOtherWeekRow.weekEnd}`}
-                      </h3>
-                      <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
-                        Deals classified as other for this 7-day bucket.
-                      </p>
-                    </div>
-                    <button
-                      className="stripe-ui__btn stripe-ui__btn--ghost"
-                      type="button"
-                      onClick={() => setSelectedOtherWeekKey(null)}
-                    >
-                      Close
-                    </button>
-                  </div>
-
-                  <div className="stripe-ui__table-wrap" style={{ marginTop: "0.6rem" }}>
-                    <table className="stripe-ui__table">
-                      <thead>
-                        <tr>
-                          <th>Deal name</th>
-                          <th>Deal ID</th>
-                          <th>Created date</th>
-                          <th className="stripe-ui__num">{`Amount${currencySuffix()}`}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {selectedOtherWeekRow.otherDeals.length > 0 ? (
-                          selectedOtherWeekRow.otherDeals.map((deal) => (
-                            <tr key={`${deal.dealId}:${deal.createdDate}:${deal.dealName}`}>
-                              <td>{deal.dealName}</td>
-                              <td>{deal.dealId}</td>
-                              <td>{deal.createdDate}</td>
-                              <td className="stripe-ui__num">
-                                {fmtMoney(scaleCurrency(deal.pipelineValue), currencyDisplay)}
-                              </td>
-                            </tr>
-                          ))
-                        ) : (
-                          <tr>
-                            <td colSpan={4} className="stripe-ui__hint">
-                              No other deals in this week.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
             </section>
           )}
 
