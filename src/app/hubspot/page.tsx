@@ -320,6 +320,28 @@ type HubspotViewModelResponse = {
   planOptions: HubspotPlan[];
 };
 
+type WeeklyPipelineRow = {
+  weekStart: string;
+  weekEnd: string;
+  dealCount: number;
+  pipelineValue: number;
+  enterpriseDealCount: number;
+  managedDealCount: number;
+  teamDealCount: number;
+  plusDealCount: number;
+  deskDealCount: number;
+  otherDealCount: number;
+};
+
+type WeeklyPipelineResponse = {
+  startDate: string;
+  endDate: string;
+  chunkDays: number;
+  totalPipelineValue: number;
+  totalDeals: number;
+  rows: WeeklyPipelineRow[];
+};
+
 type ChartGroupDescriptor = {
   key: string;
   label: string;
@@ -1554,6 +1576,7 @@ export default function Home() {
   const [chartData, setChartData] = useState<ReportResponse | null>(null);
   const [chartBaselineData, setChartBaselineData] = useState<ReportResponse | null>(null);
   const [hubspotVm, setHubspotVm] = useState<HubspotViewModelResponse | null>(null);
+  const [weeklyPipeline, setWeeklyPipeline] = useState<WeeklyPipelineResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function run() {
@@ -1563,44 +1586,66 @@ export default function Home() {
     setChartData(null);
     setChartBaselineData(null);
     setHubspotVm(null);
+    setWeeklyPipeline(null);
 
     try {
-      const res = await fetch("/api/hubspot-view-model", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          startDate,
-          endDate,
-          mode,
-          grain,
-          chartGroupBy,
-          groupByFields,
-          filterDealName,
-          filterDeploymentType,
-          filterAccountId,
-          filterTerritory,
-          filterCountry,
-          filterIndustry,
-          filterDealType,
-          filterPlan,
-          arrDisplayScope,
+      const [viewModelRes, weeklyPipelineRes] = await Promise.all([
+        fetch("/api/hubspot-view-model", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            startDate,
+            endDate,
+            mode,
+            grain,
+            chartGroupBy,
+            groupByFields,
+            filterDealName,
+            filterDeploymentType,
+            filterAccountId,
+            filterTerritory,
+            filterCountry,
+            filterIndustry,
+            filterDealType,
+            filterPlan,
+            arrDisplayScope,
+          }),
         }),
-      });
-      const text = await res.text();
-      let json: unknown = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
-      }
-      if (!res.ok) {
-        if (json && typeof json === "object" && "error" in json) {
-          throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+        fetch("/api/hubspot-created-pipeline", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            startDate,
+            endDate,
+          }),
+        }),
+      ]);
+
+      const parseResponseOrThrow = async (res: Response) => {
+        const text = await res.text();
+        let json: unknown = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch {
+          json = null;
         }
-        throw new Error(text || "Request failed");
-      }
-      if (!json || typeof json !== "object") throw new Error("Invalid API response");
-      setHubspotVm(json as HubspotViewModelResponse);
+        if (!res.ok) {
+          if (json && typeof json === "object" && "error" in json) {
+            throw new Error(String((json as { error?: unknown }).error || "Request failed"));
+          }
+          throw new Error(text || "Request failed");
+        }
+        if (!json || typeof json !== "object") throw new Error("Invalid API response");
+        return json;
+      };
+
+      const [viewModelJson, weeklyPipelineJson] = await Promise.all([
+        parseResponseOrThrow(viewModelRes),
+        parseResponseOrThrow(weeklyPipelineRes),
+      ]);
+
+      setHubspotVm(viewModelJson as HubspotViewModelResponse);
+      setWeeklyPipeline(weeklyPipelineJson as WeeklyPipelineResponse);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Unknown error";
       setError(message);
@@ -2263,6 +2308,49 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
+  function exportWeeklyCreatedPipelineCsv() {
+    if (!weeklyPipeline || weeklyPipeline.rows.length === 0) return;
+
+    const headers = [
+      "Week start",
+      "Week end",
+      "Deals created",
+      "Enterprise",
+      "Managed",
+      "Team",
+      "Plus",
+      "Desk",
+      "Other",
+      `Pipeline value${currencySuffix()}`,
+    ];
+    const lines: string[] = [headers.map(escapeCsvCell).join(",")];
+
+    for (const row of weeklyPipeline.rows) {
+      const record = [
+        row.weekStart,
+        row.weekEnd,
+        row.dealCount,
+        row.enterpriseDealCount,
+        row.managedDealCount,
+        row.teamDealCount,
+        row.plusDealCount,
+        row.deskDealCount,
+        row.otherDealCount,
+        round2(scaleCurrency(row.pipelineValue)),
+      ];
+      lines.push(record.map(escapeCsvCell).join(","));
+    }
+
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `hubspot-created-pipeline-weekly-${stamp}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function addGroupBy() {
     if (groupByToAdd === "none") return;
     setGroupByFields((prev) => (prev.includes(groupByToAdd) ? prev : [...prev, groupByToAdd]));
@@ -2522,8 +2610,69 @@ export default function Home() {
         </section>
       )}
 
-      {!loading && (hubspotVm || data) && (
+      {!loading && (hubspotVm || data || weeklyPipeline) && (
         <>
+          {weeklyPipeline && (
+            <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+              <div className="stripe-ui__section-head">
+                <div>
+                  <h2 className="stripe-ui__panel-title">Created Pipeline (7-Day Buckets)</h2>
+                  <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                    Deal amount totals grouped into 7-day chunks starting from {weeklyPipeline.startDate}.
+                  </p>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  <button
+                    className="stripe-ui__btn stripe-ui__btn--secondary"
+                    type="button"
+                    onClick={exportWeeklyCreatedPipelineCsv}
+                    disabled={weeklyPipeline.rows.length === 0}
+                  >
+                    Export weekly CSV
+                  </button>
+                  <div className="stripe-ui__hint">
+                    {`Deals: ${weeklyPipeline.totalDeals} | Total: ${fmtMoney(scaleCurrency(weeklyPipeline.totalPipelineValue), currencyDisplay)}`}
+                  </div>
+                </div>
+              </div>
+
+              <div className="stripe-ui__table-wrap" style={{ marginTop: "0.85rem" }}>
+                <table className="stripe-ui__table">
+                  <thead>
+                    <tr>
+                      <th>Week start</th>
+                      <th>Week end</th>
+                      <th className="stripe-ui__num">Deals created</th>
+                      <th className="stripe-ui__num">Enterprise</th>
+                      <th className="stripe-ui__num">Managed</th>
+                      <th className="stripe-ui__num">Team</th>
+                      <th className="stripe-ui__num">Plus</th>
+                      <th className="stripe-ui__num">Desk</th>
+                      <th className="stripe-ui__num">Other</th>
+                      <th className="stripe-ui__num">{`Pipeline value${currencySuffix()}`}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {weeklyPipeline.rows.map((row) => (
+                      <tr key={`${row.weekStart}:${row.weekEnd}`}>
+                        <td>{row.weekStart}</td>
+                        <td>{row.weekEnd}</td>
+                        <td className="stripe-ui__num">{row.dealCount}</td>
+                        <td className="stripe-ui__num">{row.enterpriseDealCount}</td>
+                        <td className="stripe-ui__num">{row.managedDealCount}</td>
+                        <td className="stripe-ui__num">{row.teamDealCount}</td>
+                        <td className="stripe-ui__num">{row.plusDealCount}</td>
+                        <td className="stripe-ui__num">{row.deskDealCount}</td>
+                        <td className="stripe-ui__num">{row.otherDealCount}</td>
+                        <td className="stripe-ui__num">{fmtMoney(scaleCurrency(row.pipelineValue), currencyDisplay)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
           {chartGroupingEnabled && (
             <section className="stripe-ui__panel ui-reveal ui-reveal-2">
               <div className="stripe-ui__section-head">

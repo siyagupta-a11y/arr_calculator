@@ -374,6 +374,56 @@ export async function fetchDealsInStageClosedBetween(
   return results;
 }
 
+export async function fetchDealsCreatedBetween(
+  properties: string[],
+  createdDateStartIso: string,
+  createdDateEndIso: string,
+) {
+  const start = parseIsoDateOnly(createdDateStartIso);
+  const end = parseIsoDateOnly(createdDateEndIso);
+  if (!start || !end || end.getTime() < start.getTime()) {
+    return [];
+  }
+
+  const startMs = start.getTime();
+  const endMs = end.getTime() + (24 * 60 * 60 * 1000 - 1);
+  const cacheKey = `createdate:${startMs}:${endMs}|${[...properties].sort().join(",")}`;
+  const cached = readCache(DEALS_CACHE, cacheKey);
+  if (cached) return cached;
+
+  const url = `${HUBSPOT_BASE}/crm/v3/objects/deals/search`;
+  let after: string | null = null;
+  const results: HubspotDeal[] = [];
+
+  while (true) {
+    const payload: DealSearchPayload = {
+      filterGroups: [
+        {
+          filters: [
+            { propertyName: "createdate", operator: "GTE", value: String(startMs) },
+            { propertyName: "createdate", operator: "LTE", value: String(endMs) },
+          ],
+        },
+      ],
+      properties,
+      limit: 100,
+    };
+    if (after) payload.after = after;
+
+    const json: HubspotSearchResponse<HubspotDeal> = await hsFetch(url, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    results.push(...(json.results || []));
+    after = json.paging?.next?.after ?? null;
+    if (!after) break;
+  }
+
+  writeCache(DEALS_CACHE, cacheKey, results);
+  return results;
+}
+
 export async function fetchDealStageIdToLabelMap() {
   const cacheKey = "all";
   const cached = readCache(DEAL_STAGE_LABELS_CACHE, cacheKey);
