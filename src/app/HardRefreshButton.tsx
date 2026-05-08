@@ -22,6 +22,38 @@ function formatMontrealTime(isoUtc: string) {
   }).format(dt);
 }
 
+function toIsoDateUtc(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function defaultDebugStartDateUtc() {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  return toIsoDateUtc(start);
+}
+
+function defaultDebugEndDateUtc() {
+  return toIsoDateUtc(new Date());
+}
+
+type DebugBackfillStep = {
+  step?: string;
+  ok?: boolean;
+  tookMs?: number;
+  error?: string;
+};
+
+type DebugBackfillResult = {
+  ok: boolean;
+  status: number;
+  error?: string;
+  startedAtUtc?: string;
+  finishedAtUtc?: string;
+  tookMs?: number;
+  syncRunId?: string;
+  steps?: DebugBackfillStep[];
+};
+
 export default function HardRefreshButton() {
   const pathname = usePathname();
   const [loading, setLoading] = useState(false);
@@ -32,6 +64,13 @@ export default function HardRefreshButton() {
   const [lastSyncSummary, setLastSyncSummary] = useState("");
   const [syncProgress, setSyncProgress] = useState("");
   const [message, setMessage] = useState("");
+  const [debugPanelOpen, setDebugPanelOpen] = useState(false);
+  const [debugLoading, setDebugLoading] = useState(false);
+  const [debugStartDate, setDebugStartDate] = useState(defaultDebugStartDateUtc);
+  const [debugEndDate, setDebugEndDate] = useState(defaultDebugEndDateUtc);
+  const [debugIncludeDaily, setDebugIncludeDaily] = useState(true);
+  const [debugIncludeMonthly, setDebugIncludeMonthly] = useState(true);
+  const [debugResult, setDebugResult] = useState<DebugBackfillResult | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -333,10 +372,6 @@ export default function HardRefreshButton() {
     }
   }
 
-  function toIsoDateUtc(date: Date) {
-    return date.toISOString().slice(0, 10);
-  }
-
   function addMonthsUtc(date: Date, months: number) {
     return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1));
   }
@@ -385,10 +420,40 @@ export default function HardRefreshButton() {
       let okChunks = 0;
       let failedChunks = 0;
       const failedDetails: string[] = [];
+      const pendingChunks = [...chunks];
+      const DAY_MS = 24 * 60 * 60 * 1000;
 
-      for (let i = 0; i < chunks.length; i += 1) {
-        const chunk = chunks[i];
-        setSyncProgress(`Backfilling fact tables ${i + 1}/${chunks.length}: ${chunk.label}`);
+      const splitChunk = (chunk: { startDate: string; endDate: string; label: string }) => {
+        const start = new Date(`${chunk.startDate}T00:00:00.000Z`);
+        const end = new Date(`${chunk.endDate}T00:00:00.000Z`);
+        if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end.getTime() < start.getTime()) return null;
+        const spanDays = Math.floor((end.getTime() - start.getTime()) / DAY_MS) + 1;
+        if (spanDays <= 7) return null;
+
+        const firstSpanDays = Math.floor(spanDays / 2);
+        if (firstSpanDays <= 0 || firstSpanDays >= spanDays) return null;
+        const firstEnd = new Date(start.getTime() + (firstSpanDays - 1) * DAY_MS);
+        const secondStart = new Date(firstEnd.getTime() + DAY_MS);
+        const secondEnd = end;
+
+        const first = {
+          startDate: toIsoDateUtc(start),
+          endDate: toIsoDateUtc(firstEnd),
+          label: `${toIsoDateUtc(start)}..${toIsoDateUtc(firstEnd)}`,
+        };
+        const second = {
+          startDate: toIsoDateUtc(secondStart),
+          endDate: toIsoDateUtc(secondEnd),
+          label: `${toIsoDateUtc(secondStart)}..${toIsoDateUtc(secondEnd)}`,
+        };
+        return [first, second];
+      };
+
+      let processedChunkCount = 0;
+      while (pendingChunks.length > 0) {
+        const chunk = pendingChunks.shift()!;
+        const currentTotal = processedChunkCount + pendingChunks.length + 1;
+        setSyncProgress(`Backfilling fact tables ${processedChunkCount + 1}/${currentTotal}: ${chunk.label}`);
         let lastError = "";
         let completed = false;
         for (let attempt = 1; attempt <= 3 && !completed; attempt += 1) {
@@ -414,10 +479,14 @@ export default function HardRefreshButton() {
                 payload = null;
               }
               if (!res.ok) {
+                const snippet = text.replace(/\s+/g, " ").slice(0, 220);
+                const looksLikeHtml = snippet.toLowerCase().includes("<!doctype html");
                 const errorMessage =
                   payload && typeof payload === "object" && "error" in payload
                     ? String((payload as { error?: unknown }).error || "")
-                    : text;
+                    : looksLikeHtml
+                      ? "Server returned HTML error page (usually timeout/runtime crash)."
+                      : snippet;
                 throw new Error(errorMessage || `HTTP ${res.status}`);
               }
               const ok = Boolean(payload && typeof payload === "object" && "ok" in payload ? (payload as { ok?: unknown }).ok : true);
@@ -436,33 +505,142 @@ export default function HardRefreshButton() {
             okChunks += 1;
           } catch (error: unknown) {
             lastError = error instanceof Error ? error.message : "Unknown error";
-            if (attempt >= 3) {
-              failedChunks += 1;
-              failedDetails.push(`${chunk.label}: ${lastError}`);
-            } else {
+            if (attempt < 3) {
               await sleep(Math.min(10_000, 1_000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 400)));
             }
           }
         }
 
-        // Small cooldown between chunks to reduce upstream pressure.
+        if (!completed) {
+          const split = splitChunk(chunk);
+          if (split) {
+            pendingChunks.unshift(split[1], split[0]);
+            setSyncProgress(`Split ${chunk.label} into smaller chunks after retries...`);
+            await sleep(350);
+            continue;
+          }
+          failedChunks += 1;
+          failedDetails.push(`${chunk.label}: ${lastError || "Unknown error"}`);
+        }
+
+        processedChunkCount += 1;
         await sleep(350);
       }
 
       if (failedChunks > 0) {
         setMessage(
           `Fact backfill finished with ${failedChunks} failed chunk(s). ` +
-            `Succeeded: ${okChunks}/${chunks.length}. ` +
+            `Succeeded: ${okChunks}. ` +
             `Failed: ${failedDetails.slice(0, 3).join(" | ")}`,
         );
       } else {
-        setMessage(`Fact backfill completed successfully (${okChunks}/${chunks.length} chunks).`);
+        setMessage(`Fact backfill completed successfully (${okChunks} chunks).`);
       }
     } catch (error: unknown) {
       setMessage(error instanceof Error ? error.message : "Fact backfill failed");
     } finally {
       setSyncProgress("");
       setBackfillLoading(false);
+    }
+  }
+
+  async function runDebugBackfill() {
+    if (!debugIncludeDaily && !debugIncludeMonthly) {
+      setDebugResult({
+        ok: false,
+        status: 400,
+        error: "Select at least one phase: Daily or Monthly.",
+      });
+      return;
+    }
+    if (!debugStartDate || !debugEndDate) {
+      setDebugResult({
+        ok: false,
+        status: 400,
+        error: "Start date and end date are required.",
+      });
+      return;
+    }
+    if (debugEndDate < debugStartDate) {
+      setDebugResult({
+        ok: false,
+        status: 400,
+        error: "End date must be on or after start date.",
+      });
+      return;
+    }
+
+    setDebugLoading(true);
+    setDebugResult(null);
+
+    try {
+      const res = await fetch("/api/precomputed-facts/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          mode: "full",
+          startDate: debugStartDate,
+          endDate: debugEndDate,
+          includeDaily: debugIncludeDaily,
+          includeMonthly: debugIncludeMonthly,
+        }),
+      });
+
+      const text = await res.text();
+      let payload: unknown = null;
+      try {
+        payload = text ? JSON.parse(text) : null;
+      } catch {
+        payload = null;
+      }
+
+      if (!res.ok) {
+        const snippet = text.replace(/\s+/g, " ").slice(0, 260);
+        const looksLikeHtml = snippet.toLowerCase().includes("<!doctype html");
+        const payloadError =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error?: unknown }).error || "")
+            : "";
+        setDebugResult({
+          ok: false,
+          status: res.status,
+          error:
+            payloadError ||
+            (looksLikeHtml ? "Server returned HTML error page (likely timeout/runtime crash)." : snippet) ||
+            `HTTP ${res.status}`,
+        });
+        return;
+      }
+
+      const ok = Boolean(payload && typeof payload === "object" && "ok" in payload ? (payload as { ok?: unknown }).ok : true);
+      const shaped = (payload && typeof payload === "object" ? payload : {}) as {
+        startedAtUtc?: unknown;
+        finishedAtUtc?: unknown;
+        tookMs?: unknown;
+        syncRunId?: unknown;
+        steps?: unknown;
+        error?: unknown;
+      };
+      const steps = Array.isArray(shaped.steps) ? (shaped.steps as DebugBackfillStep[]) : [];
+      setDebugResult({
+        ok,
+        status: res.status,
+        error: ok ? undefined : String(shaped.error || "Sync reported failure."),
+        startedAtUtc: String(shaped.startedAtUtc || ""),
+        finishedAtUtc: String(shaped.finishedAtUtc || ""),
+        tookMs: Number.isFinite(Number(shaped.tookMs)) ? Number(shaped.tookMs) : undefined,
+        syncRunId: String(shaped.syncRunId || ""),
+        steps,
+      });
+    } catch (error: unknown) {
+      setDebugResult({
+        ok: false,
+        status: 0,
+        error: error instanceof Error ? error.message : "Request failed",
+      });
+    } finally {
+      setDebugLoading(false);
     }
   }
 
@@ -508,6 +686,130 @@ export default function HardRefreshButton() {
           {syncProgress}
         </div>
       ) : null}
+      {isAdmin && debugPanelOpen ? (
+        <div
+          style={{
+            background: "#f8fafc",
+            border: "1px solid #cbd5e1",
+            color: "#0f172a",
+            borderRadius: 10,
+            padding: "10px 12px",
+            width: 430,
+            maxWidth: "calc(100vw - 24px)",
+            boxShadow: "0 4px 16px rgba(15,23,42,0.08)",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>Debug backfill</div>
+            <button
+              type="button"
+              onClick={() => setDebugPanelOpen(false)}
+              style={{
+                borderRadius: 8,
+                border: "1px solid #94a3b8",
+                background: "#ffffff",
+                color: "#334155",
+                padding: "4px 8px",
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              Close
+            </button>
+          </div>
+          <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <label style={{ display: "grid", gap: 4, fontSize: 11 }}>
+              <span>Start date</span>
+              <input
+                type="date"
+                value={debugStartDate}
+                onChange={(e) => setDebugStartDate(e.target.value)}
+                style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 8px", fontSize: 12 }}
+              />
+            </label>
+            <label style={{ display: "grid", gap: 4, fontSize: 11 }}>
+              <span>End date</span>
+              <input
+                type="date"
+                value={debugEndDate}
+                onChange={(e) => setDebugEndDate(e.target.value)}
+                style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 8px", fontSize: 12 }}
+              />
+            </label>
+          </div>
+          <div style={{ marginTop: 8, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, textTransform: "none", letterSpacing: 0 }}>
+              <input
+                type="checkbox"
+                checked={debugIncludeDaily}
+                onChange={(e) => setDebugIncludeDaily(e.target.checked)}
+              />
+              Daily
+            </label>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, textTransform: "none", letterSpacing: 0 }}>
+              <input
+                type="checkbox"
+                checked={debugIncludeMonthly}
+                onChange={(e) => setDebugIncludeMonthly(e.target.checked)}
+              />
+              Monthly
+            </label>
+            <button
+              type="button"
+              onClick={() => void runDebugBackfill()}
+              disabled={debugLoading || loading || syncLoading || backfillLoading}
+              style={{
+                marginLeft: "auto",
+                borderRadius: 8,
+                border: "1px solid #0369a1",
+                background: debugLoading ? "#0369a1" : "#0284c7",
+                color: "#ffffff",
+                padding: "6px 10px",
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: debugLoading || loading || syncLoading || backfillLoading ? "wait" : "pointer",
+              }}
+            >
+              {debugLoading ? "Running..." : "Run debug"}
+            </button>
+          </div>
+          {debugResult ? (
+            <div
+              style={{
+                marginTop: 10,
+                border: `1px solid ${debugResult.ok ? "#86efac" : "#fecaca"}`,
+                background: debugResult.ok ? "#f0fdf4" : "#fef2f2",
+                borderRadius: 8,
+                padding: 8,
+                fontSize: 12,
+                color: debugResult.ok ? "#166534" : "#b91c1c",
+                maxHeight: 250,
+                overflow: "auto",
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                {debugResult.ok ? "Success" : "Failed"} (status: {debugResult.status})
+              </div>
+              {debugResult.error ? <div style={{ marginBottom: 6 }}>{debugResult.error}</div> : null}
+              {debugResult.startedAtUtc ? <div>Started: {formatMontrealTime(debugResult.startedAtUtc)} ET</div> : null}
+              {debugResult.finishedAtUtc ? <div>Finished: {formatMontrealTime(debugResult.finishedAtUtc)} ET</div> : null}
+              {typeof debugResult.tookMs === "number" ? <div>Took: {debugResult.tookMs}ms</div> : null}
+              {debugResult.syncRunId ? <div>Run ID: {debugResult.syncRunId}</div> : null}
+              {debugResult.steps && debugResult.steps.length > 0 ? (
+                <div style={{ marginTop: 8 }}>
+                  {debugResult.steps.map((step, idx) => (
+                    <div key={`${step.step || "step"}-${idx}`} style={{ marginBottom: 4 }}>
+                      [{step.ok ? "OK" : "FAIL"}] {step.step || `step-${idx + 1}`}
+                      {typeof step.tookMs === "number" ? ` (${step.tookMs}ms)` : ""}
+                      {step.error ? ` - ${step.error}` : ""}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div style={{ display: "flex", gap: 8 }}>
         {isAdmin ? (
           <>
@@ -549,8 +851,26 @@ export default function HardRefreshButton() {
             </button>
             <button
               type="button"
+              onClick={() => setDebugPanelOpen((prev) => !prev)}
+              disabled={syncLoading || backfillLoading || loading || debugLoading}
+              style={{
+                borderRadius: 10,
+                border: "1px solid #0369a1",
+                background: debugPanelOpen ? "#075985" : "#0ea5e9",
+                color: "#ffffff",
+                padding: "10px 12px",
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: syncLoading || backfillLoading || loading || debugLoading ? "wait" : "pointer",
+              }}
+              title="Run targeted date-range fact sync and view step-level output"
+            >
+              {debugPanelOpen ? "Hide debug" : "Debug backfill"}
+            </button>
+            <button
+              type="button"
               onClick={() => void backfillFacts()}
-              disabled={backfillLoading || syncLoading || loading}
+              disabled={backfillLoading || syncLoading || loading || debugLoading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #065f46",
