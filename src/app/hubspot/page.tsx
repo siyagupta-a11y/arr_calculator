@@ -325,6 +325,7 @@ type WeeklyPipelineRow = {
   weekEnd: string;
   dealCount: number;
   pipelineValue: number;
+  pipelineValueArr: number;
   enterpriseDealCount: number;
   managedDealCount: number;
   teamDealCount: number;
@@ -344,6 +345,7 @@ type WeeklyPipelineResponse = {
   endDate: string;
   chunkDays: number;
   totalPipelineValue: number;
+  totalPipelineValueArr: number;
   totalDeals: number;
   rows: WeeklyPipelineRow[];
 };
@@ -2329,6 +2331,7 @@ export default function Home() {
       "Plus",
       "Desk",
       "Other",
+      `Pipeline value (ARR)${currencySuffix()}`,
       `Pipeline value${currencySuffix()}`,
     ];
     const lines: string[] = [headers.map(escapeCsvCell).join(",")];
@@ -2344,6 +2347,7 @@ export default function Home() {
         row.plusDealCount,
         row.deskDealCount,
         row.otherDealCount,
+        round2(scaleCurrency(row.pipelineValueArr)),
         round2(scaleCurrency(row.pipelineValue)),
       ];
       lines.push(record.map(escapeCsvCell).join(","));
@@ -2639,7 +2643,7 @@ export default function Home() {
                     Export weekly CSV
                   </button>
                   <div className="stripe-ui__hint">
-                    {`Deals: ${weeklyPipeline.totalDeals} | Total: ${fmtMoney(scaleCurrency(weeklyPipeline.totalPipelineValue), currencyDisplay)}`}
+                    {`Deals: ${weeklyPipeline.totalDeals} | Total ARR: ${fmtMoney(scaleCurrency(weeklyPipeline.totalPipelineValueArr), currencyDisplay)} | Total Amount: ${fmtMoney(scaleCurrency(weeklyPipeline.totalPipelineValue), currencyDisplay)}`}
                   </div>
                 </div>
               </div>
@@ -2657,6 +2661,7 @@ export default function Home() {
                       <th className="stripe-ui__num">Plus</th>
                       <th className="stripe-ui__num">Desk</th>
                       <th className="stripe-ui__num">Other</th>
+                      <th className="stripe-ui__num">{`Pipeline value (ARR)${currencySuffix()}`}</th>
                       <th className="stripe-ui__num">{`Pipeline value${currencySuffix()}`}</th>
                     </tr>
                   </thead>
@@ -2690,12 +2695,13 @@ export default function Home() {
                                 0
                               )}
                             </td>
+                            <td className="stripe-ui__num">{fmtMoney(scaleCurrency(row.pipelineValueArr), currencyDisplay)}</td>
                             <td className="stripe-ui__num">{fmtMoney(scaleCurrency(row.pipelineValue), currencyDisplay)}</td>
                           </tr>
 
                           {isOpen && (
                             <tr>
-                              <td colSpan={10} style={{ padding: 0 }}>
+                              <td colSpan={11} style={{ padding: 0 }}>
                                 <div className="stripe-ui__panel" style={{ margin: "0.55rem", padding: "0.75rem" }}>
                                   <div className="stripe-ui__section-head">
                                     <div>

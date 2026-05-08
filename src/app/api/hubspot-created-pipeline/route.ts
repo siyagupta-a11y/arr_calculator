@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { batchReadLineItems, fetchDealsCreatedBetween, fetchLineItemIdsForDeals } from "@/lib/hubspot";
+import { computeCalculatedArrForLineItem, LI_PROPS } from "@/lib/logic";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 import type { HubspotLineItem } from "@/lib/types";
 
@@ -27,6 +28,7 @@ type BucketRow = {
   weekEnd: string;
   dealCount: number;
   pipelineValue: number;
+  pipelineValueArr: number;
   enterpriseDealCount: number;
   managedDealCount: number;
   teamDealCount: number;
@@ -75,6 +77,16 @@ function parseAmount(rawValue: unknown) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function computeDealArrFromLineItems(liIds: string[], lineItemsById: Map<string, HubspotLineItem>) {
+  let sum = 0;
+  for (const liId of liIds) {
+    const properties = lineItemsById.get(liId)?.properties;
+    if (!properties) continue;
+    sum += computeCalculatedArrForLineItem(properties);
+  }
+  return round2(sum);
+}
+
 function classifyDealFromLineItems(liIds: string[], lineItemsById: Map<string, HubspotLineItem>): DealCategory {
   if (!liIds.length) return "other";
   const searchable = liIds
@@ -111,12 +123,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
     dealIdToLineItemIds.set(pair.dealId, ids);
     for (const id of ids) allLineItemIds.add(id);
   }
-  const lineItemsById = await batchReadLineItems(Array.from(allLineItemIds), [
-    "name",
-    "hs_product_name",
-    "description",
-    "hs_sku",
-  ]);
+  const lineItemsById = await batchReadLineItems(Array.from(allLineItemIds), LI_PROPS);
 
   const startMs = start.getTime();
   const endMs = end.getTime() + (DAY_MS - 1);
@@ -126,6 +133,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
     {
       dealCount: number;
       pipelineValue: number;
+      pipelineValueArr: number;
       enterpriseDealCount: number;
       managedDealCount: number;
       teamDealCount: number;
@@ -151,10 +159,12 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
     const createdDate = toIsoDateOnly(new Date(createdMs));
     const liIds = dealIdToLineItemIds.get(String(deal.id || "")) || [];
     const category = classifyDealFromLineItems(liIds, lineItemsById);
+    const dealArr = computeDealArrFromLineItems(liIds, lineItemsById);
 
     const current = bucketMap.get(bucketStartKey) || {
       dealCount: 0,
       pipelineValue: 0,
+      pipelineValueArr: 0,
       enterpriseDealCount: 0,
       managedDealCount: 0,
       teamDealCount: 0,
@@ -165,6 +175,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
     };
     current.dealCount += 1;
     current.pipelineValue += amount;
+    current.pipelineValueArr += dealArr;
     if (category === "enterprise") current.enterpriseDealCount += 1;
     else if (category === "managed") current.managedDealCount += 1;
     else if (category === "team") current.teamDealCount += 1;
@@ -190,6 +201,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
     const bucket = bucketMap.get(weekStart) || {
       dealCount: 0,
       pipelineValue: 0,
+      pipelineValueArr: 0,
       enterpriseDealCount: 0,
       managedDealCount: 0,
       teamDealCount: 0,
@@ -203,6 +215,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
       weekEnd,
       dealCount: bucket.dealCount,
       pipelineValue: round2(bucket.pipelineValue),
+      pipelineValueArr: round2(bucket.pipelineValueArr),
       enterpriseDealCount: bucket.enterpriseDealCount,
       managedDealCount: bucket.managedDealCount,
       teamDealCount: bucket.teamDealCount,
@@ -216,6 +229,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
   }
 
   const totalPipelineValue = round2(rows.reduce((acc, row) => acc + row.pipelineValue, 0));
+  const totalPipelineValueArr = round2(rows.reduce((acc, row) => acc + row.pipelineValueArr, 0));
   const totalDeals = rows.reduce((acc, row) => acc + row.dealCount, 0);
 
   return {
@@ -223,6 +237,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
     endDate,
     chunkDays: 7,
     totalPipelineValue,
+    totalPipelineValueArr,
     totalDeals,
     rows,
   };
