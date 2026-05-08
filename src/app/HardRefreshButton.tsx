@@ -146,7 +146,7 @@ export default function HardRefreshButton() {
       const transportFailureIndexes = new Set<number>();
       let transportFailedTaskCount = 0;
 
-      const stepBatchSize = 6;
+      const stepBatchSize = syncMode === "full" ? 1 : 2;
       while (!done) {
         const stepEnd = Math.min(totalTasks, nextTaskIndex + stepBatchSize);
         setSyncProgress(`Running cache warmup tasks ${nextTaskIndex + 1}-${stepEnd}/${totalTasks}...`);
@@ -375,7 +375,7 @@ export default function HardRefreshButton() {
     try {
       const fullHistoryStart = "2023-01-01";
       const endDate = toIsoDateUtc(new Date());
-      const chunkSizeMonths = 2;
+      const chunkSizeMonths = 1;
       const chunks = buildMonthChunks(fullHistoryStart, endDate, chunkSizeMonths);
       if (!chunks.length) {
         setMessage("No backfill chunks to run.");
@@ -393,50 +393,45 @@ export default function HardRefreshButton() {
         let completed = false;
         for (let attempt = 1; attempt <= 3 && !completed; attempt += 1) {
           try {
-            const res = await fetch("/api/precomputed-facts/sync", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              cache: "no-store",
-              body: JSON.stringify({
-                mode: "full",
-                startDate: chunk.startDate,
-                endDate: chunk.endDate,
-                includeDaily: true,
-                includeMonthly: true,
-              }),
-            });
-            const text = await res.text();
-            let payload: unknown = null;
-            try {
-              payload = text ? JSON.parse(text) : null;
-            } catch {
-              payload = null;
-            }
-            if (!res.ok) {
-              const errorMessage =
-                payload && typeof payload === "object" && "error" in payload
-                  ? String((payload as { error?: unknown }).error || "")
-                  : text;
-              lastError = errorMessage || `HTTP ${res.status}`;
-              if (attempt < 3) {
-                await sleep(Math.min(10_000, 1_000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 400)));
-                continue;
+            const runPhase = async (phase: "daily" | "monthly") => {
+              const res = await fetch("/api/precomputed-facts/sync", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                cache: "no-store",
+                body: JSON.stringify({
+                  mode: "full",
+                  startDate: chunk.startDate,
+                  endDate: chunk.endDate,
+                  includeDaily: phase === "daily",
+                  includeMonthly: phase === "monthly",
+                }),
+              });
+              const text = await res.text();
+              let payload: unknown = null;
+              try {
+                payload = text ? JSON.parse(text) : null;
+              } catch {
+                payload = null;
               }
-              throw new Error(lastError);
-            }
+              if (!res.ok) {
+                const errorMessage =
+                  payload && typeof payload === "object" && "error" in payload
+                    ? String((payload as { error?: unknown }).error || "")
+                    : text;
+                throw new Error(errorMessage || `HTTP ${res.status}`);
+              }
+              const ok = Boolean(payload && typeof payload === "object" && "ok" in payload ? (payload as { ok?: unknown }).ok : true);
+              if (!ok) {
+                const errorMessage =
+                  payload && typeof payload === "object" && "error" in payload
+                    ? String((payload as { error?: unknown }).error || "")
+                    : "";
+                throw new Error(errorMessage || `${phase} phase failed`);
+              }
+            };
 
-            const ok = Boolean(payload && typeof payload === "object" && "ok" in payload ? (payload as { ok?: unknown }).ok : true);
-            if (!ok) {
-              lastError =
-                payload && typeof payload === "object" && "error" in payload
-                  ? String((payload as { error?: unknown }).error || "Backfill step failed")
-                  : "Backfill step failed";
-              if (attempt < 3) {
-                await sleep(Math.min(10_000, 1_000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 400)));
-                continue;
-              }
-              throw new Error(lastError);
-            }
+            await runPhase("daily");
+            await runPhase("monthly");
             completed = true;
             okChunks += 1;
           } catch (error: unknown) {

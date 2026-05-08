@@ -462,19 +462,34 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
   const tasks: WarmupTaskDefinition[] = [];
 
   if (factSyncInMainSyncEnabled()) {
-    tasks.push({
-      key: "precomputed-facts:sync",
-      handler: precomputedFactsSyncPost,
-      source: "bigquery",
-      body: {
-        mode: normalizedMode === "full" ? "full" : "dirty",
-        startDate: taskStart,
-        endDate: taskEnd,
-        includeDaily: true,
-        includeMonthly: true,
-        dirtyMonthKeys: dirtyMonthKeys || null,
-      },
-    });
+    for (const chunk of chunks) {
+      tasks.push({
+        key: `precomputed-facts:daily:chunk:${chunk.label}`,
+        handler: precomputedFactsSyncPost,
+        source: "bigquery",
+        body: {
+          mode: normalizedMode === "full" ? "full" : "dirty",
+          startDate: chunk.startDate,
+          endDate: chunk.endDate,
+          includeDaily: true,
+          includeMonthly: false,
+          dirtyMonthKeys: dirtyMonthKeys || null,
+        },
+      });
+      tasks.push({
+        key: `precomputed-facts:monthly:chunk:${chunk.label}`,
+        handler: precomputedFactsSyncPost,
+        source: "bigquery",
+        body: {
+          mode: normalizedMode === "full" ? "full" : "dirty",
+          startDate: chunk.startDate,
+          endDate: chunk.endDate,
+          includeDaily: false,
+          includeMonthly: true,
+          dirtyMonthKeys: dirtyMonthKeys || null,
+        },
+      });
+    }
   }
 
   if (legacyPrecomputeWarmupEnabled()) {
