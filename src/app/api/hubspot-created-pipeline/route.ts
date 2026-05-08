@@ -15,6 +15,13 @@ type RequestBody = {
   endDate?: string;
 };
 
+type OtherDealRow = {
+  dealId: string;
+  dealName: string;
+  createdDate: string;
+  pipelineValue: number;
+};
+
 type BucketRow = {
   weekStart: string;
   weekEnd: string;
@@ -26,6 +33,7 @@ type BucketRow = {
   plusDealCount: number;
   deskDealCount: number;
   otherDealCount: number;
+  otherDeals: OtherDealRow[];
 };
 
 type DealCategory = "enterprise" | "managed" | "team" | "plus" | "desk" | "other";
@@ -95,7 +103,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
   if (!start || !end) throw new Error("Invalid startDate/endDate");
   if (end.getTime() < start.getTime()) throw new Error("endDate must be >= startDate");
 
-  const deals = await fetchDealsCreatedBetween(["amount", "createdate"], startDate, endDate);
+  const deals = await fetchDealsCreatedBetween(["amount", "createdate", "dealname"], startDate, endDate);
   const dealIdToLineItemIds = new Map<string, string[]>();
   const allLineItemIds = new Set<string>();
   for (const pair of await fetchLineItemIdsForDeals(deals.map((deal) => String(deal.id || "")))) {
@@ -124,6 +132,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
       plusDealCount: number;
       deskDealCount: number;
       otherDealCount: number;
+      otherDeals: OtherDealRow[];
     }
   >();
 
@@ -137,6 +146,9 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
     const bucketStartMs = startMs + bucketIndex * WEEK_MS;
     const bucketStartKey = toIsoDateOnly(new Date(bucketStartMs));
     const amount = parseAmount(properties.amount);
+    const dealId = String(deal.id || "").trim();
+    const dealName = String(properties.dealname || "").trim();
+    const createdDate = toIsoDateOnly(new Date(createdMs));
     const liIds = dealIdToLineItemIds.get(String(deal.id || "")) || [];
     const category = classifyDealFromLineItems(liIds, lineItemsById);
 
@@ -149,6 +161,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
       plusDealCount: 0,
       deskDealCount: 0,
       otherDealCount: 0,
+      otherDeals: [],
     };
     current.dealCount += 1;
     current.pipelineValue += amount;
@@ -157,7 +170,15 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
     else if (category === "team") current.teamDealCount += 1;
     else if (category === "plus") current.plusDealCount += 1;
     else if (category === "desk") current.deskDealCount += 1;
-    else current.otherDealCount += 1;
+    else {
+      current.otherDealCount += 1;
+      current.otherDeals.push({
+        dealId,
+        dealName: dealName || "(no name)",
+        createdDate,
+        pipelineValue: round2(amount),
+      });
+    }
     bucketMap.set(bucketStartKey, current);
   }
 
@@ -175,6 +196,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
       plusDealCount: 0,
       deskDealCount: 0,
       otherDealCount: 0,
+      otherDeals: [],
     };
     rows.push({
       weekStart,
@@ -187,6 +209,9 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
       plusDealCount: bucket.plusDealCount,
       deskDealCount: bucket.deskDealCount,
       otherDealCount: bucket.otherDealCount,
+      otherDeals: bucket.otherDeals
+        .slice()
+        .sort((a, b) => a.createdDate.localeCompare(b.createdDate) || a.dealName.localeCompare(b.dealName)),
     });
   }
 

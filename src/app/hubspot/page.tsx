@@ -331,6 +331,12 @@ type WeeklyPipelineRow = {
   plusDealCount: number;
   deskDealCount: number;
   otherDealCount: number;
+  otherDeals: Array<{
+    dealId: string;
+    dealName: string;
+    createdDate: string;
+    pipelineValue: number;
+  }>;
 };
 
 type WeeklyPipelineResponse = {
@@ -1577,6 +1583,7 @@ export default function Home() {
   const [chartBaselineData, setChartBaselineData] = useState<ReportResponse | null>(null);
   const [hubspotVm, setHubspotVm] = useState<HubspotViewModelResponse | null>(null);
   const [weeklyPipeline, setWeeklyPipeline] = useState<WeeklyPipelineResponse | null>(null);
+  const [selectedOtherWeekKey, setSelectedOtherWeekKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function run() {
@@ -1587,6 +1594,7 @@ export default function Home() {
     setChartBaselineData(null);
     setHubspotVm(null);
     setWeeklyPipeline(null);
+    setSelectedOtherWeekKey(null);
 
     try {
       const [viewModelRes, weeklyPipelineRes] = await Promise.all([
@@ -1724,6 +1732,19 @@ export default function Home() {
     }
     return order.filter((value) => present.has(value));
   }, [hubspotVm, data]);
+
+  const selectedOtherWeekRow = useMemo(() => {
+    if (!weeklyPipeline || !selectedOtherWeekKey) return null;
+    return (
+      weeklyPipeline.rows.find((row) => `${row.weekStart}:${row.weekEnd}` === selectedOtherWeekKey) || null
+    );
+  }, [weeklyPipeline, selectedOtherWeekKey]);
+
+  useEffect(() => {
+    if (!selectedOtherWeekKey || !weeklyPipeline) return;
+    if (weeklyPipeline.rows.some((row) => `${row.weekStart}:${row.weekEnd}` === selectedOtherWeekKey)) return;
+    setSelectedOtherWeekKey(null);
+  }, [weeklyPipeline, selectedOtherWeekKey]);
 
   const buildFilteredLineItemRows = useCallback((
     sourceData: ReportResponse | null,
@@ -2663,13 +2684,85 @@ export default function Home() {
                         <td className="stripe-ui__num">{row.teamDealCount}</td>
                         <td className="stripe-ui__num">{row.plusDealCount}</td>
                         <td className="stripe-ui__num">{row.deskDealCount}</td>
-                        <td className="stripe-ui__num">{row.otherDealCount}</td>
+                        <td className="stripe-ui__num">
+                          {row.otherDealCount > 0 ? (
+                            <button
+                              type="button"
+                              className="stripe-ui__btn stripe-ui__btn--ghost"
+                              style={{ padding: "0.1rem 0.35rem", minHeight: "1.7rem" }}
+                              onClick={() =>
+                                setSelectedOtherWeekKey((prev) =>
+                                  prev === `${row.weekStart}:${row.weekEnd}` ? null : `${row.weekStart}:${row.weekEnd}`,
+                                )
+                              }
+                            >
+                              {row.otherDealCount}
+                            </button>
+                          ) : (
+                            0
+                          )}
+                        </td>
                         <td className="stripe-ui__num">{fmtMoney(scaleCurrency(row.pipelineValue), currencyDisplay)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
+
+              {selectedOtherWeekRow && (
+                <div className="stripe-ui__panel" style={{ marginTop: "0.8rem", padding: "0.75rem" }}>
+                  <div className="stripe-ui__section-head">
+                    <div>
+                      <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.15rem" }}>
+                        {`Other deals: ${selectedOtherWeekRow.weekStart} to ${selectedOtherWeekRow.weekEnd}`}
+                      </h3>
+                      <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+                        Deals classified as other for this 7-day bucket.
+                      </p>
+                    </div>
+                    <button
+                      className="stripe-ui__btn stripe-ui__btn--ghost"
+                      type="button"
+                      onClick={() => setSelectedOtherWeekKey(null)}
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <div className="stripe-ui__table-wrap" style={{ marginTop: "0.6rem" }}>
+                    <table className="stripe-ui__table">
+                      <thead>
+                        <tr>
+                          <th>Deal name</th>
+                          <th>Deal ID</th>
+                          <th>Created date</th>
+                          <th className="stripe-ui__num">{`Amount${currencySuffix()}`}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedOtherWeekRow.otherDeals.length > 0 ? (
+                          selectedOtherWeekRow.otherDeals.map((deal) => (
+                            <tr key={`${deal.dealId}:${deal.createdDate}:${deal.dealName}`}>
+                              <td>{deal.dealName}</td>
+                              <td>{deal.dealId}</td>
+                              <td>{deal.createdDate}</td>
+                              <td className="stripe-ui__num">
+                                {fmtMoney(scaleCurrency(deal.pipelineValue), currencyDisplay)}
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={4} className="stripe-ui__hint">
+                              No other deals in this week.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </section>
           )}
 
