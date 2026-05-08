@@ -2630,7 +2630,7 @@ export default function Home() {
                 <div>
                   <h2 className="stripe-ui__panel-title">Created Pipeline (7-Day Buckets)</h2>
                   <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
-                    Deal amount totals grouped into 7-day chunks starting from {weeklyPipeline.startDate}.
+                    Sales + Transactional pipeline deals only, grouped into 7-day chunks starting from {weeklyPipeline.startDate}.
                   </p>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", justifyContent: "flex-end" }}>

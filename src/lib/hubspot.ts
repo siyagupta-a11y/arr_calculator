@@ -20,6 +20,7 @@ type CacheEntry<T> = { value: T; expiresAt: number };
 
 const DEALS_CACHE = new Map<string, CacheEntry<HubspotDeal[]>>();
 const DEAL_STAGE_LABELS_CACHE = new Map<string, CacheEntry<Array<[string, string]>>>();
+const DEAL_PIPELINE_LABELS_CACHE = new Map<string, CacheEntry<Array<[string, string]>>>();
 const DEAL_STAGE_WORKSPACE_IDS_CACHE = new Map<string, CacheEntry<string[]>>();
 const SALES_ASSIST_DEALS_CACHE = new Map<string, CacheEntry<SalesAssistDealMatch[]>>();
 const DEAL_ASSOC_CACHE = new Map<string, CacheEntry<string[]>>();
@@ -33,6 +34,7 @@ const LINE_ITEM_CACHE = new Map<string, CacheEntry<HubspotLineItem>>();
 export function clearHubspotMemoryCache() {
   DEALS_CACHE.clear();
   DEAL_STAGE_LABELS_CACHE.clear();
+  DEAL_PIPELINE_LABELS_CACHE.clear();
   DEAL_STAGE_WORKSPACE_IDS_CACHE.clear();
   SALES_ASSIST_DEALS_CACHE.clear();
   DEAL_ASSOC_CACHE.clear();
@@ -443,6 +445,26 @@ export async function fetchDealStageIdToLabelMap() {
   }
 
   writeCache(DEAL_STAGE_LABELS_CACHE, cacheKey, Array.from(out.entries()));
+  return out;
+}
+
+export async function fetchDealPipelineIdToLabelMap() {
+  const cacheKey = "all";
+  const cached = readCache(DEAL_PIPELINE_LABELS_CACHE, cacheKey);
+  if (cached) return new Map<string, string>(cached);
+
+  const url = `${HUBSPOT_BASE}/crm/v3/pipelines/deals`;
+  const json = (await hsFetch(url)) as DealPipelinesResponse;
+  const out = new Map<string, string>();
+
+  for (const pipeline of json.results || []) {
+    const id = String(pipeline.id || "").trim();
+    const label = String(pipeline.label || "").trim();
+    if (!id || !label) continue;
+    if (!out.has(id)) out.set(id, label);
+  }
+
+  writeCache(DEAL_PIPELINE_LABELS_CACHE, cacheKey, Array.from(out.entries()));
   return out;
 }
 

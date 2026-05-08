@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import { batchReadLineItems, fetchDealsCreatedBetween, fetchLineItemIdsForDeals } from "@/lib/hubspot";
+import {
+  batchReadLineItems,
+  fetchDealPipelineIdToLabelMap,
+  fetchDealsCreatedBetween,
+  fetchLineItemIdsForDeals,
+} from "@/lib/hubspot";
 import { computeCalculatedArrForLineItem, LI_PROPS } from "@/lib/logic";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 import type { HubspotLineItem } from "@/lib/types";
@@ -77,6 +82,42 @@ function parseAmount(rawValue: unknown) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function parseCsvSet(raw: string) {
+  return Array.from(
+    new Set(
+      String(raw || "")
+        .split(/[,\n\r|;]+/)
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function normalizePipelineLabelKey(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+async function resolveIncludedPipelineIds() {
+  const configuredIds = parseCsvSet(String(process.env.HUBSPOT_CREATED_PIPELINE_IDS || ""));
+  if (configuredIds.length) return new Set(configuredIds);
+
+  const pipelineIdToLabel = await fetchDealPipelineIdToLabelMap();
+  const out = new Set<string>();
+  for (const [pipelineId, label] of pipelineIdToLabel.entries()) {
+    const normalized = normalizePipelineLabelKey(label);
+    if (
+      normalized.includes("salespipeline") ||
+      normalized.includes("transactionalpipeline")
+    ) {
+      out.add(pipelineId);
+    }
+  }
+  return out;
+}
+
 function computeDealArrFromLineItems(liIds: string[], lineItemsById: Map<string, HubspotLineItem>) {
   let sum = 0;
   for (const liId of liIds) {
@@ -115,10 +156,15 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
   if (!start || !end) throw new Error("Invalid startDate/endDate");
   if (end.getTime() < start.getTime()) throw new Error("endDate must be >= startDate");
 
-  const deals = await fetchDealsCreatedBetween(["amount", "createdate", "dealname"], startDate, endDate);
+  const includedPipelineIds = await resolveIncludedPipelineIds();
+  const deals = await fetchDealsCreatedBetween(["amount", "createdate", "dealname", "pipeline"], startDate, endDate);
+  const dealsInIncludedPipelines = deals.filter((deal) => {
+    const pipelineId = String(deal.properties?.pipeline || "").trim();
+    return !!pipelineId && includedPipelineIds.has(pipelineId);
+  });
   const dealIdToLineItemIds = new Map<string, string[]>();
   const allLineItemIds = new Set<string>();
-  for (const pair of await fetchLineItemIdsForDeals(deals.map((deal) => String(deal.id || "")))) {
+  for (const pair of await fetchLineItemIdsForDeals(dealsInIncludedPipelines.map((deal) => String(deal.id || "")))) {
     const ids = pair.ids || [];
     dealIdToLineItemIds.set(pair.dealId, ids);
     for (const id of ids) allLineItemIds.add(id);
@@ -144,7 +190,7 @@ async function buildWeeklyCreatedPipeline(startDate: string, endDate: string) {
     }
   >();
 
-  for (const deal of deals) {
+  for (const deal of dealsInIncludedPipelines) {
     const properties = deal.properties || {};
     const createdMs = parseHubspotTimestampMs(properties.createdate);
     if (!Number.isFinite(createdMs)) continue;
