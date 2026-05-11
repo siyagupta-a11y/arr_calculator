@@ -36,6 +36,10 @@ function defaultDebugEndDateUtc() {
   return toIsoDateUtc(new Date());
 }
 
+function monthKeyFromIsoDate(value: string) {
+  return String(value || "").slice(0, 7);
+}
+
 type DebugBackfillStep = {
   step?: string;
   ok?: boolean;
@@ -54,6 +58,33 @@ type DebugBackfillResult = {
   steps?: DebugBackfillStep[];
 };
 
+type PageBackfillTarget =
+  | "combined_billing_overview"
+  | "ndr_gdr"
+  | "tofu"
+  | "combined_all_subs"
+  | "stripe_billing_overview"
+  | "stripe_through_mrr"
+  | "hubspot_view_model"
+  | "all";
+
+type PageBackfillJob = {
+  label: string;
+  endpoint: string;
+  body: Record<string, unknown>;
+};
+
+const PAGE_BACKFILL_TARGET_OPTIONS: Array<{ value: PageBackfillTarget; label: string }> = [
+  { value: "combined_billing_overview", label: "Combined Billing Overview" },
+  { value: "ndr_gdr", label: "NDR/GDR" },
+  { value: "tofu", label: "TOFU" },
+  { value: "combined_all_subs", label: "Combined All Subs" },
+  { value: "stripe_billing_overview", label: "Stripe Billing Overview" },
+  { value: "stripe_through_mrr", label: "Stripe Through MRR" },
+  { value: "hubspot_view_model", label: "HubSpot View Model" },
+  { value: "all", label: "All page targets" },
+];
+
 export default function HardRefreshButton() {
   const pathname = usePathname();
   const [loading, setLoading] = useState(false);
@@ -71,6 +102,9 @@ export default function HardRefreshButton() {
   const [debugIncludeDaily, setDebugIncludeDaily] = useState(true);
   const [debugIncludeMonthly, setDebugIncludeMonthly] = useState(true);
   const [debugResult, setDebugResult] = useState<DebugBackfillResult | null>(null);
+  const [pageBackfillLoading, setPageBackfillLoading] = useState(false);
+  const [pageBackfillTarget, setPageBackfillTarget] = useState<PageBackfillTarget>("combined_billing_overview");
+  const [pageBackfillChunkMonths, setPageBackfillChunkMonths] = useState(1);
 
   useEffect(() => {
     let active = true;
@@ -426,6 +460,322 @@ export default function HardRefreshButton() {
 
   function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function buildJobsForTarget(
+    target: Exclude<PageBackfillTarget, "all">,
+    chunk: { startDate: string; endDate: string; label: string },
+  ): PageBackfillJob[] {
+    const detailStartMonth = monthKeyFromIsoDate(chunk.startDate);
+    const detailEndMonth = monthKeyFromIsoDate(chunk.endDate);
+
+    if (target === "combined_billing_overview") {
+      return [
+        {
+          label: `Combined Billing (no CAC) ${chunk.label}`,
+          endpoint: "/api/combined-billing-overview-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            grain: "monthly",
+            includeCac: false,
+            precomputeRangeOnly: true,
+            forceRefreshPrecomputed: true,
+          },
+        },
+        {
+          label: `Combined Billing (with CAC) ${chunk.label}`,
+          endpoint: "/api/combined-billing-overview-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            grain: "monthly",
+            includeCac: true,
+            precomputeRangeOnly: true,
+            forceRefreshPrecomputed: true,
+          },
+        },
+      ];
+    }
+
+    if (target === "ndr_gdr") {
+      return [
+        {
+          label: `NDR/GDR overall ${chunk.label}`,
+          endpoint: "/api/ndr-gdr-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            combineMode: "grouped",
+            groupBy: "overall",
+            precomputeRangeOnly: true,
+            forceRefreshPrecomputed: true,
+          },
+        },
+        {
+          label: `NDR/GDR source ${chunk.label}`,
+          endpoint: "/api/ndr-gdr-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            combineMode: "grouped",
+            groupBy: "source",
+            precomputeRangeOnly: true,
+            forceRefreshPrecomputed: true,
+          },
+        },
+        {
+          label: `NDR/GDR plan ${chunk.label}`,
+          endpoint: "/api/ndr-gdr-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            combineMode: "grouped",
+            groupBy: "plan",
+            precomputeRangeOnly: true,
+            forceRefreshPrecomputed: true,
+          },
+        },
+      ];
+    }
+
+    if (target === "tofu") {
+      return [
+        {
+          label: `TOFU month ${chunk.label}`,
+          endpoint: "/api/tofu-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            combineMode: "grouped",
+            groupBy: "month",
+            precomputeRangeOnly: true,
+            forceRefreshPrecomputed: true,
+          },
+        },
+        {
+          label: `TOFU segment ${chunk.label}`,
+          endpoint: "/api/tofu-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            combineMode: "grouped",
+            groupBy: "segment",
+            precomputeRangeOnly: true,
+            forceRefreshPrecomputed: true,
+          },
+        },
+        {
+          label: `TOFU plan ${chunk.label}`,
+          endpoint: "/api/tofu-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            combineMode: "grouped",
+            groupBy: "plan",
+            precomputeRangeOnly: true,
+            forceRefreshPrecomputed: true,
+          },
+        },
+      ];
+    }
+
+    if (target === "combined_all_subs") {
+      return [
+        {
+          label: `Combined All Subs simple ARR ${chunk.label}`,
+          endpoint: "/api/combined-all-subs-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            combineMode: "simple",
+            displayMode: "arr",
+            planGrain: "monthly",
+            precomputeRangeOnly: true,
+            forceRefreshPrecomputed: true,
+          },
+        },
+        {
+          label: `Combined All Subs grouped ARR ${chunk.label}`,
+          endpoint: "/api/combined-all-subs-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            combineMode: "grouped",
+            displayMode: "arr",
+            planGrain: "monthly",
+            precomputeRangeOnly: true,
+            forceRefreshPrecomputed: true,
+            groupedMatchStrategy: "full",
+            includeSalesAssist: true,
+          },
+        },
+      ];
+    }
+
+    if (target === "stripe_billing_overview") {
+      return [
+        {
+          label: `Stripe Billing monthly ${chunk.label}`,
+          endpoint: "/api/stripe-billing-overview-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            grain: "monthly",
+            groupBy: "none",
+            includeCustomerArrRows: true,
+            includeCurrentMonthProjection: true,
+          },
+        },
+      ];
+    }
+
+    if (target === "stripe_through_mrr") {
+      return [
+        {
+          label: `Stripe Through MRR monthly none ${chunk.label}`,
+          endpoint: "/api/stripe-through-mrr-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            detailStartMonth,
+            detailEndMonth,
+            grain: "monthly",
+            groupBy: "none",
+            page: 1,
+            pageSize: 500,
+          },
+        },
+        {
+          label: `Stripe Through MRR monthly email ${chunk.label}`,
+          endpoint: "/api/stripe-through-mrr-report",
+          body: {
+            startDate: chunk.startDate,
+            endDate: chunk.endDate,
+            detailStartMonth,
+            detailEndMonth,
+            grain: "monthly",
+            groupBy: "email",
+            page: 1,
+            pageSize: 500,
+          },
+        },
+      ];
+    }
+
+    return [
+      {
+        label: `HubSpot View Model monthly ${chunk.label}`,
+        endpoint: "/api/hubspot-view-model",
+        body: {
+          startDate: chunk.startDate,
+          endDate: chunk.endDate,
+          mode: "contracted",
+          grain: "monthly",
+        },
+      },
+    ];
+  }
+
+  async function runPageBackfill() {
+    if (!debugStartDate || !debugEndDate) {
+      setMessage("Select start and end dates for page backfill.");
+      return;
+    }
+    if (debugEndDate < debugStartDate) {
+      setMessage("Page backfill end date must be on or after start date.");
+      return;
+    }
+
+    const chunkMonths = Math.max(1, Math.min(12, Math.floor(Number(pageBackfillChunkMonths) || 1)));
+    const chunks = buildMonthChunks(debugStartDate, debugEndDate, chunkMonths);
+    if (!chunks.length) {
+      setMessage("No monthly chunks generated for page backfill.");
+      return;
+    }
+
+    const targets: Array<Exclude<PageBackfillTarget, "all">> = pageBackfillTarget === "all"
+      ? [
+          "combined_billing_overview",
+          "ndr_gdr",
+          "tofu",
+          "combined_all_subs",
+          "stripe_billing_overview",
+          "stripe_through_mrr",
+          "hubspot_view_model",
+        ]
+      : [pageBackfillTarget];
+
+    const jobs: PageBackfillJob[] = [];
+    for (const chunk of chunks) {
+      for (const target of targets) jobs.push(...buildJobsForTarget(target, chunk));
+    }
+
+    if (!jobs.length) {
+      setMessage("No page backfill jobs were created.");
+      return;
+    }
+
+    setPageBackfillLoading(true);
+    setSyncProgress("");
+    setMessage("");
+    let okCount = 0;
+    let failedCount = 0;
+    const failedDetails: string[] = [];
+
+    try {
+      for (let i = 0; i < jobs.length; i += 1) {
+        const job = jobs[i];
+        setSyncProgress(`Page backfill ${i + 1}/${jobs.length}: ${job.label}`);
+
+        let succeeded = false;
+        let lastError = "";
+        for (let attempt = 1; attempt <= 3 && !succeeded; attempt += 1) {
+          try {
+            const res = await fetch(job.endpoint, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              cache: "no-store",
+              body: JSON.stringify(job.body),
+            });
+            if (!res.ok) {
+              const text = await res.text();
+              const snippet = text.replace(/\s+/g, " ").slice(0, 220);
+              const looksHtml = snippet.toLowerCase().includes("<!doctype html");
+              throw new Error(
+                looksHtml
+                  ? "Server returned HTML error page (likely timeout/runtime crash)."
+                  : snippet || `HTTP ${res.status}`,
+              );
+            }
+            succeeded = true;
+            okCount += 1;
+          } catch (error: unknown) {
+            lastError = error instanceof Error ? error.message : "Unknown error";
+            if (attempt < 3) await sleep(Math.min(10_000, 1_000 * 2 ** (attempt - 1)));
+          }
+        }
+
+        if (!succeeded) {
+          failedCount += 1;
+          failedDetails.push(`${job.label}: ${lastError || "Unknown error"}`);
+        }
+        await sleep(250);
+      }
+
+      if (failedCount > 0) {
+        setMessage(
+          `Page backfill finished with ${failedCount} failed job(s). ` +
+            `Succeeded: ${okCount}. ` +
+            `Failed: ${failedDetails.slice(0, 3).join(" | ")}`,
+        );
+      } else {
+        setMessage(`Page backfill completed successfully (${okCount} jobs).`);
+      }
+    } finally {
+      setSyncProgress("");
+      setPageBackfillLoading(false);
+    }
   }
 
   async function backfillFacts() {
@@ -817,7 +1167,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void runDebugBackfill()}
-              disabled={debugLoading || loading || syncLoading || backfillLoading}
+              disabled={debugLoading || pageBackfillLoading || loading || syncLoading || backfillLoading}
               style={{
                 marginLeft: "auto",
                 borderRadius: 8,
@@ -827,11 +1177,64 @@ export default function HardRefreshButton() {
                 padding: "6px 10px",
                 fontSize: 12,
                 fontWeight: 700,
-                cursor: debugLoading || loading || syncLoading || backfillLoading ? "wait" : "pointer",
+                cursor: debugLoading || pageBackfillLoading || loading || syncLoading || backfillLoading ? "wait" : "pointer",
               }}
             >
               {debugLoading ? "Running..." : "Run debug"}
             </button>
+          </div>
+          <div style={{ marginTop: 10, borderTop: "1px solid #cbd5e1", paddingTop: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Page-by-page cache backfill</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 8 }}>
+              <label style={{ display: "grid", gap: 4, fontSize: 11 }}>
+                <span>Page target</span>
+                <select
+                  value={pageBackfillTarget}
+                  onChange={(e) => setPageBackfillTarget(e.target.value as PageBackfillTarget)}
+                  style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 8px", fontSize: 12 }}
+                >
+                  {PAGE_BACKFILL_TARGET_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ display: "grid", gap: 4, fontSize: 11 }}>
+                <span>Chunk size</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={12}
+                  step={1}
+                  value={String(pageBackfillChunkMonths)}
+                  onChange={(e) => setPageBackfillChunkMonths(Number(e.target.value || 1))}
+                  style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 8px", fontSize: 12 }}
+                />
+              </label>
+            </div>
+            <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                onClick={() => void runPageBackfill()}
+                disabled={pageBackfillLoading || debugLoading || loading || syncLoading || backfillLoading}
+                style={{
+                  borderRadius: 8,
+                  border: "1px solid #166534",
+                  background: pageBackfillLoading ? "#166534" : "#16a34a",
+                  color: "#ffffff",
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor:
+                    pageBackfillLoading || debugLoading || loading || syncLoading || backfillLoading
+                      ? "wait"
+                      : "pointer",
+                }}
+              >
+                {pageBackfillLoading ? "Backfilling..." : "Run page backfill"}
+              </button>
+            </div>
           </div>
           {debugResult ? (
             <div
@@ -876,7 +1279,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void syncNow("fast")}
-              disabled={syncLoading || backfillLoading || loading}
+              disabled={syncLoading || backfillLoading || pageBackfillLoading || loading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #1d4ed8",
@@ -885,7 +1288,7 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || backfillLoading || loading ? "wait" : "pointer",
+                cursor: syncLoading || backfillLoading || pageBackfillLoading || loading ? "wait" : "pointer",
               }}
               title="Sync dirty changes only (fast incremental)"
             >
@@ -894,7 +1297,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void syncNow("full")}
-              disabled={syncLoading || backfillLoading || loading}
+              disabled={syncLoading || backfillLoading || pageBackfillLoading || loading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #475569",
@@ -903,7 +1306,7 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || backfillLoading || loading ? "wait" : "pointer",
+                cursor: syncLoading || backfillLoading || pageBackfillLoading || loading ? "wait" : "pointer",
               }}
               title="Full historical sync"
             >
@@ -912,7 +1315,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => setDebugPanelOpen((prev) => !prev)}
-              disabled={syncLoading || backfillLoading || loading || debugLoading}
+              disabled={syncLoading || backfillLoading || pageBackfillLoading || loading || debugLoading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #0369a1",
@@ -921,7 +1324,7 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || backfillLoading || loading || debugLoading ? "wait" : "pointer",
+                cursor: syncLoading || backfillLoading || pageBackfillLoading || loading || debugLoading ? "wait" : "pointer",
               }}
               title="Run targeted date-range fact sync and view step-level output"
             >
@@ -930,7 +1333,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void backfillFacts()}
-              disabled={backfillLoading || syncLoading || loading || debugLoading}
+              disabled={backfillLoading || syncLoading || pageBackfillLoading || loading || debugLoading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #065f46",
@@ -939,7 +1342,7 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: backfillLoading || syncLoading || loading ? "wait" : "pointer",
+                cursor: backfillLoading || syncLoading || pageBackfillLoading || loading ? "wait" : "pointer",
               }}
               title="Chunked full backfill into fact tables (safe retries)"
             >
@@ -950,7 +1353,7 @@ export default function HardRefreshButton() {
         <button
           type="button"
           onClick={() => void hardRefresh()}
-          disabled={loading || syncLoading || backfillLoading}
+          disabled={loading || syncLoading || backfillLoading || pageBackfillLoading}
           style={{
             borderRadius: 10,
             border: "1px solid #0f172a",
@@ -959,7 +1362,7 @@ export default function HardRefreshButton() {
             padding: "10px 12px",
             fontSize: 13,
             fontWeight: 700,
-            cursor: loading || syncLoading || backfillLoading ? "wait" : "pointer",
+            cursor: loading || syncLoading || backfillLoading || pageBackfillLoading ? "wait" : "pointer",
           }}
           title="Clear server caches and reload all data from scratch"
         >

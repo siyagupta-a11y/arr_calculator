@@ -11,7 +11,7 @@ import { readPrecomputedPayload, writePrecomputedPayload } from "@/lib/precomput
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-const CACHE_TTL_MS = readTtlMs("API_STRIPE_BILLING_OVERVIEW_CACHE_TTL_MS", 60_000);
+const CACHE_TTL_MS = readTtlMs("API_STRIPE_BILLING_OVERVIEW_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
 const PRECOMPUTED_ENDPOINT_KEY = "stripe-billing-overview";
 
 const STRIPE_BILLING_OVERVIEW_OPTIONS: { profile: StripeBigQueryProfile } = {

@@ -7,7 +7,7 @@ import type { Grain, HubspotPlan, ReportMode, ReportResponse, ReportRow } from "
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-const CACHE_TTL_MS = readTtlMs("API_HUBSPOT_VIEW_MODEL_CACHE_TTL_MS", 60_000);
+const CACHE_TTL_MS = readTtlMs("API_HUBSPOT_VIEW_MODEL_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
 const REPORT_SUBQUERY_CACHE_TTL_MS = readTtlMs("API_HUBSPOT_VIEW_MODEL_REPORT_SUBQUERY_CACHE_TTL_MS", 300_000);
 const PRECOMPUTED_ENDPOINT_KEY = "hubspot-view-model";
 
