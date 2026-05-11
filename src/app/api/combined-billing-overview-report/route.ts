@@ -505,7 +505,9 @@ LIMIT 3000
 
   const points = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.points || []));
   const pointMonthSet = new Set(points.map((point) => monthKeyFromPointLike(point)));
-  if (expectedMonths.some((key) => !pointMonthSet.has(key))) return null;
+  const todayMonthKey = toIsoDateOnly(new Date()).slice(0, 7);
+  const missingMonths = expectedMonths.filter((key) => !pointMonthSet.has(key));
+  if (missingMonths.some((key) => key !== todayMonthKey)) return null;
 
   const linePoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.linePoints || []));
   const lineSourcePoints = {
@@ -1881,14 +1883,9 @@ async function buildCombinedBillingOverview(
       }),
   );
   const ltvCombinedUsersPromise: Promise<CombinedLtvUserCounts> = shouldComputeLtv
-    ? generateCombinedAllSubsReport({
-        startDate: previousRange.startDate,
-        endDate,
-        combineMode: "grouped",
-        displayMode: "arr",
-        planGrain: "monthly",
-        includeSalesAssist: false,
-      }).then((report) => buildCombinedLtvUserCounts(report.periods || [], report.rows || [], "monthly"))
+    ? sourceCombinedAllSubsPromise.then((report) =>
+        buildCombinedLtvUserCounts(report.periods || [], report.rows || [], "monthly"),
+      )
     : Promise.resolve({ activeByPeriod: new Map<string, number>(), logoChurnByPeriod: new Map<string, LogoChurnCounts>() });
   const aiSpendSeriesPromise = (async () => {
     if (grain === "daily") {

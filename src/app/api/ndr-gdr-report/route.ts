@@ -7,18 +7,24 @@ import {
   type CombinedAllSubsRequest,
 } from "@/lib/combinedAllSubsReport";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
-import { readPrecomputedPayload, writePrecomputedPayload } from "@/lib/precomputedPayloadStore";
+import {
+  listLatestPrecomputedPayloadRows,
+  readPrecomputedPayload,
+  writePrecomputedPayload,
+} from "@/lib/precomputedPayloadStore";
 import { isPrecomputedFactsReadEnabled, queryPrecomputedCustomerArrCurrent } from "@/lib/precomputedFactsRead";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const CACHE_TTL_MS = readTtlMs("API_NDR_GDR_CACHE_TTL_MS", 60_000);
+const CACHE_TTL_MS = readTtlMs("API_NDR_GDR_CACHE_TTL_MS", 24 * 60 * 60 * 1000);
 const MONTHLY_CANONICAL_START_DATE = (() => {
   const configured = String(process.env.COMBINED_BILLING_OVERVIEW_MONTHLY_CACHE_START || "2023-01-01").trim();
   return /^\d{4}-\d{2}-\d{2}$/.test(configured) ? configured : "2023-01-01";
 })();
 const PRECOMPUTED_ENDPOINT_KEY = "ndr-gdr:monthly";
+const CANONICAL_CACHE_KEY_PREFIX = "api:ndr-gdr:";
+const RANGE_CACHE_KEY_PREFIX = "api:ndr-gdr:range:";
 
 type RequestBody = {
   startDate?: string;
@@ -167,6 +173,162 @@ function monthKeysBetween(startDate: string, endDate: string) {
     cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
   }
   return keys;
+}
+
+function normalizeComparablePayload(payload: {
+  combineMode: CombinedAllSubsCombineMode;
+  groupBy: MatrixGroupBy;
+}) {
+  return {
+    combineMode: payload.combineMode,
+    groupBy: payload.groupBy,
+  };
+}
+
+function parsePayloadFromCacheKey(cacheKey: string) {
+  const raw = String(cacheKey || "");
+  let encoded = "";
+  if (raw.startsWith(RANGE_CACHE_KEY_PREFIX)) {
+    encoded = raw.slice(RANGE_CACHE_KEY_PREFIX.length);
+  } else if (raw.startsWith(CANONICAL_CACHE_KEY_PREFIX)) {
+    encoded = raw.slice(CANONICAL_CACHE_KEY_PREFIX.length);
+  } else {
+    return null;
+  }
+  if (!encoded) return null;
+  try {
+    const parsed = JSON.parse(encoded) as Partial<{
+      startDate: string;
+      endDate: string;
+      combineMode: string;
+      groupBy: string;
+    }>;
+    const startDate = String(parsed.startDate || "").trim();
+    const endDate = String(parsed.endDate || "").trim();
+    if (!isIsoDate(startDate) || !isIsoDate(endDate)) return null;
+    return {
+      startDate,
+      endDate,
+      combineMode: normalizeCombineMode(parsed.combineMode),
+      groupBy: normalizeGroupBy(parsed.groupBy),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function buildCanonicalFromChunkRows(canonicalPayload: {
+  startDate: string;
+  endDate: string;
+  combineMode: CombinedAllSubsCombineMode;
+  groupBy: MatrixGroupBy;
+}): Promise<NdrGdrResponse | null> {
+  const entries = await listLatestPrecomputedPayloadRows<NdrGdrResponse>(
+    PRECOMPUTED_ENDPOINT_KEY,
+    {
+      startDate: canonicalPayload.startDate,
+      endDate: canonicalPayload.endDate,
+      grain: "monthly",
+      cacheKeyPrefix: RANGE_CACHE_KEY_PREFIX,
+      limit: 3000,
+    },
+  ).catch(() => []);
+  if (!entries.length) return null;
+
+  const comparable = stableStringify(normalizeComparablePayload(canonicalPayload));
+  const periodLabelByKey = new Map<string, string>();
+  const segmentsByKey = new Map<string, { segmentKey: string; segmentLabel: string; cohortsByKey: Map<string, CohortRow> }>();
+  const warningSet = new Set<string>();
+  let targetCurrency = "";
+
+  for (const entry of entries) {
+    const keyPayload = parsePayloadFromCacheKey(entry.cacheKey);
+    if (!keyPayload) continue;
+    if (stableStringify(normalizeComparablePayload(keyPayload)) !== comparable) continue;
+    if (!entry.payload) continue;
+    const effectiveStart = keyPayload.startDate > canonicalPayload.startDate ? keyPayload.startDate : canonicalPayload.startDate;
+    const effectiveEnd = keyPayload.endDate < canonicalPayload.endDate ? keyPayload.endDate : canonicalPayload.endDate;
+    if (effectiveEnd < effectiveStart) continue;
+    const sliced = sliceNdrGdrResponse(entry.payload, effectiveStart, effectiveEnd);
+    if (!targetCurrency) targetCurrency = String(sliced.targetCurrency || "");
+    for (const warning of sliced.warnings || []) {
+      const value = String(warning || "").trim();
+      if (value) warningSet.add(value);
+    }
+    for (const period of sliced.periods || []) {
+      const key = String(period.key || "").trim();
+      if (!key) continue;
+      periodLabelByKey.set(key, String(period.label || key));
+    }
+    const segments = (sliced.segments && sliced.segments.length)
+      ? sliced.segments
+      : [{ segmentKey: "overall", segmentLabel: "Overall", cohorts: sliced.cohorts || [] }];
+    for (const segment of segments) {
+      const segmentKey = String(segment.segmentKey || "overall");
+      if (!segmentsByKey.has(segmentKey)) {
+        segmentsByKey.set(segmentKey, {
+          segmentKey,
+          segmentLabel: String(segment.segmentLabel || segmentKey),
+          cohortsByKey: new Map<string, CohortRow>(),
+        });
+      }
+      const bucket = segmentsByKey.get(segmentKey)!;
+      for (const cohort of segment.cohorts || []) {
+        const cohortKey = String(cohort.cohortKey || "").trim();
+        if (!cohortKey) continue;
+        const existing = bucket.cohortsByKey.get(cohortKey);
+        if (!existing) {
+          bucket.cohortsByKey.set(cohortKey, {
+            cohortKey,
+            cohortLabel: String(cohort.cohortLabel || cohortKey),
+            cohortCustomerCount: Number(cohort.cohortCustomerCount || 0),
+            cohortArr: Number(cohort.cohortArr || 0),
+            ndrByPeriod: { ...(cohort.ndrByPeriod || {}) },
+            gdrByPeriod: { ...(cohort.gdrByPeriod || {}) },
+          });
+          continue;
+        }
+        existing.cohortCustomerCount = Number(cohort.cohortCustomerCount || existing.cohortCustomerCount || 0);
+        existing.cohortArr = Number(cohort.cohortArr || existing.cohortArr || 0);
+        existing.ndrByPeriod = { ...(existing.ndrByPeriod || {}), ...(cohort.ndrByPeriod || {}) };
+        existing.gdrByPeriod = { ...(existing.gdrByPeriod || {}), ...(cohort.gdrByPeriod || {}) };
+      }
+    }
+  }
+
+  const expectedMonths = monthKeysBetween(canonicalPayload.startDate, canonicalPayload.endDate);
+  if (!expectedMonths.length) return null;
+  if (expectedMonths.some((key) => !periodLabelByKey.has(key))) return null;
+
+  const periods = expectedMonths.map((key) => ({ key, label: periodLabelByKey.get(key) || key }));
+  const segments = Array.from(segmentsByKey.values())
+    .map((segment) => ({
+      segmentKey: segment.segmentKey,
+      segmentLabel: segment.segmentLabel,
+      cohorts: expectedMonths
+        .map((monthKey) => segment.cohortsByKey.get(monthKey))
+        .filter((cohort): cohort is CohortRow => Boolean(cohort))
+        .map((cohort) => ({
+          ...cohort,
+          ndrByPeriod: { ...(cohort.ndrByPeriod || {}) },
+          gdrByPeriod: { ...(cohort.gdrByPeriod || {}) },
+        })),
+    }))
+    .filter((segment) => segment.cohorts.length === expectedMonths.length)
+    .sort((a, b) => a.segmentKey.localeCompare(b.segmentKey));
+  if (!segments.length) return null;
+
+  return {
+    startDate: canonicalPayload.startDate,
+    endDate: canonicalPayload.endDate,
+    combineMode: canonicalPayload.combineMode,
+    groupBy: canonicalPayload.groupBy,
+    targetCurrency: targetCurrency || "USD",
+    warnings: Array.from(warningSet),
+    periods,
+    cohorts: segments[0].cohorts,
+    segments,
+  };
 }
 
 async function buildNdrGdrFromPrecomputedFacts(payload: {
@@ -496,7 +658,7 @@ async function validateAndRun(body: Partial<RequestBody>) {
 
   if (precomputeRangeOnly) {
     const rangePayload = { startDate, endDate, combineMode, groupBy };
-    const rangeKey = `api:ndr-gdr:range:${stableStringify(rangePayload)}`;
+    const rangeKey = `${RANGE_CACHE_KEY_PREFIX}${stableStringify(rangePayload)}`;
     return getOrSetCache(rangeKey, CACHE_TTL_MS, async () => {
       const precomputed = await readPrecomputedPayload<NdrGdrResponse>(PRECOMPUTED_ENDPOINT_KEY, rangeKey).catch(
         () => null,
@@ -519,10 +681,22 @@ async function validateAndRun(body: Partial<RequestBody>) {
   const canonicalStartDate = startDate < MONTHLY_CANONICAL_START_DATE ? startDate : MONTHLY_CANONICAL_START_DATE;
   const canonicalEndDate = endDate > today ? endDate : today;
   const canonicalPayload = { startDate: canonicalStartDate, endDate: canonicalEndDate, combineMode, groupBy };
-  const key = `api:ndr-gdr:${stableStringify(canonicalPayload)}`;
+  const key = `${CANONICAL_CACHE_KEY_PREFIX}${stableStringify(canonicalPayload)}`;
   const canonical = await getOrSetCache(key, CACHE_TTL_MS, async () => {
     const precomputed = await readPrecomputedPayload<NdrGdrResponse>(PRECOMPUTED_ENDPOINT_KEY, key).catch(() => null);
     if (precomputed) return precomputed;
+    const stitched = await buildCanonicalFromChunkRows(canonicalPayload);
+    if (stitched) {
+      await writePrecomputedPayload({
+        endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+        cache_key: key,
+        start_date: canonicalStartDate,
+        end_date: canonicalEndDate,
+        grain: "monthly",
+        payload_json: JSON.stringify(stitched),
+      }).catch(() => null);
+      return stitched;
+    }
     const built = await buildNdrGdrReport(canonicalPayload);
     await writePrecomputedPayload({
       endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
