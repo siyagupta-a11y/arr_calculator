@@ -4,11 +4,14 @@ import {
   generateTofuReport,
   type TofuDetailMetric,
   type TofuDetailRequest,
+  type TofuPlanRow,
   type TofuRequest,
   type TofuResponse,
+  type TofuSegmentRow,
 } from "@/lib/tofuReport";
 import type { CombinedAllSubsCombineMode } from "@/lib/combinedAllSubsReport";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
+import { isPrecomputedFactsReadEnabled, queryPrecomputedTofuMonthlyCurrent } from "@/lib/precomputedFactsRead";
 import {
   listLatestPrecomputedPayloadRows,
   readPrecomputedPayload,
@@ -182,6 +185,80 @@ function sliceMonthlyTofuResponse(response: TofuResponse, startDate: string, end
   };
 }
 
+async function buildTofuFromPrecomputedFacts(basePayload: TofuRequest): Promise<TofuResponse | null> {
+  const rows = await queryPrecomputedTofuMonthlyCurrent({
+    startDate: basePayload.startDate,
+    endDate: basePayload.endDate,
+  });
+  if (!rows.length) return null;
+  const startMonth = monthKey(basePayload.startDate);
+  const endMonth = monthKey(basePayload.endDate);
+  const inRange = rows.filter((row) => row.monthKey >= startMonth && row.monthKey <= endMonth);
+  if (!inRange.length) return null;
+
+  const monthlyRows = inRange
+    .filter((row) => row.groupType === "overall" && row.groupValue === "overall")
+    .map((row) => ({
+      periodKey: row.monthKey,
+      periodLabel: row.monthKey,
+      beginningArr: row.beginningArr,
+      newArr: row.newArr,
+      expansionArr: row.expansionArr,
+      contractionArr: row.contractionArr,
+      churnArr: row.churnArr,
+      endingArr: row.endingArr,
+    }))
+    .sort((a, b) => a.periodKey.localeCompare(b.periodKey));
+
+  if (!monthlyRows.length) return null;
+
+  const response: TofuResponse = {
+    startDate: basePayload.startDate,
+    endDate: basePayload.endDate,
+    combineMode: "grouped",
+    groupBy: basePayload.groupBy || "month",
+    targetCurrency: "USD",
+    rows: monthlyRows,
+  };
+
+  if ((basePayload.groupBy || "month") === "segment") {
+    response.segmentRows = inRange
+      .filter((row) => row.groupType === "segment")
+      .map((row) => ({
+        periodKey: row.monthKey,
+        periodLabel: row.monthKey,
+        segment: String(row.groupValue || "selfserve") as TofuSegmentRow["segment"],
+        beginningArr: row.beginningArr,
+        newArr: row.newArr,
+        expansionArr: row.expansionArr,
+        contractionArr: row.contractionArr,
+        churnArr: row.churnArr,
+        endingArr: row.endingArr,
+      }))
+      .sort((a, b) => `${a.periodKey}:${a.segment}`.localeCompare(`${b.periodKey}:${b.segment}`));
+  }
+
+  if ((basePayload.groupBy || "month") === "plan") {
+    response.planRows = inRange
+      .filter((row) => row.groupType === "plan")
+      .map((row) => ({
+        periodKey: row.monthKey,
+        periodLabel: row.monthKey,
+        plan: String(row.groupValue || "free") as TofuPlanRow["plan"],
+        beginningArr: row.beginningArr,
+        newArr: row.newArr,
+        expansionArr: row.expansionArr,
+        contractionArr: row.contractionArr,
+        churnArr: row.churnArr,
+        netPlanChangeArr: row.netPlanChangeArr,
+        endingArr: row.endingArr,
+      }))
+      .sort((a, b) => `${a.periodKey}:${a.plan}`.localeCompare(`${b.periodKey}:${b.plan}`));
+  }
+
+  return response;
+}
+
 async function validateAndRun(body: TofuApiRequest) {
   const basePayload: TofuRequest = {
     startDate: String(body.startDate || ""),
@@ -215,7 +292,10 @@ async function validateAndRun(body: TofuApiRequest) {
         const precomputed = await readPrecomputedPayload<TofuResponse>(PRECOMPUTED_ENDPOINT_KEY, key).catch(() => null);
         if (precomputed) return precomputed;
       }
-      const built = await generateTofuReport(basePayload);
+      const precomputedFacts = (basePayload.combineMode || "grouped") === "grouped" && isPrecomputedFactsReadEnabled()
+        ? await buildTofuFromPrecomputedFacts(basePayload).catch(() => null)
+        : null;
+      const built = precomputedFacts || await generateTofuReport(basePayload);
       await writePrecomputedPayload({
         endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
         cache_key: key,
@@ -242,6 +322,20 @@ async function validateAndRun(body: TofuApiRequest) {
   const canonical = await getOrSetCache(canonicalKey, CACHE_TTL_MS, async () => {
     const precomputed = await readPrecomputedPayload<TofuResponse>(PRECOMPUTED_ENDPOINT_KEY, canonicalKey).catch(() => null);
     if (precomputed) return precomputed;
+    const precomputedFacts = (canonicalPayload.combineMode || "grouped") === "grouped" && isPrecomputedFactsReadEnabled()
+      ? await buildTofuFromPrecomputedFacts(canonicalPayload).catch(() => null)
+      : null;
+    if (precomputedFacts) {
+      await writePrecomputedPayload({
+        endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+        cache_key: canonicalKey,
+        start_date: canonicalStartDate,
+        end_date: canonicalEndDate,
+        grain: "monthly",
+        payload_json: JSON.stringify(precomputedFacts),
+      }).catch(() => null);
+      return precomputedFacts;
+    }
     const stitched = await buildCanonicalFromChunkRows(canonicalPayload);
     if (stitched) {
       await writePrecomputedPayload({

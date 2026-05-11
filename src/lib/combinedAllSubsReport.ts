@@ -17,6 +17,10 @@ import {
   type StripeThroughMrrCustomerArrResult,
   type StripeThroughMrrCustomerPlanResult,
 } from "@/lib/stripeBigquery";
+import {
+  isPrecomputedFactsReadEnabled,
+  queryPrecomputedCustomerArrCurrent,
+} from "@/lib/precomputedFactsRead";
 import type { ReportResponse, ReportRow } from "@/lib/types";
 
 export type CombinedAllSubsRequest = {
@@ -236,6 +240,177 @@ function parseIsoDateOnly(value: string) {
 
 function toIsoDateOnly(value: Date) {
   return value.toISOString().slice(0, 10);
+}
+
+function periodKeysInRange(startDate: string, endDate: string, grain: CombinedAllSubsPlanGrain) {
+  const start = parseIsoDateOnly(startDate);
+  const end = parseIsoDateOnly(endDate);
+  if (!start || !end || end.getTime() < start.getTime()) return [];
+  const out: string[] = [];
+  if (grain === "daily") {
+    let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+    while (cursor.getTime() <= end.getTime()) {
+      out.push(toIsoDateOnly(cursor));
+      cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), cursor.getUTCDate() + 1));
+    }
+    return out;
+  }
+  let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  const endMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+  while (cursor.getTime() <= endMonth.getTime()) {
+    out.push(toIsoDateOnly(cursor).slice(0, 7));
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+  }
+  return out;
+}
+
+function periodKeyFromFactRowDate(periodDate: string, grain: CombinedAllSubsPlanGrain) {
+  return grain === "daily" ? String(periodDate || "") : String(periodDate || "").slice(0, 7);
+}
+
+function parseCustomerLabelForHubspot(label: string) {
+  const trimmed = String(label || "").trim();
+  const match = /^(.*)\s+\(([^()]+)\)$/.exec(trimmed);
+  if (!match) return { accountName: trimmed, accountId: "" };
+  return {
+    accountName: String(match[1] || "").trim(),
+    accountId: String(match[2] || "").trim(),
+  };
+}
+
+function normalizeFactPlan(value: string): CombinedAllSubsPlan {
+  return normalizeCombinedPlan(value);
+}
+
+async function buildPrecomputedCombinedAllSubsReport(params: {
+  startDate: string;
+  endDate: string;
+  displayMode: CombinedAllSubsDisplayMode;
+  planGrain: CombinedAllSubsPlanGrain;
+  includeSalesAssist: boolean;
+}) {
+  const periodKeys = periodKeysInRange(params.startDate, params.endDate, params.planGrain);
+  if (!periodKeys.length) return null;
+  const periods = periodKeys.map((key) => ({ key, label: key }));
+  const latestPeriodKey = periods[periods.length - 1]?.key || "";
+
+  const factRows = await queryPrecomputedCustomerArrCurrent({
+    startDate: params.startDate,
+    endDate: params.endDate,
+    grain: params.planGrain,
+  });
+  if (!factRows.length) return null;
+
+  const rowsById = new Map<string, CombinedAllSubsRow>();
+  for (const factRow of factRows) {
+    const periodKey = periodKeyFromFactRowDate(factRow.periodDate, params.planGrain);
+    if (!periodKey || !periodKeys.includes(periodKey)) continue;
+
+    const source = factRow.source;
+    const rowId = `${source === "hubspot_account" ? "hubspot" : "stripe"}:${factRow.customerKey}`;
+    let row = rowsById.get(rowId);
+    if (!row) {
+      const hubspotLabel = parseCustomerLabelForHubspot(factRow.customerLabel);
+      row = {
+        id: rowId,
+        source,
+        customerLabel: factRow.customerLabel || factRow.customerKey,
+        accountId: source === "hubspot_account" ? hubspotLabel.accountId : "",
+        accountName: source === "hubspot_account" ? hubspotLabel.accountName : "",
+        salesAssist: "no",
+        salesAssistByPeriod: {},
+        deskEarlyAccessByPeriod: {},
+        stripeKeys: [],
+        matchedStripeKeys: [],
+        hubspotValuesByPeriod: {},
+        stripeValuesByPeriod: {},
+        valuesByPeriod: {},
+        hubspotPlansByPeriod: {},
+        stripePlansByPeriod: {},
+        plansByPeriod: {},
+      };
+      rowsById.set(rowId, row);
+    }
+
+    const effectiveSalesAssist = params.includeSalesAssist && factRow.salesAssist;
+    row.salesAssistByPeriod![periodKey] = effectiveSalesAssist ? "yes" : "no";
+    row.deskEarlyAccessByPeriod![periodKey] = factRow.deskEarlyAccess ? "yes" : "no";
+
+    row.valuesByPeriod[periodKey] = round2(Number(factRow.arrEnd || 0));
+    if (source === "hubspot_account") {
+      row.hubspotValuesByPeriod[periodKey] = round2(Number(factRow.arrEnd || 0));
+      row.stripeValuesByPeriod[periodKey] = row.stripeValuesByPeriod[periodKey] || 0;
+      row.hubspotPlansByPeriod![periodKey] = normalizeFactPlan(factRow.plan);
+      row.stripePlansByPeriod![periodKey] = row.stripePlansByPeriod![periodKey] || "free";
+    } else {
+      row.stripeValuesByPeriod[periodKey] = round2(Number(factRow.arrEnd || 0));
+      row.hubspotValuesByPeriod[periodKey] = row.hubspotValuesByPeriod[periodKey] || 0;
+      row.stripePlansByPeriod![periodKey] = normalizeFactPlan(factRow.plan);
+      row.hubspotPlansByPeriod![periodKey] = row.hubspotPlansByPeriod![periodKey] || "free";
+    }
+    row.plansByPeriod![periodKey] = normalizeFactPlan(factRow.plan);
+  }
+
+  const rows = Array.from(rowsById.values());
+  for (const row of rows) {
+    row.hubspotPlansByPeriod = row.hubspotPlansByPeriod || {};
+    row.stripePlansByPeriod = row.stripePlansByPeriod || {};
+    row.plansByPeriod = row.plansByPeriod || {};
+    row.salesAssistByPeriod = row.salesAssistByPeriod || {};
+    row.deskEarlyAccessByPeriod = row.deskEarlyAccessByPeriod || {};
+
+    for (const period of periods) {
+      row.hubspotValuesByPeriod[period.key] = round2(Number(row.hubspotValuesByPeriod[period.key] || 0));
+      row.stripeValuesByPeriod[period.key] = round2(Number(row.stripeValuesByPeriod[period.key] || 0));
+      row.valuesByPeriod[period.key] = round2(Number(row.valuesByPeriod[period.key] || 0));
+      row.salesAssistByPeriod[period.key] = row.salesAssistByPeriod[period.key] || "no";
+      row.deskEarlyAccessByPeriod[period.key] = row.deskEarlyAccessByPeriod[period.key] || "no";
+    }
+
+    applyNonZeroPaygoFallback(periods, row.hubspotValuesByPeriod, row.hubspotPlansByPeriod);
+    applyNonZeroPaygoFallback(periods, row.stripeValuesByPeriod, row.stripePlansByPeriod);
+    applyNonZeroPaygoFallback(periods, row.valuesByPeriod, row.plansByPeriod);
+    ensurePlanDefaults(periods, row.hubspotPlansByPeriod);
+    ensurePlanDefaults(periods, row.stripePlansByPeriod);
+    ensurePlanDefaults(periods, row.plansByPeriod);
+    row.salesAssist = (latestPeriodKey && row.salesAssistByPeriod[latestPeriodKey]) || "no";
+  }
+
+  const sortedRows = sortRowsForDisplay(periods, rows, params.displayMode);
+  const totalsByPeriod = periods.map((period) => ({
+    key: period.key,
+    label: period.label,
+    total:
+      params.displayMode === "arr"
+        ? round2(sortedRows.reduce((sum, row) => sum + Number(row.valuesByPeriod[period.key] || 0), 0))
+        : sortedRows.reduce(
+            (sum, row) => sum + ((row.plansByPeriod?.[period.key] || "free") === "free" ? 0 : 1),
+            0,
+          ),
+  }));
+
+  const stripeRows = sortedRows.filter((row) => row.source === "stripe_only_customer");
+  return {
+    startDate: params.startDate,
+    endDate: params.endDate,
+    combineMode: "grouped" as const,
+    displayMode: params.displayMode,
+    planGrain: params.planGrain,
+    targetCurrency: String(targetCurrency() || "USD").toUpperCase(),
+    warnings: [],
+    periods,
+    totalsByPeriod,
+    rows: sortedRows,
+    summary: {
+      hubspotAccounts: sortedRows.filter((row) => row.source === "hubspot_account").length,
+      hubspotAccountsWithStripeMatch: sortedRows.filter(
+        (row) => row.source === "hubspot_account" && row.matchedStripeKeys.length > 0,
+      ).length,
+      stripeCustomers: stripeRows.length,
+      stripeCustomersMatched: 0,
+      stripeCustomersOnly: stripeRows.length,
+    },
+  } satisfies CombinedAllSubsResponse;
 }
 
 function accountGroupingKey(rawAccountId: string) {
@@ -974,6 +1149,20 @@ export async function generateCombinedAllSubsReport(
   const groupedMatchStrategy = normalizeGroupedMatchStrategy(request.groupedMatchStrategy);
   const includeSalesAssist = request.includeSalesAssist !== false;
   const target = targetCurrency();
+  if (
+    isPrecomputedFactsReadEnabled() &&
+    combineMode === "grouped" &&
+    groupedMatchStrategy === "full"
+  ) {
+    const fastReport = await buildPrecomputedCombinedAllSubsReport({
+      startDate,
+      endDate,
+      displayMode,
+      planGrain,
+      includeSalesAssist,
+    }).catch(() => null);
+    if (fastReport) return fastReport;
+  }
   const needsPlanRows = displayMode === "plan" || includePlanData;
   const canReusePlanQueryForArr = displayMode === "arr" && includePlanData;
 

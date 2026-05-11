@@ -1,0 +1,147 @@
+import { runBigQuerySqlRows, type StripeBigQueryProfile } from "@/lib/stripeBigquery";
+
+const PROFILE: StripeBigQueryProfile = "stripe_arr_correct";
+const PRECOMPUTED_PROJECT = String(process.env.PRECOMPUTED_TABLES_PROJECT || "botpress-stripe-data-pipeline").trim()
+  || "botpress-stripe-data-pipeline";
+const PRECOMPUTED_DATASET = String(process.env.PRECOMPUTED_TABLES_DATASET || "precomputed_tables").trim()
+  || "precomputed_tables";
+const VIEW_FACT_CUSTOMER_ARR_CURRENT = "vw_fact_customer_arr_periodic_current";
+const VIEW_FACT_TOFU_MONTHLY_CURRENT = "vw_fact_tofu_monthly_current";
+
+export type PrecomputedFactCustomerArrRow = {
+  periodDate: string;
+  grain: "daily" | "monthly";
+  customerKey: string;
+  customerLabel: string;
+  source: "hubspot_account" | "stripe_only_customer";
+  segment: string;
+  plan: string;
+  salesAssist: boolean;
+  deskEarlyAccess: boolean;
+  arrEnd: number;
+  mrrEnd: number;
+};
+
+export type PrecomputedFactTofuMonthlyRow = {
+  monthKey: string;
+  periodDate: string;
+  groupType: "overall" | "segment" | "plan";
+  groupValue: string;
+  beginningArr: number;
+  newArr: number;
+  expansionArr: number;
+  contractionArr: number;
+  churnArr: number;
+  netPlanChangeArr: number;
+  endingArr: number;
+};
+
+export function isPrecomputedFactsReadEnabled() {
+  return String(process.env.PRECOMPUTED_FACTS_READ_ENABLED || "true").trim().toLowerCase() !== "false";
+}
+
+function viewRef(viewName: string) {
+  return `\`${PRECOMPUTED_PROJECT}.${PRECOMPUTED_DATASET}.${viewName}\``;
+}
+
+function toNum(value: unknown) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function toBool(value: unknown) {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes";
+}
+
+export async function queryPrecomputedCustomerArrCurrent(params: {
+  startDate: string;
+  endDate: string;
+  grain: "daily" | "monthly";
+}) {
+  const rows = await runBigQuerySqlRows(
+    `
+SELECT
+  period_date,
+  grain,
+  customer_key,
+  customer_label,
+  source,
+  segment,
+  plan,
+  sales_assist,
+  desk_early_access,
+  arr_end,
+  mrr_end
+FROM ${viewRef(VIEW_FACT_CUSTOMER_ARR_CURRENT)}
+WHERE grain = @grain
+  AND period_date BETWEEN DATE(@start_date) AND DATE(@end_date)
+ORDER BY customer_key, period_date
+`,
+    [
+      { name: "grain", type: "STRING", value: params.grain },
+      { name: "start_date", type: "STRING", value: params.startDate },
+      { name: "end_date", type: "STRING", value: params.endDate },
+    ],
+    { profile: PROFILE },
+  );
+
+  return rows.map((row) => ({
+    periodDate: String(row.period_date || ""),
+    grain: String(row.grain || "monthly").trim().toLowerCase() === "daily" ? "daily" : "monthly",
+    customerKey: String(row.customer_key || ""),
+    customerLabel: String(row.customer_label || ""),
+    source: String(row.source || "") === "hubspot_account" ? "hubspot_account" : "stripe_only_customer",
+    segment: String(row.segment || ""),
+    plan: String(row.plan || ""),
+    salesAssist: toBool(row.sales_assist),
+    deskEarlyAccess: toBool(row.desk_early_access),
+    arrEnd: toNum(row.arr_end),
+    mrrEnd: toNum(row.mrr_end),
+  })) satisfies PrecomputedFactCustomerArrRow[];
+}
+
+export async function queryPrecomputedTofuMonthlyCurrent(params: {
+  startDate: string;
+  endDate: string;
+}) {
+  const rows = await runBigQuerySqlRows(
+    `
+SELECT
+  month_key,
+  period_date,
+  group_type,
+  group_value,
+  beginning_arr,
+  new_arr,
+  expansion_arr,
+  contraction_arr,
+  churn_arr,
+  net_plan_change_arr,
+  ending_arr
+FROM ${viewRef(VIEW_FACT_TOFU_MONTHLY_CURRENT)}
+WHERE period_date BETWEEN DATE_TRUNC(DATE(@start_date), MONTH) AND DATE_TRUNC(DATE(@end_date), MONTH)
+ORDER BY period_date, group_type, group_value
+`,
+    [
+      { name: "start_date", type: "STRING", value: params.startDate },
+      { name: "end_date", type: "STRING", value: params.endDate },
+    ],
+    { profile: PROFILE },
+  );
+
+  return rows.map((row) => ({
+    monthKey: String(row.month_key || ""),
+    periodDate: String(row.period_date || ""),
+    groupType: String(row.group_type || "overall").trim().toLowerCase() as "overall" | "segment" | "plan",
+    groupValue: String(row.group_value || ""),
+    beginningArr: toNum(row.beginning_arr),
+    newArr: toNum(row.new_arr),
+    expansionArr: toNum(row.expansion_arr),
+    contractionArr: toNum(row.contraction_arr),
+    churnArr: toNum(row.churn_arr),
+    netPlanChangeArr: toNum(row.net_plan_change_arr),
+    endingArr: toNum(row.ending_arr),
+  })) satisfies PrecomputedFactTofuMonthlyRow[];
+}

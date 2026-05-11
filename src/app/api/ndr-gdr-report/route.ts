@@ -8,6 +8,7 @@ import {
 } from "@/lib/combinedAllSubsReport";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
 import { readPrecomputedPayload, writePrecomputedPayload } from "@/lib/precomputedPayloadStore";
+import { isPrecomputedFactsReadEnabled, queryPrecomputedCustomerArrCurrent } from "@/lib/precomputedFactsRead";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -44,6 +45,18 @@ type MatrixSegment = {
   cohorts: CohortRow[];
 };
 
+type NdrGdrResponse = {
+  startDate: string;
+  endDate: string;
+  combineMode: CombinedAllSubsCombineMode;
+  groupBy: MatrixGroupBy;
+  targetCurrency: string;
+  warnings: string[];
+  periods: Array<{ key: string; label: string }>;
+  cohorts: CohortRow[];
+  segments: MatrixSegment[];
+};
+
 const PLAN_ORDER: CombinedAllSubsPlan[] = [
   "enterprise",
   "managed",
@@ -66,8 +79,6 @@ const SOURCE_LABELS: Record<CombinedAllSubsRow["source"], string> = {
   hubspot_account: "Sales-led",
   stripe_only_customer: "Self-serve",
 };
-
-type NdrGdrResponse = Awaited<ReturnType<typeof buildNdrGdrReport>>;
 
 function isIsoDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -142,6 +153,113 @@ function sliceNdrGdrResponse(report: NdrGdrResponse, startDate: string, endDate:
 
 function planForPeriod(row: CombinedAllSubsRow, periodKey: string): CombinedAllSubsPlan {
   return normalizePlan(row.plansByPeriod?.[periodKey] || "free");
+}
+
+function monthKeysBetween(startDate: string, endDate: string) {
+  const start = new Date(`${startDate}T00:00:00.000Z`);
+  const end = new Date(`${endDate}T00:00:00.000Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end.getTime() < start.getTime()) return [];
+  const keys: string[] = [];
+  let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  const endMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+  while (cursor.getTime() <= endMonth.getTime()) {
+    keys.push(cursor.toISOString().slice(0, 7));
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+  }
+  return keys;
+}
+
+async function buildNdrGdrFromPrecomputedFacts(payload: {
+  startDate: string;
+  endDate: string;
+  groupBy: MatrixGroupBy;
+}): Promise<NdrGdrResponse | null> {
+  const monthKeys = monthKeysBetween(payload.startDate, payload.endDate);
+  if (!monthKeys.length) return null;
+  const periods = monthKeys.map((key) => ({ key, label: key }));
+  const rows = await queryPrecomputedCustomerArrCurrent({
+    startDate: payload.startDate,
+    endDate: payload.endDate,
+    grain: "monthly",
+  });
+  if (!rows.length) return null;
+
+  const byCustomer = new Map<string, CombinedAllSubsRow>();
+  for (const factRow of rows) {
+    const periodKey = String(factRow.periodDate || "").slice(0, 7);
+    if (!monthKeys.includes(periodKey)) continue;
+    const rowId = `${factRow.source}:${factRow.customerKey}`;
+    let row = byCustomer.get(rowId);
+    if (!row) {
+      row = {
+        id: rowId,
+        source: factRow.source,
+        customerLabel: factRow.customerLabel || factRow.customerKey,
+        accountId: "",
+        accountName: "",
+        salesAssist: "no",
+        stripeKeys: [],
+        matchedStripeKeys: [],
+        hubspotValuesByPeriod: {},
+        stripeValuesByPeriod: {},
+        valuesByPeriod: {},
+        plansByPeriod: {},
+      };
+      byCustomer.set(rowId, row);
+    }
+    row.valuesByPeriod[periodKey] = round2(Number(factRow.arrEnd || 0));
+    if (factRow.source === "hubspot_account") {
+      row.hubspotValuesByPeriod[periodKey] = round2(Number(factRow.arrEnd || 0));
+      row.stripeValuesByPeriod[periodKey] = row.stripeValuesByPeriod[periodKey] || 0;
+    } else {
+      row.stripeValuesByPeriod[periodKey] = round2(Number(factRow.arrEnd || 0));
+      row.hubspotValuesByPeriod[periodKey] = row.hubspotValuesByPeriod[periodKey] || 0;
+    }
+    row.plansByPeriod![periodKey] = normalizePlan(factRow.plan);
+  }
+
+  const normalizedRows = Array.from(byCustomer.values());
+  for (const row of normalizedRows) {
+    row.plansByPeriod = row.plansByPeriod || {};
+    for (const monthKey of monthKeys) {
+      row.valuesByPeriod[monthKey] = round2(Number(row.valuesByPeriod[monthKey] || 0));
+      row.hubspotValuesByPeriod[monthKey] = round2(Number(row.hubspotValuesByPeriod[monthKey] || 0));
+      row.stripeValuesByPeriod[monthKey] = round2(Number(row.stripeValuesByPeriod[monthKey] || 0));
+      row.plansByPeriod[monthKey] = row.plansByPeriod[monthKey] || "free";
+    }
+  }
+
+  const segments: MatrixSegment[] =
+    payload.groupBy === "source"
+      ? (["hubspot_account", "stripe_only_customer"] as const).map((source) => ({
+          segmentKey: source === "hubspot_account" ? "salesled" : "selfserve",
+          segmentLabel: SOURCE_LABELS[source],
+          cohorts: buildCohorts(
+            periods,
+            normalizedRows.filter((row) => row.source === source),
+          ),
+        }))
+      : payload.groupBy === "plan"
+        ? buildPlanSegmentsFast(periods, normalizedRows)
+        : [
+            {
+              segmentKey: "overall",
+              segmentLabel: "Overall",
+              cohorts: buildCohorts(periods, normalizedRows),
+            },
+          ];
+
+  return {
+    startDate: payload.startDate,
+    endDate: payload.endDate,
+    combineMode: "grouped" as const,
+    groupBy: payload.groupBy,
+    targetCurrency: "USD",
+    warnings: [],
+    periods,
+    cohorts: segments[0]?.cohorts || [],
+    segments,
+  } satisfies NdrGdrResponse;
 }
 
 function buildCohorts(
@@ -309,7 +427,11 @@ async function buildNdrGdrReport(payload: {
   endDate: string;
   combineMode: CombinedAllSubsCombineMode;
   groupBy: MatrixGroupBy;
-}) {
+}): Promise<NdrGdrResponse> {
+  if (payload.combineMode === "grouped" && isPrecomputedFactsReadEnabled()) {
+    const precomputed = await buildNdrGdrFromPrecomputedFacts(payload).catch(() => null);
+    if (precomputed) return precomputed;
+  }
   const combinedRequest: CombinedAllSubsRequest = {
     startDate: payload.startDate,
     endDate: payload.endDate,
