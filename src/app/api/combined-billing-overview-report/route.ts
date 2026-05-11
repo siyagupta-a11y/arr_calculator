@@ -34,6 +34,7 @@ import {
 } from "@/lib/fx";
 import { FX_TARGET_CURRENCY, parseDate } from "@/lib/logic";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
+import { isPrecomputedFactsReadEnabled } from "@/lib/precomputedFactsRead";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -1243,6 +1244,128 @@ function buildSourcePointsFromCombinedAllSubsReport(
   return bySegment;
 }
 
+function buildCombinedPointsFromSourcePoints(
+  periodOrder: PeriodRef[],
+  grain: CombinedGrain,
+  salesledPoints: CombinedPoint[],
+  selfservePoints: CombinedPoint[],
+) {
+  const points: CombinedPoint[] = [];
+  const initialPrevCombinedMrr = round2(
+    (Number(salesledPoints[0]?.mrrEnd || 0) - Number(salesledPoints[0]?.netMrrChange || 0))
+    + (Number(selfservePoints[0]?.mrrEnd || 0) - Number(selfservePoints[0]?.netMrrChange || 0)),
+  );
+
+  for (let idx = 0; idx < periodOrder.length; idx += 1) {
+    const salesled = salesledPoints[idx];
+    const selfserve = selfservePoints[idx];
+    const prevMrr = idx === 0 ? initialPrevCombinedMrr : Number(points[idx - 1]?.mrrEnd || 0);
+    const mrrEnd = round2(Number(salesled?.mrrEnd || 0) + Number(selfserve?.mrrEnd || 0));
+    const newMrr = round2(Number(salesled?.newMrr || 0) + Number(selfserve?.newMrr || 0));
+    const expansionMrr = round2(Number(salesled?.expansionMrr || 0) + Number(selfserve?.expansionMrr || 0));
+    const contractionMrr = round2(Number(salesled?.contractionMrr || 0) + Number(selfserve?.contractionMrr || 0));
+    const churnMrr = round2(Number(salesled?.churnMrr || 0) + Number(selfserve?.churnMrr || 0));
+    const netMrrChange = round2(newMrr + expansionMrr + contractionMrr + churnMrr);
+    const mrrGrowthRatePct =
+      Math.abs(prevMrr) > 1e-9
+        ? round2(((mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
+        : 0;
+    const retention = calculateRetentionRates(prevMrr, expansionMrr, contractionMrr, churnMrr);
+    const arr = round2(mrrEnd * 12);
+    const arrGrowth = round2(arr - prevMrr * 12);
+    const key = canonicalHubPeriodKey(periodOrder[idx]?.key || "", grain) || String(periodOrder[idx]?.key || "");
+    const label = String(periodOrder[idx]?.label || key);
+    const periodStart = periodStartIsoFromCanonicalKey(key, grain);
+    const periodEnd = periodEndIsoFromKey(key, grain) || periodStart;
+    points.push({
+      key,
+      label,
+      periodStart,
+      periodEnd,
+      mrrEnd,
+      newMrr,
+      expansionMrr,
+      contractionMrr,
+      churnMrr,
+      netMrrChange,
+      mrrGrowthRatePct,
+      ndrPct: retention.ndrPct,
+      gdrPct: retention.gdrPct,
+      arr,
+      arrGrowth,
+    });
+  }
+  return { points, initialPrevCombinedMrr };
+}
+
+function buildCoreSeriesFromCombinedAllSubs(
+  periodOrder: PeriodRef[],
+  grain: CombinedGrain,
+  previousRange: { startDate: string; endDate: string },
+  report: CombinedAllSubsResponse,
+) {
+  const sourceSplit = buildSourcePointsFromCombinedAllSubsReport(periodOrder, grain, previousRange, report);
+  const salesledSourcePoints = sourceSplit.salesled;
+  const selfserveSourcePoints = sourceSplit.selfserve;
+  const combinedBuilt = buildCombinedPointsFromSourcePoints(periodOrder, grain, salesledSourcePoints, selfserveSourcePoints);
+
+  const availablePeriodKeys = new Set(
+    (report.periods || []).map((period) => String(period.key || "").trim()).filter(Boolean),
+  );
+  const periodRefs = periodOrder.map((period) => {
+    const canonical = canonicalHubPeriodKey(period.key, grain) || period.key;
+    const reportKey = resolveCombinedAllSubsPeriodKey(canonical, grain, availablePeriodKeys);
+    return { canonicalKey: canonical, reportKey, sourceKey: period.key };
+  });
+  const previousCanonicalKey = periodKeyFromIsoDateForGrain(previousRange.endDate, grain);
+  const previousReportKey = resolveCombinedAllSubsPeriodKey(previousCanonicalKey, grain, availablePeriodKeys);
+
+  const accountArrByPeriod = new Map<string, Record<string, number>>();
+  const baselineAccountArrByAccount = new Map<string, number>();
+  const stripeArrByCustomer = new Map<string, Map<string, number>>();
+  const stripeBaselineArrByCustomer = new Map<string, number>();
+
+  for (const row of report.rows || []) {
+    if (row.source === "hubspot_account") {
+      const accountKey = accountGroupingKey({ accountId: String(row.accountId || "") });
+      if (accountKey) {
+        if (!accountArrByPeriod.has(accountKey)) accountArrByPeriod.set(accountKey, {});
+        const bucket = accountArrByPeriod.get(accountKey)!;
+        for (const periodRef of periodRefs) {
+          if (!periodRef.reportKey) continue;
+          bucket[periodRef.sourceKey] = round2(Number(row.valuesByPeriod?.[periodRef.reportKey] || 0));
+        }
+        const baseline = round2(Number(row.valuesByPeriod?.[previousReportKey] || 0));
+        if (Math.abs(baseline) > 1e-9) baselineAccountArrByAccount.set(accountKey, baseline);
+      }
+      continue;
+    }
+
+    const customerId = String(row.id || row.customerLabel || "").trim();
+    if (!customerId) continue;
+    if (!stripeArrByCustomer.has(customerId)) stripeArrByCustomer.set(customerId, new Map<string, number>());
+    const valuesByPeriod = stripeArrByCustomer.get(customerId)!;
+    for (const periodRef of periodRefs) {
+      if (!periodRef.reportKey) continue;
+      const value = round2(Number(row.valuesByPeriod?.[periodRef.reportKey] || 0));
+      valuesByPeriod.set(periodRef.canonicalKey, value);
+    }
+    const baseline = round2(Number(row.valuesByPeriod?.[previousReportKey] || 0));
+    if (Math.abs(baseline) > 1e-9) stripeBaselineArrByCustomer.set(customerId, baseline);
+  }
+
+  return {
+    points: combinedBuilt.points,
+    initialPrevCombinedMrr: combinedBuilt.initialPrevCombinedMrr,
+    salesledSourcePoints,
+    selfserveSourcePoints,
+    accountArrByPeriod,
+    baselineAccountArrByAccount,
+    stripeArrByCustomer,
+    stripeBaselineArrByCustomer,
+  };
+}
+
 function mergeCombinedAndAiSeries(
   combinedPoints: CombinedPoint[],
   aiPoints: CombinedPoint[],
@@ -1997,49 +2120,253 @@ async function buildCombinedBillingOverview(
       })()
     : Promise.resolve(new Map<string, number>());
 
-  const stripeMainPromise = cachedQueryStripeBillingOverview({
-    startDate,
-    endDate,
-    grain,
-    groupBy: "none",
-    targetCurrency,
-    includeCustomerArrRows: includeCac || shouldComputeLtv,
-    includeCurrentMonthProjection: false,
-  });
-  const hubspotExpandedPromise = cachedGenerateHubspotReport({
-    startDate: previousRange.startDate,
-    endDate,
-    mode: "contracted",
-    grain,
-  });
-  const stripeBaselinePromise: Promise<Awaited<ReturnType<typeof queryStripeBillingOverviewFromBigQuery>> | null> = includeCac || shouldComputeLtv
-    ? cachedQueryStripeBillingOverview(
-        {
-          startDate: previousRange.startDate,
-          endDate: previousRange.endDate,
-          grain,
-          groupBy: "none",
-          targetCurrency,
-          includeCustomerArrRows: includeCac || shouldComputeLtv,
-          includeCurrentMonthProjection: false,
-        },
-      ).catch(() => null)
-    : Promise.resolve(null);
-  const [hubspotExpanded, stripeMain, stripeBaseline] = await Promise.all([
-    hubspotExpandedPromise,
-    stripeMainPromise,
-    stripeBaselinePromise,
-  ]);
+  let periodOrder: PeriodRef[] = [];
+  let points: CombinedPoint[] = [];
+  let salesledSourcePoints: CombinedPoint[] = [];
+  let selfserveSourcePoints: CombinedPoint[] = [];
+  let initialPrevCombinedMrr = 0;
+  let accountArrByPeriod = new Map<string, Record<string, number>>();
+  let baselineAccountArrByAccount = new Map<string, number>();
+  let stripeArrByCustomer = new Map<string, Map<string, number>>();
+  let stripeBaselineArrByCustomer = new Map<string, number>();
+  const usePrecomputedCore = isPrecomputedFactsReadEnabled() && grain !== "quarterly";
+  let resolvedTargetCurrency = String(targetCurrency || "USD").toUpperCase();
 
-  const hubspotMainKeys = buildPeriodKeySetForRange(startDate, endDate, grain);
-  const hubspotBaselineKeys = buildPeriodKeySetForRange(previousRange.startDate, previousRange.endDate, grain);
-  const hubspotMain = sliceReportByPeriodKeys(hubspotExpanded, hubspotMainKeys);
-  const hubspotBaseline = sliceReportByPeriodKeys(hubspotExpanded, hubspotBaselineKeys);
+  if (usePrecomputedCore) {
+    const sourceCombinedAllSubs = await sourceCombinedAllSubsPromise;
+    const requestedKeys = buildPeriodKeySetForRange(startDate, endDate, grain);
+    periodOrder = (sourceCombinedAllSubs.periods || [])
+      .map((period) => ({
+        key: String(period.key || ""),
+        label: String(period.label || period.key || ""),
+      }))
+      .filter((period) => requestedKeys.has(canonicalHubPeriodKey(period.key, grain)));
 
-  const periodOrder: PeriodRef[] = (hubspotMain.periods || []).map((period) => ({
-    key: String(period.key || ""),
-    label: String(period.label || period.key || ""),
-  }));
+    const core = buildCoreSeriesFromCombinedAllSubs(periodOrder, grain, previousRange, sourceCombinedAllSubs);
+    points = core.points;
+    initialPrevCombinedMrr = core.initialPrevCombinedMrr;
+    salesledSourcePoints = core.salesledSourcePoints;
+    selfserveSourcePoints = core.selfserveSourcePoints;
+    accountArrByPeriod = core.accountArrByPeriod;
+    baselineAccountArrByAccount = core.baselineAccountArrByAccount;
+    stripeArrByCustomer = core.stripeArrByCustomer;
+    stripeBaselineArrByCustomer = core.stripeBaselineArrByCustomer;
+  } else {
+    const stripeMainPromise = cachedQueryStripeBillingOverview({
+      startDate,
+      endDate,
+      grain,
+      groupBy: "none",
+      targetCurrency,
+      includeCustomerArrRows: includeCac || shouldComputeLtv,
+      includeCurrentMonthProjection: false,
+    });
+    const hubspotExpandedPromise = cachedGenerateHubspotReport({
+      startDate: previousRange.startDate,
+      endDate,
+      mode: "contracted",
+      grain,
+    });
+    const stripeBaselinePromise: Promise<Awaited<ReturnType<typeof queryStripeBillingOverviewFromBigQuery>> | null> = includeCac || shouldComputeLtv
+      ? cachedQueryStripeBillingOverview(
+          {
+            startDate: previousRange.startDate,
+            endDate: previousRange.endDate,
+            grain,
+            groupBy: "none",
+            targetCurrency,
+            includeCustomerArrRows: includeCac || shouldComputeLtv,
+            includeCurrentMonthProjection: false,
+          },
+        ).catch(() => null)
+      : Promise.resolve(null);
+    const [hubspotExpanded, stripeMain, stripeBaseline] = await Promise.all([
+      hubspotExpandedPromise,
+      stripeMainPromise,
+      stripeBaselinePromise,
+    ]);
+
+    resolvedTargetCurrency = String(stripeMain.targetCurrency || targetCurrency || "USD").toUpperCase();
+    const hubspotMainKeys = buildPeriodKeySetForRange(startDate, endDate, grain);
+    const hubspotBaselineKeys = buildPeriodKeySetForRange(previousRange.startDate, previousRange.endDate, grain);
+    const hubspotMain = sliceReportByPeriodKeys(hubspotExpanded, hubspotMainKeys);
+    const hubspotBaseline = sliceReportByPeriodKeys(hubspotExpanded, hubspotBaselineKeys);
+    periodOrder = (hubspotMain.periods || []).map((period) => ({
+      key: String(period.key || ""),
+      label: String(period.label || period.key || ""),
+    }));
+
+    const mapHubRows = (report: ReportResponse): Array<{ accountId: string; deploymentType: string; valuesByPeriod: Record<string, number> }> =>
+      (report.rows || []).map((row: ReportRow) => ({
+        accountId: String(row.accountId || ""),
+        deploymentType: String(row.deploymentType || ""),
+        valuesByPeriod: row.valuesByPeriod || {},
+      }));
+
+    const filteredHubRows = mapHubRows(hubspotMain)
+      .filter((row) => isCloudDeploymentType(row.deploymentType))
+      .filter((row) => hasAnyNonZeroValue(row.valuesByPeriod));
+    const filteredBaselineRows = mapHubRows(hubspotBaseline)
+      .filter((row) => isCloudDeploymentType(row.deploymentType))
+      .filter((row) => hasAnyNonZeroValue(row.valuesByPeriod));
+
+    accountArrByPeriod = new Map<string, Record<string, number>>();
+    for (const row of filteredHubRows) {
+      const accountKey = accountGroupingKey(row);
+      if (!accountKey) continue;
+      addAccountPeriodValues(accountArrByPeriod, accountKey, row.valuesByPeriod, periodOrder);
+    }
+
+    baselineAccountArrByAccount = new Map<string, number>();
+    const baselinePeriodKeys = (hubspotBaseline.periods || []).map((period) => period.key);
+    for (const row of filteredBaselineRows) {
+      const accountKey = accountGroupingKey(row);
+      if (!accountKey) continue;
+      const rowBaselineArr = round2(
+        baselinePeriodKeys.reduce((acc, periodKey) => acc + (row.valuesByPeriod[periodKey] || 0), 0),
+      );
+      if (Math.abs(rowBaselineArr) < 1e-9) continue;
+      baselineAccountArrByAccount.set(
+        accountKey,
+        round2((baselineAccountArrByAccount.get(accountKey) || 0) + rowBaselineArr),
+      );
+    }
+
+    const hubPoints = buildHubPointsFromAccounts(periodOrder, accountArrByPeriod, baselineAccountArrByAccount);
+    const hubPointMap = new Map<string, CombinedPoint>();
+    periodOrder.forEach((period, idx) => {
+      hubPointMap.set(canonicalHubPeriodKey(period.key, grain), hubPoints[idx]);
+    });
+
+    const hasStripeExactSeries =
+      stripeMain.stripeExactPoints !== undefined || stripeMain.stripeExactHistoryPoints !== undefined;
+    const stripePoints = hasStripeExactSeries ? stripeMain.stripeExactPoints || [] : stripeMain.points || [];
+    const stripeHistoryPoints = hasStripeExactSeries
+      ? stripeMain.stripeExactHistoryPoints || []
+      : stripeMain.historyPoints || [];
+
+    const stripePointMap = new Map<string, StripeBillingOverviewPoint>();
+    for (const point of stripePoints) {
+      stripePointMap.set(canonicalStripePeriodKey(point, grain), point);
+    }
+
+    const stripePrevMrr =
+      stripeHistoryPoints.length > 0
+        ? stripeHistoryPoints[stripeHistoryPoints.length - 1].mrrEnd
+        : stripePoints.length > 0
+          ? round2(stripePoints[0].mrrEnd - stripePoints[0].netMrrChange)
+          : 0;
+    const hubBaselineArr = round2(
+      Array.from(baselineAccountArrByAccount.values()).reduce((acc, value) => acc + value, 0),
+    );
+    const hubPrevMrr = round2(hubBaselineArr / 12);
+    initialPrevCombinedMrr = round2(stripePrevMrr + hubPrevMrr);
+
+    const rawSelfserve: CombinedPoint[] = periodOrder.map((period) => {
+      const canonical = canonicalHubPeriodKey(period.key, grain);
+      const stripePoint = stripePointMap.get(canonical);
+      const stripeNewWithReactivation = round2((stripePoint?.newMrr || 0) + (stripePoint?.reactivationMrr || 0));
+
+      const stripeFallbackStart =
+        grain === "daily"
+          ? period.key
+          : grain === "monthly"
+            ? `${period.key}-01`
+            : stripePoint?.periodStart || period.key;
+
+      return {
+        key: canonical || period.key,
+        label: period.label,
+        periodStart: stripePoint?.periodStart || stripeFallbackStart,
+        periodEnd: stripePoint?.periodEnd || stripeFallbackStart,
+        mrrEnd: round2(stripePoint?.mrrEnd || 0),
+        newMrr: stripeNewWithReactivation,
+        expansionMrr: round2(stripePoint?.expansionMrr || 0),
+        contractionMrr: round2(stripePoint?.contractionMrr || 0),
+        churnMrr: round2(stripePoint?.churnMrr || 0),
+        netMrrChange: round2(stripePoint?.netMrrChange || 0),
+        mrrGrowthRatePct: 0,
+        ndrPct: 0,
+        gdrPct: 0,
+        arr: round2(stripePoint?.arr || 0),
+        arrGrowth: round2(stripePoint?.arrGrowth || 0),
+      };
+    });
+
+    const selfservePointsRaw = rawSelfserve.map((point, idx) => {
+      const prevMrr = idx === 0 ? stripePrevMrr : rawSelfserve[idx - 1].mrrEnd;
+      const mrrGrowthRatePct =
+        Math.abs(prevMrr) > 1e-9
+          ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
+          : 0;
+      const retention = calculateRetentionRates(prevMrr, point.expansionMrr, point.contractionMrr, point.churnMrr);
+      return { ...point, mrrGrowthRatePct, ndrPct: retention.ndrPct, gdrPct: retention.gdrPct };
+    });
+
+    const rawCombined: CombinedPoint[] = periodOrder.map((period) => {
+      const canonical = canonicalHubPeriodKey(period.key, grain);
+      const hub = hubPointMap.get(canonical);
+      const stripePoint = stripePointMap.get(canonical);
+      const stripeNewWithReactivation = round2((stripePoint?.newMrr || 0) + (stripePoint?.reactivationMrr || 0));
+
+      const stripeFallbackStart =
+        grain === "daily"
+          ? period.key
+          : grain === "monthly"
+            ? `${period.key}-01`
+            : stripePoint?.periodStart || period.key;
+
+      return {
+        key: canonical || period.key,
+        label: period.label,
+        periodStart: stripePoint?.periodStart || hub?.periodStart || stripeFallbackStart,
+        periodEnd: stripePoint?.periodEnd || hub?.periodEnd || stripeFallbackStart,
+        mrrEnd: round2((hub?.mrrEnd || 0) + (stripePoint?.mrrEnd || 0)),
+        newMrr: round2((hub?.newMrr || 0) + stripeNewWithReactivation),
+        expansionMrr: round2((hub?.expansionMrr || 0) + (stripePoint?.expansionMrr || 0)),
+        contractionMrr: round2((hub?.contractionMrr || 0) + (stripePoint?.contractionMrr || 0)),
+        churnMrr: round2((hub?.churnMrr || 0) + (stripePoint?.churnMrr || 0)),
+        netMrrChange: round2((hub?.netMrrChange || 0) + (stripePoint?.netMrrChange || 0)),
+        mrrGrowthRatePct: 0,
+        ndrPct: 0,
+        gdrPct: 0,
+        arr: round2((hub?.arr || 0) + (stripePoint?.arr || 0)),
+        arrGrowth: round2((hub?.arrGrowth || 0) + (stripePoint?.arrGrowth || 0)),
+      };
+    });
+
+    points = rawCombined.map((point, idx) => {
+      const prevMrr = idx === 0 ? initialPrevCombinedMrr : rawCombined[idx - 1].mrrEnd;
+      const mrrGrowthRatePct =
+        Math.abs(prevMrr) > 1e-9
+          ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
+          : 0;
+      const retention = calculateRetentionRates(prevMrr, point.expansionMrr, point.contractionMrr, point.churnMrr);
+      return { ...point, mrrGrowthRatePct, ndrPct: retention.ndrPct, gdrPct: retention.gdrPct };
+    });
+    selfserveSourcePoints = selfservePointsRaw;
+    salesledSourcePoints = hubPoints;
+
+    stripeArrByCustomer = new Map<string, Map<string, number>>();
+    for (const row of stripeMain.customerArrRows || []) {
+      const customerId = String(row.customerId || "").trim();
+      const key = canonicalStripeCustomerPeriodKey(row, grain);
+      if (!customerId || !key) continue;
+      if (!stripeArrByCustomer.has(customerId)) stripeArrByCustomer.set(customerId, new Map<string, number>());
+      const valuesByPeriod = stripeArrByCustomer.get(customerId)!;
+      valuesByPeriod.set(key, round2((valuesByPeriod.get(key) || 0) + Number(row.arr || 0)));
+    }
+    stripeBaselineArrByCustomer = new Map<string, number>();
+    for (const row of stripeBaseline?.customerArrRows || []) {
+      const customerId = String(row.customerId || "").trim();
+      if (!customerId) continue;
+      stripeBaselineArrByCustomer.set(
+        customerId,
+        round2((stripeBaselineArrByCustomer.get(customerId) || 0) + Number(row.arr || 0)),
+      );
+    }
+  }
+
   const salesCyclePromise: Promise<{ points: SalesCyclePoint[]; notice: string | null }> =
     grain !== "monthly"
       ? Promise.resolve({
@@ -2049,14 +2376,14 @@ async function buildCombinedBillingOverview(
         })
       : (async () => {
           try {
-            const points = await buildMonthlySalesCycleSeries(periodOrder, process.env.INCLUDED_DEALSTAGE || "");
-            if (!points.some((point) => point.closedWonDealCount > 0)) {
+            const pointsResult = await buildMonthlySalesCycleSeries(periodOrder, process.env.INCLUDED_DEALSTAGE || "");
+            if (!pointsResult.some((point) => point.closedWonDealCount > 0)) {
               return {
-                points,
+                points: pointsResult,
                 notice: "No closed-won HubSpot deals were found in this range.",
               };
             }
-            return { points, notice: null };
+            return { points: pointsResult, notice: null };
           } catch (error: unknown) {
             return {
               points: [],
@@ -2064,155 +2391,6 @@ async function buildCombinedBillingOverview(
             };
           }
         })();
-
-  const mapHubRows = (report: ReportResponse): Array<{ accountId: string; deploymentType: string; valuesByPeriod: Record<string, number> }> =>
-    (report.rows || []).map((row: ReportRow) => ({
-      accountId: String(row.accountId || ""),
-      deploymentType: String(row.deploymentType || ""),
-      valuesByPeriod: row.valuesByPeriod || {},
-    }));
-
-  const filteredHubRows = mapHubRows(hubspotMain)
-    .filter((row) => isCloudDeploymentType(row.deploymentType))
-    .filter((row) => hasAnyNonZeroValue(row.valuesByPeriod));
-  const filteredBaselineRows = mapHubRows(hubspotBaseline)
-    .filter((row) => isCloudDeploymentType(row.deploymentType))
-    .filter((row) => hasAnyNonZeroValue(row.valuesByPeriod));
-
-  const accountArrByPeriod = new Map<string, Record<string, number>>();
-  for (const row of filteredHubRows) {
-    const accountKey = accountGroupingKey(row);
-    if (!accountKey) continue;
-    addAccountPeriodValues(accountArrByPeriod, accountKey, row.valuesByPeriod, periodOrder);
-  }
-
-  const baselineAccountArrByAccount = new Map<string, number>();
-  const baselinePeriodKeys = (hubspotBaseline.periods || []).map((period) => period.key);
-  for (const row of filteredBaselineRows) {
-    const accountKey = accountGroupingKey(row);
-    if (!accountKey) continue;
-    const rowBaselineArr = round2(
-      baselinePeriodKeys.reduce((acc, periodKey) => acc + (row.valuesByPeriod[periodKey] || 0), 0),
-    );
-    if (Math.abs(rowBaselineArr) < 1e-9) continue;
-    baselineAccountArrByAccount.set(
-      accountKey,
-      round2((baselineAccountArrByAccount.get(accountKey) || 0) + rowBaselineArr),
-    );
-  }
-
-  const hubPoints = buildHubPointsFromAccounts(periodOrder, accountArrByPeriod, baselineAccountArrByAccount);
-  const hubPointMap = new Map<string, CombinedPoint>();
-  periodOrder.forEach((period, idx) => {
-    hubPointMap.set(canonicalHubPeriodKey(period.key, grain), hubPoints[idx]);
-  });
-
-  const hasStripeExactSeries =
-    stripeMain.stripeExactPoints !== undefined || stripeMain.stripeExactHistoryPoints !== undefined;
-  const stripePoints = hasStripeExactSeries ? stripeMain.stripeExactPoints || [] : stripeMain.points || [];
-  const stripeHistoryPoints = hasStripeExactSeries
-    ? stripeMain.stripeExactHistoryPoints || []
-    : stripeMain.historyPoints || [];
-
-  const stripePointMap = new Map<string, StripeBillingOverviewPoint>();
-  for (const point of stripePoints) {
-    stripePointMap.set(canonicalStripePeriodKey(point, grain), point);
-  }
-
-  const stripePrevMrr =
-    stripeHistoryPoints.length > 0
-      ? stripeHistoryPoints[stripeHistoryPoints.length - 1].mrrEnd
-      : stripePoints.length > 0
-        ? round2(stripePoints[0].mrrEnd - stripePoints[0].netMrrChange)
-        : 0;
-  const hubBaselineArr = round2(
-    Array.from(baselineAccountArrByAccount.values()).reduce((acc, value) => acc + value, 0),
-  );
-  const hubPrevMrr = round2(hubBaselineArr / 12);
-  const initialPrevCombinedMrr = round2(stripePrevMrr + hubPrevMrr);
-
-  const rawSelfserve: CombinedPoint[] = periodOrder.map((period) => {
-    const canonical = canonicalHubPeriodKey(period.key, grain);
-    const stripePoint = stripePointMap.get(canonical);
-    const stripeNewWithReactivation = round2((stripePoint?.newMrr || 0) + (stripePoint?.reactivationMrr || 0));
-
-    const stripeFallbackStart =
-      grain === "daily"
-        ? period.key
-        : grain === "monthly"
-          ? `${period.key}-01`
-          : stripePoint?.periodStart || period.key;
-
-    return {
-      key: canonical || period.key,
-      label: period.label,
-      periodStart: stripePoint?.periodStart || stripeFallbackStart,
-      periodEnd: stripePoint?.periodEnd || stripeFallbackStart,
-      mrrEnd: round2(stripePoint?.mrrEnd || 0),
-      newMrr: stripeNewWithReactivation,
-      expansionMrr: round2(stripePoint?.expansionMrr || 0),
-      contractionMrr: round2(stripePoint?.contractionMrr || 0),
-      churnMrr: round2(stripePoint?.churnMrr || 0),
-      netMrrChange: round2(stripePoint?.netMrrChange || 0),
-      mrrGrowthRatePct: 0,
-      ndrPct: 0,
-      gdrPct: 0,
-      arr: round2(stripePoint?.arr || 0),
-      arrGrowth: round2(stripePoint?.arrGrowth || 0),
-    };
-  });
-
-  const selfservePoints = rawSelfserve.map((point, idx) => {
-    const prevMrr = idx === 0 ? stripePrevMrr : rawSelfserve[idx - 1].mrrEnd;
-    const mrrGrowthRatePct =
-      Math.abs(prevMrr) > 1e-9
-        ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
-        : 0;
-    const retention = calculateRetentionRates(prevMrr, point.expansionMrr, point.contractionMrr, point.churnMrr);
-    return { ...point, mrrGrowthRatePct, ndrPct: retention.ndrPct, gdrPct: retention.gdrPct };
-  });
-
-  const rawCombined: CombinedPoint[] = periodOrder.map((period) => {
-    const canonical = canonicalHubPeriodKey(period.key, grain);
-    const hub = hubPointMap.get(canonical);
-    const stripePoint = stripePointMap.get(canonical);
-    const stripeNewWithReactivation = round2((stripePoint?.newMrr || 0) + (stripePoint?.reactivationMrr || 0));
-
-    const stripeFallbackStart =
-      grain === "daily"
-        ? period.key
-        : grain === "monthly"
-          ? `${period.key}-01`
-          : stripePoint?.periodStart || period.key;
-
-    return {
-      key: canonical || period.key,
-      label: period.label,
-      periodStart: stripePoint?.periodStart || hub?.periodStart || stripeFallbackStart,
-      periodEnd: stripePoint?.periodEnd || hub?.periodEnd || stripeFallbackStart,
-      mrrEnd: round2((hub?.mrrEnd || 0) + (stripePoint?.mrrEnd || 0)),
-      newMrr: round2((hub?.newMrr || 0) + stripeNewWithReactivation),
-      expansionMrr: round2((hub?.expansionMrr || 0) + (stripePoint?.expansionMrr || 0)),
-      contractionMrr: round2((hub?.contractionMrr || 0) + (stripePoint?.contractionMrr || 0)),
-      churnMrr: round2((hub?.churnMrr || 0) + (stripePoint?.churnMrr || 0)),
-      netMrrChange: round2((hub?.netMrrChange || 0) + (stripePoint?.netMrrChange || 0)),
-      mrrGrowthRatePct: 0,
-      ndrPct: 0,
-      gdrPct: 0,
-      arr: round2((hub?.arr || 0) + (stripePoint?.arr || 0)),
-      arrGrowth: round2((hub?.arrGrowth || 0) + (stripePoint?.arrGrowth || 0)),
-    };
-  });
-
-  const points = rawCombined.map((point, idx) => {
-    const prevMrr = idx === 0 ? initialPrevCombinedMrr : rawCombined[idx - 1].mrrEnd;
-    const mrrGrowthRatePct =
-      Math.abs(prevMrr) > 1e-9
-        ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
-        : 0;
-    const retention = calculateRetentionRates(prevMrr, point.expansionMrr, point.contractionMrr, point.churnMrr);
-    return { ...point, mrrGrowthRatePct, ndrPct: retention.ndrPct, gdrPct: retention.gdrPct };
-  });
 
   let aiSpendSourcePoints: CombinedPoint[] = periodOrder.map((period) => {
     const key = canonicalHubPeriodKey(period.key, grain) || period.key;
@@ -2254,22 +2432,6 @@ async function buildCombinedBillingOverview(
   } catch {
     aiSpendSourcePoints = aiSpendSourcePoints.map((point) => ({ ...point }));
     linePoints = points;
-  }
-  let salesledSourcePoints = hubPoints;
-  let selfserveSourcePoints = selfservePoints;
-  try {
-    const sourceCombinedAllSubs = await sourceCombinedAllSubsPromise;
-    const sourceSplit = buildSourcePointsFromCombinedAllSubsReport(
-      periodOrder,
-      grain,
-      previousRange,
-      sourceCombinedAllSubs,
-    );
-    salesledSourcePoints = sourceSplit.salesled;
-    selfserveSourcePoints = sourceSplit.selfserve;
-  } catch {
-    salesledSourcePoints = hubPoints;
-    selfserveSourcePoints = selfservePoints;
   }
   const lineSourcePoints: LineSourcePoints = {
     salesled: salesledSourcePoints,
@@ -2351,24 +2513,6 @@ async function buildCombinedBillingOverview(
     };
   });
 
-  const stripeArrByCustomer = new Map<string, Map<string, number>>();
-  for (const row of stripeMain.customerArrRows || []) {
-    const customerId = String(row.customerId || "").trim();
-    const key = canonicalStripeCustomerPeriodKey(row, grain);
-    if (!customerId || !key) continue;
-    if (!stripeArrByCustomer.has(customerId)) stripeArrByCustomer.set(customerId, new Map<string, number>());
-    const valuesByPeriod = stripeArrByCustomer.get(customerId)!;
-    valuesByPeriod.set(key, round2((valuesByPeriod.get(key) || 0) + Number(row.arr || 0)));
-  }
-  const stripeBaselineArrByCustomer = new Map<string, number>();
-  for (const row of stripeBaseline?.customerArrRows || []) {
-    const customerId = String(row.customerId || "").trim();
-    if (!customerId) continue;
-    stripeBaselineArrByCustomer.set(
-      customerId,
-      round2((stripeBaselineArrByCustomer.get(customerId) || 0) + Number(row.arr || 0)),
-    );
-  }
   const activeHubByPeriod = buildActiveAccountCountByPeriod(periodOrder, accountArrByPeriod);
   const activeStripeByPeriod = buildActiveStripeCustomerCountByPeriod(stripeArrByCustomer);
   let activeCombinedUsersByPeriod = new Map<string, number>();
@@ -2602,7 +2746,7 @@ async function buildCombinedBillingOverview(
     startDate,
     endDate,
     grain,
-    targetCurrency: String(stripeMain.targetCurrency || targetCurrency || "USD").toUpperCase(),
+    targetCurrency: resolvedTargetCurrency,
     currentMrr: round2(currentMrr),
     currentArr: round2(currentMrr * 12),
     points,
