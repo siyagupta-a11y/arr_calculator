@@ -677,6 +677,29 @@ async function validateAndRun(body: Partial<RequestBody>) {
     });
   }
 
+  // Hard-prefer exact requested-range precomputed payloads before canonical expansion.
+  // This avoids unnecessary live grouped matching if the requested window is already warmed.
+  const requestedRangePayload = { startDate, endDate, combineMode, groupBy };
+  const requestedRangeKey = `${RANGE_CACHE_KEY_PREFIX}${stableStringify(requestedRangePayload)}`;
+  const exactPrecomputed = await readPrecomputedPayload<NdrGdrResponse>(
+    PRECOMPUTED_ENDPOINT_KEY,
+    requestedRangeKey,
+  ).catch(() => null);
+  if (exactPrecomputed) return exactPrecomputed;
+
+  const requestedRangeStitched = await buildCanonicalFromChunkRows(requestedRangePayload);
+  if (requestedRangeStitched) {
+    await writePrecomputedPayload({
+      endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+      cache_key: requestedRangeKey,
+      start_date: startDate,
+      end_date: endDate,
+      grain: "monthly",
+      payload_json: JSON.stringify(requestedRangeStitched),
+    }).catch(() => null);
+    return requestedRangeStitched;
+  }
+
   const today = new Date().toISOString().slice(0, 10);
   const canonicalStartDate = startDate < MONTHLY_CANONICAL_START_DATE ? startDate : MONTHLY_CANONICAL_START_DATE;
   const canonicalEndDate = endDate > today ? endDate : today;
