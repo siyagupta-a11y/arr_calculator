@@ -1,4 +1,4 @@
-import { runBigQuerySqlRows, type StripeBigQueryProfile } from "@/lib/stripeBigquery";
+import { runBigQuerySqlRows, type BigQuerySqlParameter, type StripeBigQueryProfile } from "@/lib/stripeBigquery";
 
 const PROFILE: StripeBigQueryProfile = "stripe_arr_correct";
 const PRECOMPUTED_PROJECT = String(process.env.PRECOMPUTED_TABLES_PROJECT || "botpress-stripe-data-pipeline").trim()
@@ -62,7 +62,7 @@ export async function queryPrecomputedCustomerArrCurrent(params: {
   endDate: string;
   grain: "daily" | "monthly";
 }) {
-  const queryParams = [
+  const queryParams: BigQuerySqlParameter[] = [
     { name: "grain", type: "STRING", value: params.grain },
     { name: "start_date", type: "STRING", value: params.startDate },
     { name: "end_date", type: "STRING", value: params.endDate },
