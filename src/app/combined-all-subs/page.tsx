@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 
 type CombineMode = "grouped" | "simple";
 type DisplayMode = "arr" | "plan";
@@ -128,7 +128,6 @@ export default function CombinedAllSubsPage() {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<CombinedAllSubsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const hasAutoRun = useRef(false);
 
   const run = useCallback(async () => {
     setLoading(true);
@@ -164,12 +163,6 @@ export default function CombinedAllSubsPage() {
       setLoading(false);
     }
   }, [combineMode, displayMode, endDate, planGrain, startDate]);
-
-  useEffect(() => {
-    if (hasAutoRun.current) return;
-    hasAutoRun.current = true;
-    void run();
-  }, [run]);
 
   const currency = data?.targetCurrency || "USD";
   const effectiveCombineMode = data?.combineMode || combineMode;
