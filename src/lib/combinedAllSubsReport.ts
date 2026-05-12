@@ -312,6 +312,7 @@ async function buildPrecomputedCombinedAllSubsReport(params: {
   if (!factRows.length) return null;
 
   const rowsById = new Map<string, CombinedAllSubsRow>();
+  const rowHasKnownMatchMetadata = new Map<string, boolean>();
   for (const factRow of factRows) {
     const periodKey = periodKeyFromFactRowDate(factRow.periodDate, params.planGrain);
     if (!periodKey || !periodKeys.includes(periodKey)) continue;
@@ -342,6 +343,7 @@ async function buildPrecomputedCombinedAllSubsReport(params: {
         plansByPeriod: {},
       };
       rowsById.set(rowId, row);
+      rowHasKnownMatchMetadata.set(rowId, false);
     }
 
     const effectiveSalesAssist = params.includeSalesAssist && factRow.salesAssist;
@@ -361,6 +363,10 @@ async function buildPrecomputedCombinedAllSubsReport(params: {
       row.hubspotPlansByPeriod![periodKey] = row.hubspotPlansByPeriod![periodKey] || "free";
     }
     row.plansByPeriod![periodKey] = normalizeFactPlan(factRow.plan);
+    rowHasKnownMatchMetadata.set(
+      rowId,
+      Boolean(rowHasKnownMatchMetadata.get(rowId)) || Boolean(factRow.matchMetadataKnown),
+    );
     if (source === "hubspot_account") {
       const matchedStripeKeyCount = Math.max(0, Math.floor(Number(factRow.matchedStripeKeyCount || 0)));
       row.matchedStripeKeyCount = Math.max(Number(row.matchedStripeKeyCount || 0), matchedStripeKeyCount);
@@ -372,6 +378,14 @@ async function buildPrecomputedCombinedAllSubsReport(params: {
   }
 
   const rows = Array.from(rowsById.values());
+  const hubspotRows = rows.filter((row) => row.source === "hubspot_account");
+  const hasAnyKnownHubspotMatchMetadata = hubspotRows.some((row) =>
+    Boolean(rowHasKnownMatchMetadata.get(row.id)),
+  );
+  if (hubspotRows.length > 0 && !hasAnyKnownHubspotMatchMetadata) {
+    return null;
+  }
+
   for (const row of rows) {
     row.hubspotPlansByPeriod = row.hubspotPlansByPeriod || {};
     row.stripePlansByPeriod = row.stripePlansByPeriod || {};

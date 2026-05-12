@@ -18,6 +18,7 @@ export type PrecomputedFactCustomerArrRow = {
   plan: string;
   salesAssist: boolean;
   deskEarlyAccess: boolean;
+  matchMetadataKnown: boolean;
   hasStripeMatch: boolean;
   matchedStripeKeyCount: number;
   arrEnd: number;
@@ -79,6 +80,7 @@ SELECT
   plan,
   sales_assist,
   desk_early_access,
+  (has_stripe_match IS NOT NULL OR matched_stripe_key_count IS NOT NULL) AS match_metadata_known,
   has_stripe_match,
   matched_stripe_key_count,
   arr_end,
@@ -99,6 +101,7 @@ SELECT
   plan,
   sales_assist,
   desk_early_access,
+  FALSE AS match_metadata_known,
   arr_end,
   mrr_end
 FROM ${viewRef(VIEW_FACT_CUSTOMER_ARR_CURRENT)}
@@ -124,6 +127,7 @@ ORDER BY customer_key, period_date
     plan: String(row.plan || ""),
     salesAssist: toBool(row.sales_assist),
     deskEarlyAccess: toBool(row.desk_early_access),
+    matchMetadataKnown: toBool(row.match_metadata_known),
     hasStripeMatch: toBool(row.has_stripe_match),
     matchedStripeKeyCount: Math.max(0, Math.floor(toNum(row.matched_stripe_key_count))),
     arrEnd: toNum(row.arr_end),
