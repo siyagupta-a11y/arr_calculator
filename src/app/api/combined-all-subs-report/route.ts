@@ -11,6 +11,7 @@ import {
   readPrecomputedPayload,
   writePrecomputedPayload,
 } from "@/lib/precomputedPayloadStore";
+import { isPrecomputedFactsReadEnabled } from "@/lib/precomputedFactsRead";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -26,6 +27,16 @@ type CombinedAllSubsApiRequest = Partial<CombinedAllSubsRequest> & {
 };
 
 const CACHE_KEY_PREFIX = "api:combined-all-subs:";
+
+function shouldUseFactsFirst(payload: CombinedAllSubsRequest) {
+  const combineMode = String(payload.combineMode || "grouped").trim().toLowerCase();
+  const groupedMatchStrategy = String(payload.groupedMatchStrategy || "full").trim().toLowerCase();
+  return (
+    isPrecomputedFactsReadEnabled() &&
+    combineMode === "grouped" &&
+    groupedMatchStrategy === "full"
+  );
+}
 
 function monthKey(value: string) {
   return String(value || "").trim().slice(0, 7);
@@ -306,6 +317,20 @@ async function validateAndRun(body: CombinedAllSubsApiRequest) {
   const precomputeRangeOnly = body.precomputeRangeOnly === true;
   const forceRefreshPrecomputed = body.forceRefreshPrecomputed === true;
   const key = `api:combined-all-subs:${stableStringify(payload)}`;
+  if (!precomputeRangeOnly && shouldUseFactsFirst(payload)) {
+    return getOrSetCache(key, CACHE_TTL_MS, async () => {
+      const built = await generateCombinedAllSubsReport(payload);
+      await writePrecomputedPayload({
+        endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+        cache_key: key,
+        start_date: payload.startDate,
+        end_date: payload.endDate,
+        grain: String(payload.planGrain || "monthly"),
+        payload_json: JSON.stringify(built),
+      }).catch(() => null);
+      return built;
+    });
+  }
   if (precomputeRangeOnly) {
     return getOrSetCache(key, CACHE_TTL_MS, async () => {
       if (!forceRefreshPrecomputed) {
