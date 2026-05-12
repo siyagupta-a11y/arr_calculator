@@ -32,6 +32,7 @@ export type CombinedAllSubsRequest = {
   includePlanData?: boolean;
   groupedMatchStrategy?: "full" | "workspace_only";
   includeSalesAssist?: boolean;
+  preferPrecomputedFacts?: boolean;
 };
 
 export type CombinedAllSubsCombineMode = "grouped" | "simple";
@@ -50,6 +51,8 @@ export type CombinedAllSubsRow = {
   deskEarlyAccessByPeriod?: Record<string, "yes" | "no">;
   stripeKeys: string[];
   matchedStripeKeys: string[];
+  hasStripeMatch?: boolean;
+  matchedStripeKeyCount?: number;
   hubspotValuesByPeriod: Record<string, number>;
   stripeValuesByPeriod: Record<string, number>;
   valuesByPeriod: Record<string, number>;
@@ -282,6 +285,13 @@ function normalizeFactPlan(value: string): CombinedAllSubsPlan {
   return normalizeCombinedPlan(value);
 }
 
+function rowHasStripeMatch(row: Pick<CombinedAllSubsRow, "source" | "matchedStripeKeys" | "hasStripeMatch" | "matchedStripeKeyCount">) {
+  if (row.source !== "hubspot_account") return false;
+  if ((row.matchedStripeKeys || []).length > 0) return true;
+  if (row.hasStripeMatch === true) return true;
+  return Number(row.matchedStripeKeyCount || 0) > 0;
+}
+
 async function buildPrecomputedCombinedAllSubsReport(params: {
   startDate: string;
   endDate: string;
@@ -322,6 +332,8 @@ async function buildPrecomputedCombinedAllSubsReport(params: {
         deskEarlyAccessByPeriod: {},
         stripeKeys: [],
         matchedStripeKeys: [],
+        hasStripeMatch: false,
+        matchedStripeKeyCount: 0,
         hubspotValuesByPeriod: {},
         stripeValuesByPeriod: {},
         valuesByPeriod: {},
@@ -349,6 +361,14 @@ async function buildPrecomputedCombinedAllSubsReport(params: {
       row.hubspotPlansByPeriod![periodKey] = row.hubspotPlansByPeriod![periodKey] || "free";
     }
     row.plansByPeriod![periodKey] = normalizeFactPlan(factRow.plan);
+    if (source === "hubspot_account") {
+      const matchedStripeKeyCount = Math.max(0, Math.floor(Number(factRow.matchedStripeKeyCount || 0)));
+      row.matchedStripeKeyCount = Math.max(Number(row.matchedStripeKeyCount || 0), matchedStripeKeyCount);
+      row.hasStripeMatch = Boolean(row.hasStripeMatch) || factRow.hasStripeMatch || matchedStripeKeyCount > 0;
+    } else {
+      row.hasStripeMatch = false;
+      row.matchedStripeKeyCount = 0;
+    }
   }
 
   const rows = Array.from(rowsById.values());
@@ -373,6 +393,13 @@ async function buildPrecomputedCombinedAllSubsReport(params: {
     ensurePlanDefaults(periods, row.hubspotPlansByPeriod);
     ensurePlanDefaults(periods, row.stripePlansByPeriod);
     ensurePlanDefaults(periods, row.plansByPeriod);
+    if (row.source === "hubspot_account") {
+      row.matchedStripeKeyCount = Math.max(Number(row.matchedStripeKeyCount || 0), (row.matchedStripeKeys || []).length);
+      row.hasStripeMatch = rowHasStripeMatch(row);
+    } else {
+      row.hasStripeMatch = false;
+      row.matchedStripeKeyCount = 0;
+    }
     row.salesAssist = (latestPeriodKey && row.salesAssistByPeriod[latestPeriodKey]) || "no";
   }
 
@@ -404,7 +431,7 @@ async function buildPrecomputedCombinedAllSubsReport(params: {
     summary: {
       hubspotAccounts: sortedRows.filter((row) => row.source === "hubspot_account").length,
       hubspotAccountsWithStripeMatch: sortedRows.filter(
-        (row) => row.source === "hubspot_account" && row.matchedStripeKeys.length > 0,
+        (row) => row.source === "hubspot_account" && rowHasStripeMatch(row),
       ).length,
       stripeCustomers: stripeRows.length,
       stripeCustomersMatched: 0,
@@ -1148,8 +1175,10 @@ export async function generateCombinedAllSubsReport(
   const includePlanData = Boolean(request.includePlanData);
   const groupedMatchStrategy = normalizeGroupedMatchStrategy(request.groupedMatchStrategy);
   const includeSalesAssist = request.includeSalesAssist !== false;
+  const preferPrecomputedFacts = request.preferPrecomputedFacts !== false;
   const target = targetCurrency();
   if (
+    preferPrecomputedFacts &&
     isPrecomputedFactsReadEnabled() &&
     combineMode === "grouped" &&
     groupedMatchStrategy === "full"
@@ -1292,6 +1321,8 @@ export async function generateCombinedAllSubsReport(
       deskEarlyAccessByPeriod: account.deskEarlyAccessByPeriod,
       stripeKeys: Array.from(account.stripeKeys).sort(),
       matchedStripeKeys: Array.from(account.matchedStripeKeys).sort(),
+      hasStripeMatch: account.matchedStripeKeys.size > 0,
+      matchedStripeKeyCount: account.matchedStripeKeys.size,
       hubspotValuesByPeriod: account.hubspotValuesByPeriod,
       stripeValuesByPeriod: account.stripeValuesByPeriod,
       valuesByPeriod: account.valuesByPeriod,
@@ -1327,6 +1358,8 @@ export async function generateCombinedAllSubsReport(
       salesAssistByPeriod,
       stripeKeys: Array.from(stripeCustomer.matchingKeys).sort(),
       matchedStripeKeys: [],
+      hasStripeMatch: false,
+      matchedStripeKeyCount: 0,
       hubspotValuesByPeriod: {},
       stripeValuesByPeriod: valuesByPeriod,
       valuesByPeriod,
@@ -1379,7 +1412,7 @@ export async function generateCombinedAllSubsReport(
       hubspotAccounts: sortedRows.filter((row) => row.source === "hubspot_account").length,
       hubspotAccountsWithStripeMatch:
         effectiveCombineMode === "grouped"
-          ? sortedRows.filter((row) => row.source === "hubspot_account" && row.matchedStripeKeys.length > 0).length
+          ? sortedRows.filter((row) => row.source === "hubspot_account" && rowHasStripeMatch(row)).length
           : 0,
       stripeCustomers: stripeCustomers.size,
       stripeCustomersMatched: effectiveCombineMode === "grouped" ? matchedStripeCustomerKeys.size : 0,

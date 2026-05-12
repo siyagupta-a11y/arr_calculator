@@ -18,6 +18,8 @@ type CombinedAllSubsRow = {
   salesAssistByPeriod?: Record<string, "yes" | "no">;
   stripeKeys: string[];
   matchedStripeKeys: string[];
+  hasStripeMatch?: boolean;
+  matchedStripeKeyCount?: number;
   hubspotValuesByPeriod: Record<string, number>;
   stripeValuesByPeriod: Record<string, number>;
   valuesByPeriod: Record<string, number>;
@@ -79,6 +81,14 @@ function latestPeriodKey(data: CombinedAllSubsResponse | null) {
 
 function hasRunResult(data: CombinedAllSubsResponse | null) {
   return !!data && Array.isArray(data.periods) && data.periods.length > 0;
+}
+
+function matchedStripeText(row: CombinedAllSubsRow, separator = ", ") {
+  if ((row.matchedStripeKeys || []).length > 0) return row.matchedStripeKeys.join(separator);
+  const matchedCount = Math.max(Number(row.matchedStripeKeyCount || 0), 0);
+  if (row.source === "hubspot_account" && matchedCount > 0) return `Matched (${matchedCount})`;
+  if (row.source === "stripe_only_customer") return (row.stripeKeys || []).join(separator);
+  return "-";
 }
 
 function formatPlanLabel(value: string) {
@@ -193,7 +203,7 @@ export default function CombinedAllSubsPage() {
           row.accountId,
           row.accountName,
           row.salesAssist,
-          row.matchedStripeKeys.join(" | "),
+          matchedStripeText(row, " | "),
           formatPlanLabel(row.hubspotPlansByPeriod?.[lastKey] || "free"),
           formatPlanLabel(row.stripePlansByPeriod?.[lastKey] || "free"),
           formatPlanLabel(row.plansByPeriod?.[lastKey] || "free"),
@@ -223,7 +233,7 @@ export default function CombinedAllSubsPage() {
         row.accountId,
         row.accountName,
         row.salesAssist,
-        row.matchedStripeKeys.join(" | "),
+        matchedStripeText(row, " | "),
         Number(row.hubspotValuesByPeriod[lastKey] || 0),
         Number(row.stripeValuesByPeriod[lastKey] || 0),
         Number(row.valuesByPeriod[lastKey] || 0),
@@ -261,7 +271,7 @@ export default function CombinedAllSubsPage() {
           row.accountName,
           row.salesAssist,
           row.stripeKeys.join(" | "),
-          row.matchedStripeKeys.join(" | "),
+          matchedStripeText(row, " | "),
         ];
         for (const period of data.periods) {
           cells.push(row.salesAssistByPeriod?.[period.key] || "no");
@@ -302,7 +312,7 @@ export default function CombinedAllSubsPage() {
         row.accountName,
         row.salesAssist,
         row.stripeKeys.join(" | "),
-        row.matchedStripeKeys.join(" | "),
+        matchedStripeText(row, " | "),
       ];
       for (const period of data.periods) {
         cells.push(row.salesAssistByPeriod?.[period.key] || "no");
@@ -648,13 +658,7 @@ export default function CombinedAllSubsPage() {
                         <td>{row.customerLabel}</td>
                         <td>{row.source === "hubspot_account" ? "HubSpot account" : "Stripe only"}</td>
                         <td>{row.salesAssist}</td>
-                        <td>
-                          {row.matchedStripeKeys.length > 0
-                            ? row.matchedStripeKeys.join(", ")
-                            : row.source === "stripe_only_customer"
-                              ? row.stripeKeys.join(", ")
-                              : "-"}
-                        </td>
+                        <td>{matchedStripeText(row, ", ")}</td>
                         {effectiveDisplayMode === "arr" ? (
                           <>
                             {data?.periods.map((period) => (

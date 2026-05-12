@@ -138,6 +138,13 @@ function mergeMap<T>(
   };
 }
 
+function rowHasStripeMatch(row: CombinedAllSubsResponse["rows"][number]) {
+  if (row.source !== "hubspot_account") return false;
+  if ((row.matchedStripeKeys || []).length > 0) return true;
+  if (row.hasStripeMatch === true) return true;
+  return Number(row.matchedStripeKeyCount || 0) > 0;
+}
+
 function filterPeriodMap<T>(values: Record<string, T> | undefined, keys: Set<string>) {
   const out: Record<string, T> = {};
   for (const key of keys) {
@@ -238,6 +245,11 @@ async function buildCanonicalFromChunkRows(
           plansByPeriod: row.plansByPeriod ? { ...row.plansByPeriod } : undefined,
           salesAssistByPeriod: row.salesAssistByPeriod ? { ...row.salesAssistByPeriod } : undefined,
           deskEarlyAccessByPeriod: row.deskEarlyAccessByPeriod ? { ...row.deskEarlyAccessByPeriod } : undefined,
+          hasStripeMatch: rowHasStripeMatch(row),
+          matchedStripeKeyCount: Math.max(
+            Number(row.matchedStripeKeyCount || 0),
+            (row.matchedStripeKeys || []).length,
+          ),
         });
         continue;
       }
@@ -252,6 +264,12 @@ async function buildCanonicalFromChunkRows(
       existing.plansByPeriod = mergeMap(existing.plansByPeriod, row.plansByPeriod);
       existing.salesAssistByPeriod = mergeMap(existing.salesAssistByPeriod, row.salesAssistByPeriod);
       existing.deskEarlyAccessByPeriod = mergeMap(existing.deskEarlyAccessByPeriod, row.deskEarlyAccessByPeriod);
+      existing.matchedStripeKeyCount = Math.max(
+        Number(existing.matchedStripeKeyCount || 0),
+        Number(row.matchedStripeKeyCount || 0),
+        (existing.matchedStripeKeys || []).length,
+      );
+      existing.hasStripeMatch = rowHasStripeMatch(existing) || rowHasStripeMatch(row);
     }
   }
 
@@ -295,7 +313,7 @@ async function buildCanonicalFromChunkRows(
     rows,
     summary: {
       hubspotAccounts: hubspotRows.length,
-      hubspotAccountsWithStripeMatch: hubspotRows.filter((row) => (row.matchedStripeKeys || []).length > 0).length,
+      hubspotAccountsWithStripeMatch: hubspotRows.filter((row) => rowHasStripeMatch(row)).length,
       stripeCustomers: allStripeCustomerKeys.size || stripeOnlyRows.length,
       stripeCustomersMatched: matchedStripeCustomerKeys.size,
       stripeCustomersOnly: stripeOnlyRows.length,

@@ -186,6 +186,8 @@ CREATE TABLE IF NOT EXISTS ${tableRef(TABLE_FACT_CUSTOMER_ARR)} (
   plan STRING NOT NULL,
   sales_assist BOOL NOT NULL,
   desk_early_access BOOL NOT NULL,
+  has_stripe_match BOOL NOT NULL,
+  matched_stripe_key_count INT64 NOT NULL,
   arr_end NUMERIC NOT NULL,
   mrr_end NUMERIC NOT NULL,
   month_key STRING NOT NULL,
@@ -268,6 +270,22 @@ CLUSTER BY mode, start_date, end_date
     `
 ALTER TABLE ${tableRef(TABLE_FACT_CUSTOMER_ARR)}
 ADD COLUMN IF NOT EXISTS sync_run_id STRING
+`,
+    [],
+    { profile: PROFILE },
+  );
+  await runBigQuerySqlStatement(
+    `
+ALTER TABLE ${tableRef(TABLE_FACT_CUSTOMER_ARR)}
+ADD COLUMN IF NOT EXISTS has_stripe_match BOOL
+`,
+    [],
+    { profile: PROFILE },
+  );
+  await runBigQuerySqlStatement(
+    `
+ALTER TABLE ${tableRef(TABLE_FACT_CUSTOMER_ARR)}
+ADD COLUMN IF NOT EXISTS matched_stripe_key_count INT64
 `,
     [],
     { profile: PROFILE },
@@ -390,6 +408,7 @@ async function syncCustomerArrPeriodic(startDate: string, endDate: string, grain
     includePlanData: true,
     groupedMatchStrategy: "full",
     includeSalesAssist: true,
+    preferPrecomputedFacts: false,
   });
 
   const rows: Array<Record<string, unknown>> = [];
@@ -407,6 +426,10 @@ async function syncCustomerArrPeriodic(startDate: string, endDate: string, grain
         ? "sales_assist"
         : (source === "hubspot_account" ? "salesled" : "selfserve");
       const plan = normalizePlan(String(row.plansByPeriod?.[periodKey] || "free"));
+      const matchedStripeKeyCount = source === "hubspot_account"
+        ? Math.max(0, Math.floor(Number(row.matchedStripeKeyCount || row.matchedStripeKeys?.length || 0)))
+        : 0;
+      const hasStripeMatch = source === "hubspot_account" && matchedStripeKeyCount > 0;
       rows.push({
         period_date: periodDateIso,
         grain,
@@ -417,6 +440,8 @@ async function syncCustomerArrPeriodic(startDate: string, endDate: string, grain
         plan,
         sales_assist: salesAssist,
         desk_early_access: deskEarlyAccess,
+        has_stripe_match: hasStripeMatch,
+        matched_stripe_key_count: matchedStripeKeyCount,
         arr_end: toBigQueryNumeric(arrEnd),
         mrr_end: toBigQueryNumeric(arrEnd / 12),
         month_key: periodDateIso.slice(0, 7),

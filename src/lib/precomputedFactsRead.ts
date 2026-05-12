@@ -18,6 +18,8 @@ export type PrecomputedFactCustomerArrRow = {
   plan: string;
   salesAssist: boolean;
   deskEarlyAccess: boolean;
+  hasStripeMatch: boolean;
+  matchedStripeKeyCount: number;
   arrEnd: number;
   mrrEnd: number;
 };
@@ -60,8 +62,33 @@ export async function queryPrecomputedCustomerArrCurrent(params: {
   endDate: string;
   grain: "daily" | "monthly";
 }) {
-  const rows = await runBigQuerySqlRows(
-    `
+  const queryParams = [
+    { name: "grain", type: "STRING", value: params.grain },
+    { name: "start_date", type: "STRING", value: params.startDate },
+    { name: "end_date", type: "STRING", value: params.endDate },
+  ];
+
+  const sqlWithMatchColumns = `
+SELECT
+  period_date,
+  grain,
+  customer_key,
+  customer_label,
+  source,
+  segment,
+  plan,
+  sales_assist,
+  desk_early_access,
+  has_stripe_match,
+  matched_stripe_key_count,
+  arr_end,
+  mrr_end
+FROM ${viewRef(VIEW_FACT_CUSTOMER_ARR_CURRENT)}
+WHERE grain = @grain
+  AND period_date BETWEEN DATE(@start_date) AND DATE(@end_date)
+ORDER BY customer_key, period_date
+`;
+  const sqlLegacyColumns = `
 SELECT
   period_date,
   grain,
@@ -78,14 +105,14 @@ FROM ${viewRef(VIEW_FACT_CUSTOMER_ARR_CURRENT)}
 WHERE grain = @grain
   AND period_date BETWEEN DATE(@start_date) AND DATE(@end_date)
 ORDER BY customer_key, period_date
-`,
-    [
-      { name: "grain", type: "STRING", value: params.grain },
-      { name: "start_date", type: "STRING", value: params.startDate },
-      { name: "end_date", type: "STRING", value: params.endDate },
-    ],
-    { profile: PROFILE },
-  );
+`;
+
+  let rows: Awaited<ReturnType<typeof runBigQuerySqlRows>> = [];
+  try {
+    rows = await runBigQuerySqlRows(sqlWithMatchColumns, queryParams, { profile: PROFILE });
+  } catch {
+    rows = await runBigQuerySqlRows(sqlLegacyColumns, queryParams, { profile: PROFILE });
+  }
 
   return rows.map((row) => ({
     periodDate: String(row.period_date || ""),
@@ -97,6 +124,8 @@ ORDER BY customer_key, period_date
     plan: String(row.plan || ""),
     salesAssist: toBool(row.sales_assist),
     deskEarlyAccess: toBool(row.desk_early_access),
+    hasStripeMatch: toBool(row.has_stripe_match),
+    matchedStripeKeyCount: Math.max(0, Math.floor(toNum(row.matched_stripe_key_count))),
     arrEnd: toNum(row.arr_end),
     mrrEnd: toNum(row.mrr_end),
   })) satisfies PrecomputedFactCustomerArrRow[];
