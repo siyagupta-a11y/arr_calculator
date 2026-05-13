@@ -272,6 +272,8 @@ export async function POST(req: NextRequest) {
             mode: "full",
             startDate: task.startDate,
             endDate: task.endDate,
+            includeEnsureTables: false,
+            includeDimDate: false,
             includeDaily: task.includeDaily,
             includeMonthly: task.includeMonthly,
             includeCustomerArrDaily: task.includeCustomerArrDaily,

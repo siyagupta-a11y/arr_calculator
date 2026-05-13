@@ -36,6 +36,8 @@ export type PrecomputedFactsSyncRequest = {
   endDate?: string;
   includeDaily?: boolean;
   includeMonthly?: boolean;
+  includeEnsureTables?: boolean;
+  includeDimDate?: boolean;
   includeCustomerArrDaily?: boolean;
   includeAiSpendDaily?: boolean;
   includeCustomerArrMonthly?: boolean;
@@ -634,6 +636,8 @@ export function resolveSyncWindow(request: PrecomputedFactsSyncRequest) {
     endDate: resolvedEndDate,
     includeDaily: request.includeDaily !== false,
     includeMonthly: request.includeMonthly !== false,
+    includeEnsureTables: request.includeEnsureTables !== false,
+    includeDimDate: request.includeDimDate !== false,
     includeCustomerArrDaily: request.includeCustomerArrDaily !== false,
     includeAiSpendDaily: request.includeAiSpendDaily !== false,
     includeCustomerArrMonthly: request.includeCustomerArrMonthly !== false,
@@ -672,11 +676,15 @@ export async function syncPrecomputedFacts(request: PrecomputedFactsSyncRequest)
   };
 
   try {
-    await runStep("ensure_tables", async () => {
-      await ensureTables();
-      return "ok";
-    });
-    await runStep("sync_dim_date", () => syncDateDimension(window.startDate, window.endDate));
+    if (window.includeEnsureTables) {
+      await runStep("ensure_tables", async () => {
+        await ensureTables();
+        return "ok";
+      });
+    }
+    if (window.includeDimDate) {
+      await runStep("sync_dim_date", () => syncDateDimension(window.startDate, window.endDate));
+    }
     if (window.includeDaily) {
       if (window.includeCustomerArrDaily) {
         await runStep("sync_customer_arr_daily", () => syncCustomerArrPeriodic(window.startDate, window.endDate, "daily", syncRunId));
