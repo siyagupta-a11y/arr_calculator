@@ -1579,6 +1579,22 @@ export default function StripeThroughMrrPage() {
               </div>
             </div>
 
+            {detailMode === "grouped" && detailMonthsInRange.length > 0 && (
+              <div className="stripe-ui__toolbar" style={{ marginTop: "0.35rem" }}>
+                <div className="stripe-ui__toolbar-group" style={{ flexWrap: "wrap", gap: "0.45rem" }}>
+                  <span className="stripe-ui__hint">Non-zero rows by column:</span>
+                  {detailMonthsInRange.flatMap((month) =>
+                    selectedMetrics.map((metric) => (
+                      <span key={`nonzero-pill:${month.monthKey}:${metric}`} className="stripe-ui__hint">
+                        {month.monthLabel} - {DETAIL_METRIC_OPTIONS.find((option) => option.key === metric)?.label || metric}:{" "}
+                        {groupedNonZeroCounts[`${month.monthKey}:${metric}`] || 0}
+                      </span>
+                    )),
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
               <table className="stripe-ui__table" aria-label="Stripe through MRR detail table">
                 <thead>
