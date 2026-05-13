@@ -137,6 +137,18 @@ function toBigQueryNumeric(value: unknown): string {
   return n.toFixed(9).replace(/\.?0+$/, "");
 }
 
+function normalizeTimestampForBigQuery(value: unknown): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const normalized = raw
+    .replace(" ", "T")
+    .replace(/\+00$/, "Z")
+    .replace(/\+0000$/, "Z");
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
 async function insertRowsChunked(table: string, rows: Array<Record<string, unknown>>, chunkSize = 5000) {
   if (!rows.length) return 0;
   const chunks = splitIntoChunks(rows, chunkSize);
@@ -550,7 +562,7 @@ async function syncAiSpendDailyAgg(startDate: string, endDate: string, syncRunId
 
   const rows = (result.points || []).map((point) => ({
     date: point.snapshotDate,
-    snapshot_timestamp_utc: String(point.snapshotTimestampUtc || "").trim() || null,
+    snapshot_timestamp_utc: normalizeTimestampForBigQuery(point.snapshotTimestampUtc),
     ai_spend_without_exclusions: toBigQueryNumeric(point.annualizedArrWithoutExclusions),
     ai_spend_with_exclusions: toBigQueryNumeric(point.annualizedArr),
     ai_spend_excluded: toBigQueryNumeric(point.annualizedArrExcluded),

@@ -119,6 +119,8 @@ export default function HardRefreshButton() {
   const [pageBackfillChunkMonths, setPageBackfillChunkMonths] = useState(1);
   const [matchMetadataBackfillLoading, setMatchMetadataBackfillLoading] = useState(false);
   const [matchMetadataChunkMonths, setMatchMetadataChunkMonths] = useState(1);
+  const [aiSpendDailyBackfillLoading, setAiSpendDailyBackfillLoading] = useState(false);
+  const [aiSpendDailyChunkMonths, setAiSpendDailyChunkMonths] = useState(1);
 
   useEffect(() => {
     let active = true;
@@ -1183,6 +1185,117 @@ export default function HardRefreshButton() {
     }
   }
 
+  async function backfillAiSpendDailyFacts() {
+    if (!debugStartDate || !debugEndDate) {
+      setMessage("Select start and end dates for AI spend daily backfill.");
+      return;
+    }
+    if (debugEndDate < debugStartDate) {
+      setMessage("AI spend daily backfill end date must be on or after start date.");
+      return;
+    }
+
+    setAiSpendDailyBackfillLoading(true);
+    setMessage("");
+    setSyncProgress("");
+    try {
+      const chunkMonths = Math.max(1, Math.min(12, Math.floor(aiSpendDailyChunkMonths || 1)));
+      const chunks = buildMonthChunks(debugStartDate, debugEndDate, chunkMonths);
+      if (!chunks.length) {
+        setMessage("No monthly chunks generated for AI spend daily backfill.");
+        return;
+      }
+
+      let okRuns = 0;
+      let failedRuns = 0;
+      const failedDetails: string[] = [];
+
+      for (let i = 0; i < chunks.length; i += 1) {
+        const chunk = chunks[i];
+        setSyncProgress(`AI spend daily ${i + 1}/${chunks.length}: ${chunk.label}`);
+        let succeeded = false;
+        let lastError = "";
+
+        for (let attempt = 1; attempt <= 3 && !succeeded; attempt += 1) {
+          try {
+            const res = await fetch("/api/precomputed-facts/sync", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              cache: "no-store",
+              body: JSON.stringify({
+                mode: "full",
+                startDate: chunk.startDate,
+                endDate: chunk.endDate,
+                includeDaily: true,
+                includeMonthly: false,
+              }),
+            });
+            const text = await res.text();
+            let payload: unknown = null;
+            try {
+              payload = text ? JSON.parse(text) : null;
+            } catch {
+              payload = null;
+            }
+            if (!res.ok) {
+              const snippet = text.replace(/\s+/g, " ").slice(0, 220);
+              const looksLikeHtml = snippet.toLowerCase().includes("<!doctype html");
+              const payloadError =
+                payload && typeof payload === "object" && "error" in payload
+                  ? String((payload as { error?: unknown }).error || "")
+                  : "";
+              throw new Error(
+                payloadError ||
+                  (looksLikeHtml ? "Server returned HTML error page (likely timeout/runtime crash)." : snippet) ||
+                  `HTTP ${res.status}`,
+              );
+            }
+            const ok = Boolean(
+              payload && typeof payload === "object" && "ok" in payload
+                ? (payload as { ok?: unknown }).ok
+                : true,
+            );
+            if (!ok) {
+              const payloadError =
+                payload && typeof payload === "object" && "error" in payload
+                  ? String((payload as { error?: unknown }).error || "")
+                  : "";
+              throw new Error(payloadError || "Sync reported failure");
+            }
+            succeeded = true;
+            okRuns += 1;
+          } catch (error: unknown) {
+            lastError = error instanceof Error ? error.message : "Unknown error";
+            if (attempt < 3) {
+              await sleep(Math.min(10_000, 1_000 * 2 ** (attempt - 1)));
+            }
+          }
+        }
+
+        if (!succeeded) {
+          failedRuns += 1;
+          failedDetails.push(`${chunk.label}: ${lastError || "Unknown error"}`);
+        }
+        await sleep(250);
+      }
+
+      if (failedRuns > 0) {
+        setMessage(
+          `AI spend daily backfill finished with ${failedRuns} failed run(s). ` +
+            `Succeeded: ${okRuns}. ` +
+            `Failed: ${failedDetails.slice(0, 3).join(" | ")}`,
+        );
+      } else {
+        setMessage(`AI spend daily backfill completed successfully (${okRuns} runs).`);
+      }
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "AI spend daily backfill failed");
+    } finally {
+      setSyncProgress("");
+      setAiSpendDailyBackfillLoading(false);
+    }
+  }
+
   return (
     <div
       style={{
@@ -1296,7 +1409,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void runDebugBackfill()}
-              disabled={debugLoading || pageBackfillLoading || loading || syncLoading || backfillLoading}
+              disabled={debugLoading || pageBackfillLoading || loading || syncLoading || backfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading}
               style={{
                 marginLeft: "auto",
                 borderRadius: 8,
@@ -1306,7 +1419,7 @@ export default function HardRefreshButton() {
                 padding: "6px 10px",
                 fontSize: 12,
                 fontWeight: 700,
-                cursor: debugLoading || pageBackfillLoading || loading || syncLoading || backfillLoading ? "wait" : "pointer",
+                cursor: debugLoading || pageBackfillLoading || loading || syncLoading || backfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading ? "wait" : "pointer",
               }}
             >
               {debugLoading ? "Running..." : "Run debug"}
@@ -1352,7 +1465,8 @@ export default function HardRefreshButton() {
                   loading ||
                   syncLoading ||
                   backfillLoading ||
-                  matchMetadataBackfillLoading
+                  matchMetadataBackfillLoading ||
+                  aiSpendDailyBackfillLoading
                 }
                 style={{
                   borderRadius: 8,
@@ -1363,7 +1477,13 @@ export default function HardRefreshButton() {
                   fontSize: 12,
                   fontWeight: 700,
                   cursor:
-                    pageBackfillLoading || debugLoading || loading || syncLoading || backfillLoading
+                    pageBackfillLoading ||
+                    debugLoading ||
+                    loading ||
+                    syncLoading ||
+                    backfillLoading ||
+                    matchMetadataBackfillLoading ||
+                    aiSpendDailyBackfillLoading
                       ? "wait"
                       : "pointer",
                 }}
@@ -1387,7 +1507,8 @@ export default function HardRefreshButton() {
                       loading ||
                       syncLoading ||
                       backfillLoading ||
-                      matchMetadataBackfillLoading
+                      matchMetadataBackfillLoading ||
+                      aiSpendDailyBackfillLoading
                     }
                     style={{
                       borderRadius: 8,
@@ -1404,7 +1525,8 @@ export default function HardRefreshButton() {
                         loading ||
                         syncLoading ||
                         backfillLoading ||
-                        matchMetadataBackfillLoading
+                        matchMetadataBackfillLoading ||
+                        aiSpendDailyBackfillLoading
                           ? "wait"
                           : "pointer",
                       opacity:
@@ -1413,7 +1535,8 @@ export default function HardRefreshButton() {
                         loading ||
                         syncLoading ||
                         backfillLoading ||
-                        matchMetadataBackfillLoading
+                        matchMetadataBackfillLoading ||
+                        aiSpendDailyBackfillLoading
                           ? 0.7
                           : 1,
                     }}
@@ -1454,6 +1577,7 @@ export default function HardRefreshButton() {
                 onClick={() => void backfillStripeMatchMetadata()}
                 disabled={
                   matchMetadataBackfillLoading ||
+                  aiSpendDailyBackfillLoading ||
                   debugLoading ||
                   pageBackfillLoading ||
                   loading ||
@@ -1470,6 +1594,7 @@ export default function HardRefreshButton() {
                   fontWeight: 700,
                   cursor:
                     matchMetadataBackfillLoading ||
+                    aiSpendDailyBackfillLoading ||
                     debugLoading ||
                     pageBackfillLoading ||
                     loading ||
@@ -1480,6 +1605,64 @@ export default function HardRefreshButton() {
                 }}
               >
                 {matchMetadataBackfillLoading ? "Backfilling..." : "Backfill stripe match metadata"}
+              </button>
+            </div>
+          </div>
+          <div style={{ marginTop: 10, borderTop: "1px solid #cbd5e1", paddingTop: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
+              Temporary: AI spend daily fact backfill
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 8 }}>
+              <div style={{ fontSize: 11, color: "#334155", lineHeight: 1.4 }}>
+                Uses the selected start/end dates above and runs daily-only fact sync in chunks.
+              </div>
+              <label style={{ display: "grid", gap: 4, fontSize: 11 }}>
+                <span>Chunk size</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={12}
+                  step={1}
+                  value={String(aiSpendDailyChunkMonths)}
+                  onChange={(e) => setAiSpendDailyChunkMonths(Number(e.target.value || 1))}
+                  style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 8px", fontSize: 12 }}
+                />
+              </label>
+            </div>
+            <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                onClick={() => void backfillAiSpendDailyFacts()}
+                disabled={
+                  aiSpendDailyBackfillLoading ||
+                  matchMetadataBackfillLoading ||
+                  debugLoading ||
+                  pageBackfillLoading ||
+                  loading ||
+                  syncLoading ||
+                  backfillLoading
+                }
+                style={{
+                  borderRadius: 8,
+                  border: "1px solid #b45309",
+                  background: aiSpendDailyBackfillLoading ? "#b45309" : "#d97706",
+                  color: "#ffffff",
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor:
+                    aiSpendDailyBackfillLoading ||
+                    matchMetadataBackfillLoading ||
+                    debugLoading ||
+                    pageBackfillLoading ||
+                    loading ||
+                    syncLoading ||
+                    backfillLoading
+                      ? "wait"
+                      : "pointer",
+                }}
+              >
+                {aiSpendDailyBackfillLoading ? "Backfilling..." : "Backfill AI spend daily facts"}
               </button>
             </div>
           </div>
@@ -1526,7 +1709,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void syncNow("fast")}
-              disabled={syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || loading}
+              disabled={syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading || loading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #1d4ed8",
@@ -1535,7 +1718,7 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || loading ? "wait" : "pointer",
+                cursor: syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading || loading ? "wait" : "pointer",
               }}
               title="Sync dirty changes only (fast incremental)"
             >
@@ -1544,7 +1727,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void syncNow("full")}
-              disabled={syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || loading}
+              disabled={syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading || loading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #475569",
@@ -1553,7 +1736,7 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || loading ? "wait" : "pointer",
+                cursor: syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading || loading ? "wait" : "pointer",
               }}
               title="Full historical sync"
             >
@@ -1562,7 +1745,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => setDebugPanelOpen((prev) => !prev)}
-              disabled={syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || loading || debugLoading}
+              disabled={syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading || loading || debugLoading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #0369a1",
@@ -1571,7 +1754,7 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || loading || debugLoading ? "wait" : "pointer",
+                cursor: syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading || loading || debugLoading ? "wait" : "pointer",
               }}
               title="Run targeted date-range fact sync and view step-level output"
             >
@@ -1580,7 +1763,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void backfillFacts()}
-              disabled={backfillLoading || syncLoading || pageBackfillLoading || matchMetadataBackfillLoading || loading || debugLoading}
+              disabled={backfillLoading || syncLoading || pageBackfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading || loading || debugLoading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #065f46",
@@ -1589,7 +1772,7 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: backfillLoading || syncLoading || pageBackfillLoading || matchMetadataBackfillLoading || loading ? "wait" : "pointer",
+                cursor: backfillLoading || syncLoading || pageBackfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading || loading ? "wait" : "pointer",
               }}
               title="Chunked full backfill into fact tables (safe retries)"
             >
@@ -1600,7 +1783,7 @@ export default function HardRefreshButton() {
         <button
           type="button"
           onClick={() => void hardRefresh()}
-          disabled={loading || syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading}
+          disabled={loading || syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading}
           style={{
             borderRadius: 10,
             border: "1px solid #0f172a",
@@ -1609,7 +1792,7 @@ export default function HardRefreshButton() {
             padding: "10px 12px",
             fontSize: 13,
             fontWeight: 700,
-            cursor: loading || syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading ? "wait" : "pointer",
+            cursor: loading || syncLoading || backfillLoading || pageBackfillLoading || matchMetadataBackfillLoading || aiSpendDailyBackfillLoading ? "wait" : "pointer",
           }}
           title="Clear server caches and reload all data from scratch"
         >
