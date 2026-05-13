@@ -134,9 +134,10 @@ const GRAIN_OPTIONS: Array<{ key: Grain; label: string }> = [
 
 const PAGE_SIZE = 1000;
 const EXPORT_PAGE_SIZE_RAW = 20000;
-const EXPORT_PAGE_SIZE_GROUPED = 5000;
+const EXPORT_PAGE_SIZE_GROUPED = 20000;
 const EXPORT_FETCH_CONCURRENCY_RAW = 3;
 const EXPORT_FETCH_CONCURRENCY_GROUPED = 2;
+const EXPORT_PAGE_SIZE_MAX = 100000;
 
 function defaultDateRange() {
   const end = new Date();
@@ -279,6 +280,8 @@ export default function StripeThroughMrrPage() {
   const [filterCustomerId, setFilterCustomerId] = useState("");
   const [filterProductSearch, setFilterProductSearch] = useState("");
   const [filterGroupSearch, setFilterGroupSearch] = useState("");
+  const [filterCountrySearch, setFilterCountrySearch] = useState("");
+  const [filterTerritorySearch, setFilterTerritorySearch] = useState("");
   const [filterCustomerCountryRules, setFilterCustomerCountryRules] = useState("");
   const [groupedSortMode, setGroupedSortMode] = useState<GroupedSortMode>("range_arr_sum_desc");
   const countryFilterRules = useMemo(
@@ -422,6 +425,8 @@ export default function StripeThroughMrrPage() {
     setFilterCustomerId("");
     setFilterProductSearch("");
     setFilterGroupSearch("");
+    setFilterCountrySearch("");
+    setFilterTerritorySearch("");
     void run(1);
   }
 
@@ -534,28 +539,57 @@ export default function StripeThroughMrrPage() {
     const rows = detailRows as RawDetailRow[];
     const customerNeedle = filterCustomerId.trim().toLowerCase();
     const productNeedle = filterProductSearch.trim().toLowerCase();
+    const countryNeedle = filterCountrySearch.trim().toLowerCase();
+    const territoryNeedle = filterTerritorySearch.trim().toLowerCase();
     return rows.filter((r) => {
       if (filterEventType !== "all" && r.eventType !== filterEventType) return false;
       if (customerNeedle && !String(r.customerId || "").toLowerCase().includes(customerNeedle)) return false;
+      if (countryNeedle && !String(r.customerCountry || "").toLowerCase().includes(countryNeedle)) return false;
+      if (territoryNeedle && !String(r.customerTerritory || "").toLowerCase().includes(territoryNeedle)) return false;
       if (productNeedle) {
         const productText = `${r.productId || ""} ${r.productDescription || ""} ${r.priceId || ""} ${r.priceDescription || ""}`.toLowerCase();
         if (!productText.includes(productNeedle)) return false;
       }
       return true;
     });
-  }, [detailMode, detailRows, filterEventType, filterCustomerId, filterProductSearch]);
+  }, [detailMode, detailRows, filterEventType, filterCustomerId, filterCountrySearch, filterTerritorySearch, filterProductSearch]);
 
   const filteredGroupedMatrixRows = useMemo(() => {
-    const needle = filterGroupSearch.trim().toLowerCase();
-    if (!needle) return groupedMatrixRows;
-    return groupedMatrixRows.filter(
-      (g) =>
-        String(g.groupLabel || g.groupKey || "").toLowerCase().includes(needle) ||
-        String(g.customerCountry || "").toLowerCase().includes(needle) ||
-        String(g.customerTerritory || "").toLowerCase().includes(needle) ||
-        g.associatedCustomerIds.some((customerId) => customerId.toLowerCase().includes(needle)),
-    );
-  }, [groupedMatrixRows, filterGroupSearch]);
+    const groupNeedle = filterGroupSearch.trim().toLowerCase();
+    const countryNeedle = filterCountrySearch.trim().toLowerCase();
+    const territoryNeedle = filterTerritorySearch.trim().toLowerCase();
+    return groupedMatrixRows.filter((g) => {
+      const matchesGroupNeedle = !groupNeedle ||
+        String(g.groupLabel || g.groupKey || "").toLowerCase().includes(groupNeedle) ||
+        String(g.customerCountry || "").toLowerCase().includes(groupNeedle) ||
+        String(g.customerTerritory || "").toLowerCase().includes(groupNeedle) ||
+        g.associatedCustomerIds.some((customerId) => customerId.toLowerCase().includes(groupNeedle));
+      if (!matchesGroupNeedle) return false;
+      if (countryNeedle && !String(g.customerCountry || "").toLowerCase().includes(countryNeedle)) return false;
+      if (territoryNeedle && !String(g.customerTerritory || "").toLowerCase().includes(territoryNeedle)) return false;
+      return true;
+    });
+  }, [groupedMatrixRows, filterGroupSearch, filterCountrySearch, filterTerritorySearch]);
+
+  const rawNonZeroMrrRowsCount = useMemo(
+    () => filteredRawRows.reduce((count, row) => count + (Math.abs(Number(row.mrrChange || 0)) > 1e-9 ? 1 : 0), 0),
+    [filteredRawRows],
+  );
+
+  const groupedNonZeroCounts = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const month of detailMonthsInRange) {
+      for (const metric of selectedMetrics) {
+        const key = `${month.monthKey}:${metric}`;
+        let count = 0;
+        for (const group of filteredGroupedMatrixRows) {
+          if (Math.abs(metricValue(group.byMonth.get(month.monthKey), metric)) > 1e-9) count += 1;
+        }
+        out[key] = count;
+      }
+    }
+    return out;
+  }, [detailMonthsInRange, selectedMetrics, filteredGroupedMatrixRows]);
 
   function buildGroupMatrix(rows: GroupedDetailRow[]) {
     const byGroup = new Map<
@@ -688,53 +722,67 @@ export default function StripeThroughMrrPage() {
     throw new Error("Export failed after retries");
   }
 
+  async function fetchAllDetailRowsWithPageSize(
+    pageSize: number,
+    concurrency: number,
+  ): Promise<Array<RawDetailRow | GroupedDetailRow>> {
+    const first = await fetchDetailReportPage(1, pageSize, true, true);
+    const firstRows = (first.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>;
+    if (!first.pagination?.hasMore || firstRows.length < pageSize) return firstRows;
+
+    const rowsByPage = new Map<number, Array<RawDetailRow | GroupedDetailRow>>([[1, firstRows]]);
+    let nextBatchStartPage = 2;
+    let stop = false;
+
+    while (!stop) {
+      const pages = Array.from({ length: concurrency }, (_, idx) => nextBatchStartPage + idx);
+      const batch = await Promise.all(
+        pages.map((pageNum) => fetchDetailReportPage(pageNum, pageSize, true, true)),
+      );
+      batch.sort((a, b) => (a.pagination?.page || 0) - (b.pagination?.page || 0));
+
+      for (const report of batch) {
+        const reportPage = Math.max(1, report.pagination?.page || 1);
+        const pageRows = (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>;
+        rowsByPage.set(reportPage, pageRows);
+        const returnedRows = Math.max(0, report.pagination?.returnedRows || pageRows.length);
+        if (!report.pagination?.hasMore || returnedRows < pageSize || returnedRows === 0) {
+          stop = true;
+          break;
+        }
+      }
+
+      nextBatchStartPage += concurrency;
+    }
+
+    const allRows: Array<RawDetailRow | GroupedDetailRow> = [];
+    const maxPage = Math.max(0, ...Array.from(rowsByPage.keys()));
+    for (let pageNum = 1; pageNum <= maxPage; pageNum += 1) {
+      const pageRows = rowsByPage.get(pageNum) || [];
+      if (pageNum > 1 && pageRows.length === 0) break;
+      allRows.push(...pageRows);
+    }
+    return allRows;
+  }
+
   async function fetchAllDetailRows(): Promise<Array<RawDetailRow | GroupedDetailRow>> {
     if (!data) return [];
     const isGrouped = (data?.detailMode || detailMode) === "grouped";
     const exportPageSize = isGrouped ? EXPORT_PAGE_SIZE_GROUPED : EXPORT_PAGE_SIZE_RAW;
     const exportConcurrency = isGrouped ? EXPORT_FETCH_CONCURRENCY_GROUPED : EXPORT_FETCH_CONCURRENCY_RAW;
-
     const candidatePageSizes = Array.from(
       new Set([
+        EXPORT_PAGE_SIZE_MAX,
         exportPageSize,
         Math.max(PAGE_SIZE, Math.floor(exportPageSize / 2)),
-        Math.max(PAGE_SIZE, Math.floor(exportPageSize / 4)),
         PAGE_SIZE,
       ]),
-    );
+    ).filter((size) => size >= PAGE_SIZE);
 
     let lastError: unknown = null;
     for (const candidatePageSize of candidatePageSizes) {
       try {
-        const rowsByPage = new Map<number, Array<RawDetailRow | GroupedDetailRow>>();
-        let nextBatchStartPage = 1;
-        let stopPage: number | null = null;
-
-        while (stopPage == null || nextBatchStartPage <= stopPage) {
-          const pages = Array.from({ length: exportConcurrency }, (_, idx) => nextBatchStartPage + idx);
-          const batch = await Promise.all(
-            pages.map((pageNum) => fetchDetailReportPage(pageNum, candidatePageSize, true, true)),
-          );
-
-          for (const report of batch) {
-            const reportPage = Math.max(1, report.pagination?.page || 1);
-            rowsByPage.set(reportPage, (report.detailRows || []).filter(Boolean) as Array<RawDetailRow | GroupedDetailRow>);
-            const returnedRows = Math.max(0, report.pagination?.returnedRows || report.detailRows?.length || 0);
-            if (returnedRows < candidatePageSize) {
-              stopPage = stopPage == null ? reportPage : Math.min(stopPage, reportPage);
-            }
-          }
-          nextBatchStartPage += exportConcurrency;
-        }
-
-        if (stopPage == null) {
-          stopPage = Math.max(0, ...Array.from(rowsByPage.keys()));
-        }
-        const allRows: Array<RawDetailRow | GroupedDetailRow> = [];
-        for (let pageNum = 1; pageNum <= stopPage; pageNum += 1) {
-          allRows.push(...(rowsByPage.get(pageNum) || []));
-        }
-        return allRows;
+        return await fetchAllDetailRowsWithPageSize(candidatePageSize, exportConcurrency);
       } catch (error) {
         lastError = error;
       }
@@ -1358,6 +1406,28 @@ export default function StripeThroughMrrPage() {
                       placeholder="contains..."
                     />
                   </div>
+                  <div className="stripe-ui__field">
+                    <label className="stripe-ui__field-label" htmlFor="filter-country">Filter Country</label>
+                    <input
+                      id="filter-country"
+                      className="stripe-ui__control"
+                      type="text"
+                      value={filterCountrySearch}
+                      onChange={(e) => setFilterCountrySearch(e.target.value)}
+                      placeholder="contains..."
+                    />
+                  </div>
+                  <div className="stripe-ui__field">
+                    <label className="stripe-ui__field-label" htmlFor="filter-territory">Filter Territory</label>
+                    <input
+                      id="filter-territory"
+                      className="stripe-ui__control"
+                      type="text"
+                      value={filterTerritorySearch}
+                      onChange={(e) => setFilterTerritorySearch(e.target.value)}
+                      placeholder="contains..."
+                    />
+                  </div>
                 </>
               ) : (
                 <>
@@ -1383,6 +1453,32 @@ export default function StripeThroughMrrPage() {
                       <option value="range_arr_sum_desc">Sum of ARR in selected range (desc)</option>
                       <option value="latest_arr_desc">Latest month ARR (desc)</option>
                     </select>
+                  </div>
+                  <div className="stripe-ui__field">
+                    <label className="stripe-ui__field-label" htmlFor="filter-group-country">
+                      Filter Country
+                    </label>
+                    <input
+                      id="filter-group-country"
+                      className="stripe-ui__control"
+                      type="text"
+                      value={filterCountrySearch}
+                      onChange={(e) => setFilterCountrySearch(e.target.value)}
+                      placeholder="contains..."
+                    />
+                  </div>
+                  <div className="stripe-ui__field">
+                    <label className="stripe-ui__field-label" htmlFor="filter-group-territory">
+                      Filter Territory
+                    </label>
+                    <input
+                      id="filter-group-territory"
+                      className="stripe-ui__control"
+                      type="text"
+                      value={filterTerritorySearch}
+                      onChange={(e) => setFilterTerritorySearch(e.target.value)}
+                      placeholder="contains..."
+                    />
                   </div>
                   {groupBy === "customer_id" && (
                     <div className="stripe-ui__field">
@@ -1487,18 +1583,32 @@ export default function StripeThroughMrrPage() {
               <table className="stripe-ui__table" aria-label="Stripe through MRR detail table">
                 <thead>
                   {detailMode === "raw" ? (
-                    <tr>
-                      <th>Event timestamp (UTC)</th>
-                      <th>Event type</th>
-                      <th className="stripe-ui__num">MRR change</th>
-                      <th>Customer</th>
-                      <th>Country</th>
-                      <th>Territory</th>
-                      <th>Product</th>
-                      <th>Price</th>
-                      <th>Subscription Item</th>
-                      <th>Subscription</th>
-                    </tr>
+                    <>
+                      <tr>
+                        <th>Event timestamp (UTC)</th>
+                        <th>Event type</th>
+                        <th className="stripe-ui__num">MRR change</th>
+                        <th>Customer</th>
+                        <th>Country</th>
+                        <th>Territory</th>
+                        <th>Product</th>
+                        <th>Price</th>
+                        <th>Subscription Item</th>
+                        <th>Subscription</th>
+                      </tr>
+                      <tr>
+                        <th>Non-zero rows</th>
+                        <th>—</th>
+                        <th className="stripe-ui__num">{rawNonZeroMrrRowsCount}</th>
+                        <th>—</th>
+                        <th>—</th>
+                        <th>—</th>
+                        <th>—</th>
+                        <th>—</th>
+                        <th>—</th>
+                        <th>—</th>
+                      </tr>
+                    </>
                   ) : (
                     <>
                       <tr>
@@ -1518,6 +1628,16 @@ export default function StripeThroughMrrPage() {
                           selectedMetrics.map((metric) => (
                             <th key={`${month.monthKey}:${metric}`} className="stripe-ui__num">
                               {DETAIL_METRIC_OPTIONS.find((option) => option.key === metric)?.label || metric}
+                            </th>
+                          )),
+                        )}
+                      </tr>
+                      <tr>
+                        <th colSpan={groupBy === "email" ? 5 : 1}>Non-zero rows</th>
+                        {detailMonthsInRange.flatMap((month) =>
+                          selectedMetrics.map((metric) => (
+                            <th key={`nonzero:${month.monthKey}:${metric}`} className="stripe-ui__num">
+                              {groupedNonZeroCounts[`${month.monthKey}:${metric}`] || 0}
                             </th>
                           )),
                         )}
