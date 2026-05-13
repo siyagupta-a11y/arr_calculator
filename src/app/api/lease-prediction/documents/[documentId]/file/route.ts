@@ -15,7 +15,8 @@ export async function GET(req: NextRequest, context: RouteParams) {
     await assertAdmin(req);
     const { documentId } = await context.params;
     const file = await readLeaseDocumentFile(documentId);
-    return new NextResponse(file.data, {
+    const body = new Uint8Array(file.data);
+    return new NextResponse(body, {
       status: 200,
       headers: {
         "Content-Type": file.contentType || "application/pdf",
