@@ -135,6 +135,15 @@ function toTermsEdit(doc: LeaseDocument): TermsEdit {
   };
 }
 
+async function readJsonResponse<T>(res: Response): Promise<{ json: T | null; text: string }> {
+  const text = await res.text();
+  try {
+    return { json: text ? (JSON.parse(text) as T) : null, text };
+  } catch {
+    return { json: null, text };
+  }
+}
+
 export default function LeasePredictionPage() {
   const defaults = useMemo(() => defaultDateRange(), []);
   const [startDate, setStartDate] = useState(defaults.startDate);
@@ -156,7 +165,8 @@ export default function LeasePredictionPage() {
     setError("");
     try {
       const res = await fetch("/api/lease-prediction/documents", { cache: "no-store" });
-      const payload = (await res.json()) as DocumentsResponse;
+      const { json } = await readJsonResponse<DocumentsResponse>(res);
+      const payload = json;
       if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);
       const docs = Array.isArray(payload.documents) ? payload.documents : [];
       setDocuments(docs);
@@ -197,8 +207,15 @@ export default function LeasePredictionPage() {
         method: "POST",
         body: formData,
       });
-      const payload = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+      const { json, text } = await readJsonResponse<{ ok?: boolean; error?: string }>(res);
+      const payload = json;
+      if (!res.ok || !payload?.ok) {
+        const plain = String(text || "").trim();
+        if (res.status === 413 || /request entity too large/i.test(plain)) {
+          throw new Error("Uploaded PDF is too large. Please upload a smaller file.");
+        }
+        throw new Error(payload?.error || plain || `HTTP ${res.status}`);
+      }
       setSelectedFile(null);
       setMessage("Lease uploaded and parsed.");
       await loadDocuments();
@@ -229,8 +246,9 @@ export default function LeasePredictionPage() {
             summary: edit.summary,
           }),
         });
-        const payload = (await res.json()) as { ok?: boolean; error?: string };
-        if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+        const { json, text } = await readJsonResponse<{ ok?: boolean; error?: string }>(res);
+        const payload = json;
+        if (!res.ok || !payload?.ok) throw new Error(payload?.error || text || `HTTP ${res.status}`);
         setMessage("Lease terms saved.");
         await loadDocuments();
       } catch (e: unknown) {
@@ -252,8 +270,9 @@ export default function LeasePredictionPage() {
         const res = await fetch(`/api/lease-prediction/documents/${encodeURIComponent(documentId)}`, {
           method: "DELETE",
         });
-        const payload = (await res.json()) as { ok?: boolean; error?: string };
-        if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+        const { json, text } = await readJsonResponse<{ ok?: boolean; error?: string }>(res);
+        const payload = json;
+        if (!res.ok || !payload?.ok) throw new Error(payload?.error || text || `HTTP ${res.status}`);
         setMessage("Lease deleted.");
         await loadDocuments();
       } catch (e: unknown) {
