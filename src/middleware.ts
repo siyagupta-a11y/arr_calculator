@@ -16,8 +16,8 @@ const PUBLIC_API_PATH_PREFIXES = [
   "/api/hubspot-current-metrics-sync",
   "/api/cache/nightly-sync",
 ];
-const ADMIN_PAGE_PATH_PREFIXES = ["/model-update"];
-const ADMIN_API_PATH_PREFIXES = ["/api/model-update"];
+const ADMIN_PAGE_PATH_PREFIXES = ["/model-update", "/lease-prediction"];
+const ADMIN_API_PATH_PREFIXES = ["/api/model-update", "/api/lease-prediction"];
 
 function isPublicApiPath(pathname: string) {
   return PUBLIC_API_PATH_PREFIXES.some(
