@@ -6,6 +6,11 @@ import {
   type CombinedAllSubsCombineMode,
 } from "@/lib/combinedAllSubsReport";
 import { getOrSetCache, readTtlMs, stableStringify } from "@/lib/serverResponseCache";
+import {
+  isPrecomputedFactsReadEnabled,
+  queryPrecomputedCustomerArrCurrent,
+  type PrecomputedFactCustomerArrRow,
+} from "@/lib/precomputedFactsRead";
 
 export type TofuGroupBy = "month" | "plan" | "segment";
 export type TofuSegment = "salesled" | "selfserve" | "sales_assist";
@@ -194,6 +199,46 @@ function monthBeforeRange(startDate: string) {
   };
 }
 
+function monthKeyFromIsoDate(value: string) {
+  return String(value || "").trim().slice(0, 7);
+}
+
+function monthKeyFromDate(value: Date) {
+  return toIsoDateOnly(new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), 1))).slice(0, 7);
+}
+
+function monthStartIsoFromKey(monthKey: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(monthKey || "").trim());
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 0 || month > 11) return "";
+  return toIsoDateOnly(new Date(Date.UTC(year, month, 1)));
+}
+
+function monthEndIsoFromKey(monthKey: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(monthKey || "").trim());
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 0 || month > 11) return "";
+  return toIsoDateOnly(new Date(Date.UTC(year, month + 1, 0)));
+}
+
+function monthKeysBetween(startDate: string, endDate: string) {
+  const start = parseIsoDateOnly(startDate);
+  const end = parseIsoDateOnly(endDate);
+  if (!start || !end || end.getTime() < start.getTime()) return [];
+  const out: string[] = [];
+  let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  const endMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+  while (cursor.getTime() <= endMonth.getTime()) {
+    out.push(monthKeyFromDate(cursor));
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+  }
+  return out;
+}
+
 function previousPeriodKeyFor(
   periodKey: string,
   periods: Array<{ key: string }>,
@@ -315,6 +360,142 @@ function contributionForSegmentMetric(
     return null;
   }
   return null;
+}
+
+function segmentFromFactRow(row: Pick<PrecomputedFactCustomerArrRow, "source" | "salesAssist">): TofuSegment {
+  if (row.source === "hubspot_account") {
+    return row.salesAssist ? "sales_assist" : "salesled";
+  }
+  return row.salesAssist ? "sales_assist" : "selfserve";
+}
+
+async function generateTofuDetailReportFromPrecomputedFacts(
+  request: TofuDetailRequest,
+  groupBy: TofuGroupBy,
+  detailSegment: TofuSegment | "",
+): Promise<TofuDetailResponse | null> {
+  if ((request.combineMode || "grouped") !== "grouped") return null;
+  if (!isPrecomputedFactsReadEnabled()) return null;
+
+  const detailPeriodKey = String(request.detailPeriodKey || "").trim();
+  if (!/^\d{4}-\d{2}$/.test(detailPeriodKey)) return null;
+  const months = monthKeysBetween(request.startDate, request.endDate);
+  const detailMonthIdx = months.indexOf(detailPeriodKey);
+  if (detailMonthIdx < 0) return null;
+
+  const previousPeriodKey = detailMonthIdx > 0 ? months[detailMonthIdx - 1] : "";
+  const currentPeriodDate = monthStartIsoFromKey(detailPeriodKey);
+  const previousPeriodDate = previousPeriodKey ? monthStartIsoFromKey(previousPeriodKey) : "";
+  if (!currentPeriodDate) return null;
+
+  const queryStartDate = previousPeriodDate || currentPeriodDate;
+  const queryEndDate = monthEndIsoFromKey(detailPeriodKey);
+  if (!queryStartDate || !queryEndDate) return null;
+
+  const factRows = await queryPrecomputedCustomerArrCurrent({
+    startDate: queryStartDate,
+    endDate: queryEndDate,
+    grain: "monthly",
+  }).catch(() => []);
+  if (!factRows.length) return null;
+
+  type CustomerPeriodSnapshot = {
+    customerKey: string;
+    customerLabel: string;
+    source: "hubspot_account" | "stripe_only_customer";
+    salesAssist: boolean;
+    arrEnd: number;
+    mrrEnd: number;
+  };
+  const byCustomer = new Map<string, { previous?: CustomerPeriodSnapshot; current?: CustomerPeriodSnapshot }>();
+  for (const row of factRows) {
+    const periodKey = monthKeyFromIsoDate(row.periodDate);
+    if (periodKey !== detailPeriodKey && periodKey !== previousPeriodKey) continue;
+    const snapshot: CustomerPeriodSnapshot = {
+      customerKey: row.customerKey,
+      customerLabel: row.customerLabel || row.customerKey,
+      source: row.source,
+      salesAssist: row.salesAssist,
+      arrEnd: round2(row.arrEnd),
+      mrrEnd: round2(row.mrrEnd),
+    };
+    const entry = byCustomer.get(row.customerKey) || {};
+    if (periodKey === detailPeriodKey) entry.current = snapshot;
+    if (periodKey === previousPeriodKey) entry.previous = snapshot;
+    byCustomer.set(row.customerKey, entry);
+  }
+
+  const detailRows: TofuDetailRow[] = [];
+  for (const [customerKey, snapshotPair] of byCustomer.entries()) {
+    const previousArr = round2(snapshotPair.previous?.arrEnd || 0);
+    const currentArr = round2(snapshotPair.current?.arrEnd || 0);
+    const previousMrr = round2(snapshotPair.previous?.mrrEnd || previousArr / 12);
+    const currentMrr = round2(snapshotPair.current?.mrrEnd || currentArr / 12);
+    const deltaArr = round2(currentArr - previousArr);
+    const deltaMrr = round2(currentMrr - previousMrr);
+    const source = snapshotPair.current?.source || snapshotPair.previous?.source || "stripe_only_customer";
+    const customerLabel = snapshotPair.current?.customerLabel || snapshotPair.previous?.customerLabel || customerKey;
+    const previousSegment = snapshotPair.previous
+      ? segmentFromFactRow(snapshotPair.previous)
+      : "selfserve";
+    const currentSegment = snapshotPair.current
+      ? segmentFromFactRow(snapshotPair.current)
+      : "selfserve";
+
+    const contributionArr =
+      groupBy === "segment" && detailSegment
+        ? contributionForSegmentMetric(
+            request.detailMetric,
+            detailSegment,
+            previousArr,
+            currentArr,
+            previousSegment,
+            currentSegment,
+          )
+        : contributionForMetric(request.detailMetric, previousArr, currentArr);
+    if (contributionArr == null) continue;
+
+    detailRows.push({
+      customerId: customerKey,
+      customerLabel,
+      source,
+      previousArr,
+      currentArr,
+      deltaArr,
+      previousMrr,
+      currentMrr,
+      deltaMrr,
+      contributionArr: round2(contributionArr),
+      contributionMrr: round2(contributionArr / 12),
+    });
+  }
+
+  detailRows.sort((a, b) => {
+    const diff = Math.abs(b.contributionMrr) - Math.abs(a.contributionMrr);
+    if (Math.abs(diff) > 1e-9) return diff;
+    return a.customerLabel.localeCompare(b.customerLabel);
+  });
+
+  return {
+    startDate: request.startDate,
+    endDate: request.endDate,
+    combineMode: "grouped",
+    targetCurrency: "USD",
+    detailGroupBy: groupBy,
+    detailSegment: groupBy === "segment" && detailSegment ? detailSegment : undefined,
+    detailSegmentLabel: groupBy === "segment" && detailSegment ? SEGMENT_LABELS[detailSegment] : undefined,
+    detailPeriodKey,
+    detailPeriodLabel: detailPeriodKey,
+    detailPreviousPeriodKey: previousPeriodKey,
+    detailPreviousPeriodLabel: previousPeriodKey,
+    detailMetric: request.detailMetric,
+    rows: detailRows,
+    summary: {
+      rowCount: detailRows.length,
+      totalArr: round2(detailRows.reduce((sum, row) => sum + row.contributionArr, 0)),
+      totalMrr: round2(detailRows.reduce((sum, row) => sum + row.contributionMrr, 0)),
+    },
+  };
 }
 
 export async function generateTofuReport(request: TofuRequest): Promise<TofuResponse> {
@@ -645,6 +826,13 @@ export async function generateTofuDetailReport(request: TofuDetailRequest): Prom
   if (groupBy === "segment" && !detailSegment) {
     throw new Error("Invalid detail segment");
   }
+
+  const precomputedDetail = await generateTofuDetailReportFromPrecomputedFacts(
+    request,
+    groupBy,
+    detailSegment,
+  ).catch(() => null);
+  if (precomputedDetail) return precomputedDetail;
 
   const { expanded, periods, allPeriodKeys } = await loadExpandedTofuSource(request);
   const detailPeriodKey = String(request.detailPeriodKey || "").trim();
