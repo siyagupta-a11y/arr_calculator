@@ -84,6 +84,10 @@ type RequestBody = {
   chunkMonths?: number;
 };
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function readAiSpendCoverage() {
   const rows = await runBigQuerySqlRows(
     `
@@ -259,25 +263,43 @@ export async function POST(req: NextRequest) {
 
     const executed: ExecutedSyncTask[] = [];
     for (const task of selected) {
-      try {
-        const result = await syncPrecomputedFacts({
-          mode: "full",
-          startDate: task.startDate,
-          endDate: task.endDate,
-          includeDaily: task.includeDaily,
-          includeMonthly: task.includeMonthly,
-          includeCustomerArrDaily: task.includeCustomerArrDaily,
-          includeAiSpendDaily: task.includeAiSpendDaily,
-          includeCustomerArrMonthly: task.includeCustomerArrMonthly,
-          includeTofuMonthly: task.includeTofuMonthly,
-        });
-        const ok = (result.steps || []).every((step) => step.ok);
-        executed.push({ ...task, ok, result });
-      } catch (error: unknown) {
+      let succeeded = false;
+      let lastError = "";
+      let lastResult: PrecomputedFactsSyncResult | undefined;
+      for (let attempt = 1; attempt <= 3 && !succeeded; attempt += 1) {
+        try {
+          const result = await syncPrecomputedFacts({
+            mode: "full",
+            startDate: task.startDate,
+            endDate: task.endDate,
+            includeDaily: task.includeDaily,
+            includeMonthly: task.includeMonthly,
+            includeCustomerArrDaily: task.includeCustomerArrDaily,
+            includeAiSpendDaily: task.includeAiSpendDaily,
+            includeCustomerArrMonthly: task.includeCustomerArrMonthly,
+            includeTofuMonthly: task.includeTofuMonthly,
+          });
+          const ok = (result.steps || []).every((step) => step.ok);
+          if (ok) {
+            succeeded = true;
+            lastResult = result;
+            break;
+          }
+          lastError = result.steps.find((step) => !step.ok)?.detail || "Sync reported failure";
+        } catch (error: unknown) {
+          lastError = error instanceof Error ? error.message : String(error);
+        }
+        if (!succeeded && attempt < 3) {
+          await sleep(Math.min(8_000, 1_000 * 2 ** (attempt - 1)));
+        }
+      }
+      if (succeeded) {
+        executed.push({ ...task, ok: true, result: lastResult });
+      } else {
         executed.push({
           ...task,
           ok: false,
-          error: error instanceof Error ? error.message : String(error),
+          error: lastError || "Unknown error",
         });
       }
     }
