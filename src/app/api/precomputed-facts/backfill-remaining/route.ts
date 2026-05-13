@@ -67,6 +67,10 @@ type PlannedSyncTask = {
   endDate: string;
   includeDaily: boolean;
   includeMonthly: boolean;
+  includeCustomerArrDaily?: boolean;
+  includeAiSpendDaily?: boolean;
+  includeCustomerArrMonthly?: boolean;
+  includeTofuMonthly?: boolean;
 };
 
 type ExecutedSyncTask = PlannedSyncTask & {
@@ -125,6 +129,8 @@ function buildRemainingTasks(todayIso: string, ai: { rowCount: number; minDate: 
       endDate: todayIso,
       includeDaily: true,
       includeMonthly: false,
+      includeCustomerArrDaily: false,
+      includeAiSpendDaily: true,
     });
   } else {
     const beforeStart = addDays(ai.minDate, -1);
@@ -135,6 +141,8 @@ function buildRemainingTasks(todayIso: string, ai: { rowCount: number; minDate: 
         endDate: beforeStart,
         includeDaily: true,
         includeMonthly: false,
+        includeCustomerArrDaily: false,
+        includeAiSpendDaily: true,
       });
     }
     const afterEnd = addDays(ai.maxDate, 1);
@@ -145,6 +153,8 @@ function buildRemainingTasks(todayIso: string, ai: { rowCount: number; minDate: 
         endDate: todayIso,
         includeDaily: true,
         includeMonthly: false,
+        includeCustomerArrDaily: false,
+        includeAiSpendDaily: true,
       });
     }
   }
@@ -161,6 +171,8 @@ function buildRemainingTasks(todayIso: string, ai: { rowCount: number; minDate: 
       endDate: todayIso,
       includeDaily: false,
       includeMonthly: true,
+      includeCustomerArrMonthly: false,
+      includeTofuMonthly: true,
     });
   } else {
     const nextMonthStart = addMonths(tofu.maxMonth, 1);
@@ -171,6 +183,8 @@ function buildRemainingTasks(todayIso: string, ai: { rowCount: number; minDate: 
         endDate: todayIso,
         includeDaily: false,
         includeMonthly: true,
+        includeCustomerArrMonthly: false,
+        includeTofuMonthly: true,
       });
     }
   }
@@ -213,6 +227,10 @@ function expandTasksToMonthChunks(tasks: PlannedSyncTask[], chunkMonths: number)
         endDate: chunkEnd,
         includeDaily: task.includeDaily,
         includeMonthly: task.includeMonthly,
+        includeCustomerArrDaily: task.includeCustomerArrDaily,
+        includeAiSpendDaily: task.includeAiSpendDaily,
+        includeCustomerArrMonthly: task.includeCustomerArrMonthly,
+        includeTofuMonthly: task.includeTofuMonthly,
       });
       cursor = addMonthsUtc(cursor, monthsPerChunk);
       if (!cursor) break;
@@ -248,6 +266,10 @@ export async function POST(req: NextRequest) {
           endDate: task.endDate,
           includeDaily: task.includeDaily,
           includeMonthly: task.includeMonthly,
+          includeCustomerArrDaily: task.includeCustomerArrDaily,
+          includeAiSpendDaily: task.includeAiSpendDaily,
+          includeCustomerArrMonthly: task.includeCustomerArrMonthly,
+          includeTofuMonthly: task.includeTofuMonthly,
         });
         const ok = (result.steps || []).every((step) => step.ok);
         executed.push({ ...task, ok, result });
@@ -273,6 +295,10 @@ export async function POST(req: NextRequest) {
           endDate: task.endDate,
           includeDaily: task.includeDaily,
           includeMonthly: task.includeMonthly,
+          includeCustomerArrDaily: task.includeCustomerArrDaily !== false,
+          includeAiSpendDaily: task.includeAiSpendDaily !== false,
+          includeCustomerArrMonthly: task.includeCustomerArrMonthly !== false,
+          includeTofuMonthly: task.includeTofuMonthly !== false,
           ok: task.ok,
           error: task.error || "",
           syncRunId: task.result?.syncRunId || "",

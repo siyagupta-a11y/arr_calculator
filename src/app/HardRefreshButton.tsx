@@ -584,12 +584,23 @@ export default function HardRefreshButton() {
       while (true) {
         round += 1;
         setSyncProgress(`Backfilling remaining gaps (run ${round})...`);
-        const res = await fetch("/api/precomputed-facts/backfill-remaining", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          cache: "no-store",
-          body: JSON.stringify({ maxTasks: 1, chunkMonths: 1 }),
-        });
+        let res: Response | null = null;
+        let lastFetchError = "";
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          try {
+            res = await fetch("/api/precomputed-facts/backfill-remaining", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              cache: "no-store",
+              body: JSON.stringify({ maxTasks: 1, chunkMonths: 1 }),
+            });
+            break;
+          } catch (error: unknown) {
+            lastFetchError = error instanceof Error ? error.message : "Failed to fetch";
+            if (attempt < 3) await sleep(1_000 * attempt);
+          }
+        }
+        if (!res) throw new Error(lastFetchError || "Failed to fetch");
         const text = await res.text();
         let payload: unknown = null;
         try {

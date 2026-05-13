@@ -36,6 +36,10 @@ export type PrecomputedFactsSyncRequest = {
   endDate?: string;
   includeDaily?: boolean;
   includeMonthly?: boolean;
+  includeCustomerArrDaily?: boolean;
+  includeAiSpendDaily?: boolean;
+  includeCustomerArrMonthly?: boolean;
+  includeTofuMonthly?: boolean;
   dirtyMonthKeys?: string[] | null;
 };
 
@@ -630,6 +634,10 @@ export function resolveSyncWindow(request: PrecomputedFactsSyncRequest) {
     endDate: resolvedEndDate,
     includeDaily: request.includeDaily !== false,
     includeMonthly: request.includeMonthly !== false,
+    includeCustomerArrDaily: request.includeCustomerArrDaily !== false,
+    includeAiSpendDaily: request.includeAiSpendDaily !== false,
+    includeCustomerArrMonthly: request.includeCustomerArrMonthly !== false,
+    includeTofuMonthly: request.includeTofuMonthly !== false,
   };
 }
 
@@ -670,12 +678,20 @@ export async function syncPrecomputedFacts(request: PrecomputedFactsSyncRequest)
     });
     await runStep("sync_dim_date", () => syncDateDimension(window.startDate, window.endDate));
     if (window.includeDaily) {
-      await runStep("sync_customer_arr_daily", () => syncCustomerArrPeriodic(window.startDate, window.endDate, "daily", syncRunId));
-      await runStep("sync_ai_spend_daily_agg", () => syncAiSpendDailyAgg(window.startDate, window.endDate, syncRunId));
+      if (window.includeCustomerArrDaily) {
+        await runStep("sync_customer_arr_daily", () => syncCustomerArrPeriodic(window.startDate, window.endDate, "daily", syncRunId));
+      }
+      if (window.includeAiSpendDaily) {
+        await runStep("sync_ai_spend_daily_agg", () => syncAiSpendDailyAgg(window.startDate, window.endDate, syncRunId));
+      }
     }
     if (window.includeMonthly) {
-      await runStep("sync_customer_arr_monthly", () => syncCustomerArrPeriodic(window.startDate, window.endDate, "monthly", syncRunId));
-      await runStep("sync_tofu_monthly", () => syncTofuMonthly(window.startDate, window.endDate, syncRunId));
+      if (window.includeCustomerArrMonthly) {
+        await runStep("sync_customer_arr_monthly", () => syncCustomerArrPeriodic(window.startDate, window.endDate, "monthly", syncRunId));
+      }
+      if (window.includeTofuMonthly) {
+        await runStep("sync_tofu_monthly", () => syncTofuMonthly(window.startDate, window.endDate, syncRunId));
+      }
     }
   } finally {
     const finishedAtUtc = new Date().toISOString();
