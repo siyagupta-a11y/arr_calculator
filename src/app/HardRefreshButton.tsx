@@ -68,6 +68,8 @@ type PageBackfillTarget =
   | "hubspot_view_model"
   | "all";
 
+type PageBackfillSingleTarget = Exclude<PageBackfillTarget, "all">;
+
 type PageBackfillJob = {
   label: string;
   endpoint: string;
@@ -83,6 +85,16 @@ const PAGE_BACKFILL_TARGET_OPTIONS: Array<{ value: PageBackfillTarget; label: st
   { value: "stripe_through_mrr", label: "Stripe Through MRR" },
   { value: "hubspot_view_model", label: "HubSpot View Model" },
   { value: "all", label: "All page targets" },
+];
+
+const PAGE_BACKFILL_SINGLE_TARGET_OPTIONS: Array<{ value: PageBackfillSingleTarget; label: string }> = [
+  { value: "combined_billing_overview", label: "Combined Billing Overview" },
+  { value: "ndr_gdr", label: "NDR/GDR" },
+  { value: "tofu", label: "TOFU" },
+  { value: "combined_all_subs", label: "Combined All Subs" },
+  { value: "stripe_billing_overview", label: "Stripe Billing Overview" },
+  { value: "stripe_through_mrr", label: "Stripe Through MRR" },
+  { value: "hubspot_view_model", label: "HubSpot View Model" },
 ];
 
 export default function HardRefreshButton() {
@@ -465,7 +477,7 @@ export default function HardRefreshButton() {
   }
 
   function buildJobsForTarget(
-    target: Exclude<PageBackfillTarget, "all">,
+    target: PageBackfillSingleTarget,
     chunk: { startDate: string; endDate: string; label: string },
   ): PageBackfillJob[] {
     const detailStartMonth = monthKeyFromIsoDate(chunk.startDate);
@@ -679,7 +691,7 @@ export default function HardRefreshButton() {
     ];
   }
 
-  async function runPageBackfill() {
+  async function runPageBackfillTargets(targets: PageBackfillSingleTarget[], customPrefix?: string) {
     if (!debugStartDate || !debugEndDate) {
       setMessage("Select start and end dates for page backfill.");
       return;
@@ -695,18 +707,6 @@ export default function HardRefreshButton() {
       setMessage("No monthly chunks generated for page backfill.");
       return;
     }
-
-    const targets: Array<Exclude<PageBackfillTarget, "all">> = pageBackfillTarget === "all"
-      ? [
-          "combined_billing_overview",
-          "ndr_gdr",
-          "tofu",
-          "combined_all_subs",
-          "stripe_billing_overview",
-          "stripe_through_mrr",
-          "hubspot_view_model",
-        ]
-      : [pageBackfillTarget];
 
     const jobs: PageBackfillJob[] = [];
     for (const chunk of chunks) {
@@ -728,7 +728,8 @@ export default function HardRefreshButton() {
     try {
       for (let i = 0; i < jobs.length; i += 1) {
         const job = jobs[i];
-        setSyncProgress(`Page backfill ${i + 1}/${jobs.length}: ${job.label}`);
+        const prefix = customPrefix || "Page backfill";
+        setSyncProgress(`${prefix} ${i + 1}/${jobs.length}: ${job.label}`);
 
         let succeeded = false;
         let lastError = "";
@@ -778,6 +779,21 @@ export default function HardRefreshButton() {
       setSyncProgress("");
       setPageBackfillLoading(false);
     }
+  }
+
+  async function runPageBackfill() {
+    const targets: PageBackfillSingleTarget[] = pageBackfillTarget === "all"
+      ? [
+          "combined_billing_overview",
+          "ndr_gdr",
+          "tofu",
+          "combined_all_subs",
+          "stripe_billing_overview",
+          "stripe_through_mrr",
+          "hubspot_view_model",
+        ]
+      : [pageBackfillTarget];
+    await runPageBackfillTargets(targets, "Page backfill");
   }
 
   async function backfillFacts() {
@@ -1354,6 +1370,61 @@ export default function HardRefreshButton() {
               >
                 {pageBackfillLoading ? "Backfilling..." : "Run page backfill"}
               </button>
+            </div>
+            <div style={{ marginTop: 10, borderTop: "1px dashed #cbd5e1", paddingTop: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
+                One-click page backfill buttons
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                {PAGE_BACKFILL_SINGLE_TARGET_OPTIONS.map((targetOption) => (
+                  <button
+                    key={targetOption.value}
+                    type="button"
+                    onClick={() => void runPageBackfillTargets([targetOption.value], `${targetOption.label} backfill`)}
+                    disabled={
+                      pageBackfillLoading ||
+                      debugLoading ||
+                      loading ||
+                      syncLoading ||
+                      backfillLoading ||
+                      matchMetadataBackfillLoading
+                    }
+                    style={{
+                      borderRadius: 8,
+                      border: "1px solid #334155",
+                      background: "#ffffff",
+                      color: "#0f172a",
+                      padding: "6px 8px",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      textAlign: "left",
+                      cursor:
+                        pageBackfillLoading ||
+                        debugLoading ||
+                        loading ||
+                        syncLoading ||
+                        backfillLoading ||
+                        matchMetadataBackfillLoading
+                          ? "wait"
+                          : "pointer",
+                      opacity:
+                        pageBackfillLoading ||
+                        debugLoading ||
+                        loading ||
+                        syncLoading ||
+                        backfillLoading ||
+                        matchMetadataBackfillLoading
+                          ? 0.7
+                          : 1,
+                    }}
+                  >
+                    {targetOption.label}
+                  </button>
+                ))}
+              </div>
+              <div style={{ marginTop: 6, fontSize: 11, color: "#475569", lineHeight: 1.4 }}>
+                Uses the selected start/end dates and chunk size above.
+              </div>
             </div>
           </div>
           <div style={{ marginTop: 10, borderTop: "1px solid #cbd5e1", paddingTop: 10 }}>
