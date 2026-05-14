@@ -166,7 +166,7 @@ export default function LeasePredictionPage() {
     try {
       const res = await fetch("/api/lease-prediction/documents", { cache: "no-store" });
       const { json } = await readJsonResponse<DocumentsResponse>(res);
-      const payload = json;
+      const payload = json || { ok: false, error: `HTTP ${res.status}` };
       if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);
       const docs = Array.isArray(payload.documents) ? payload.documents : [];
       setDocuments(docs);
