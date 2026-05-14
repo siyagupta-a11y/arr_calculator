@@ -24,6 +24,12 @@ type MixpanelMetricsResult = {
   activeBuilders10of30: ProviderResult;
 };
 
+type MixpanelSavedReportContext = {
+  projectId: string;
+  workspaceId?: string;
+  bookmarkId?: string;
+};
+
 function isIsoDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
 }
@@ -68,6 +74,53 @@ function findFirstNumber(value: unknown): number | null {
     }
   }
   return null;
+}
+
+function readFirstNonEmptyEnv(names: string[]) {
+  for (const name of names) {
+    const value = String(process.env[name] || "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function buildBasicAuthHeader(token: string) {
+  return `Basic ${Buffer.from(`${token}:`).toString("base64")}`;
+}
+
+function parsePositiveIntegerText(value: string) {
+  const raw = String(value || "").trim();
+  if (!/^\d+$/.test(raw)) return "";
+  return String(Number(raw));
+}
+
+function extractMixpanelReportContextFromUrl(rawUrl: string): MixpanelSavedReportContext | null {
+  const raw = String(rawUrl || "").trim();
+  if (!raw) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+
+  const context: MixpanelSavedReportContext = {};
+  const pathMatch = /^\/project\/(\d+)\/view\/(\d+)\b/.exec(url.pathname || "");
+  if (pathMatch) {
+    context.projectId = String(pathMatch[1] || "");
+    context.workspaceId = String(pathMatch[2] || "");
+  }
+
+  const hash = String(url.hash || "").replace(/^#/, "");
+  if (hash) {
+    const hashParams = new URLSearchParams(hash);
+    const editorCardIdRaw = decodeURIComponent(String(hashParams.get("editor-card-id") || ""));
+    const reportMatch = /report-(\d+)/i.exec(editorCardIdRaw);
+    if (reportMatch) context.bookmarkId = String(reportMatch[1] || "");
+  }
+
+  if (!context.projectId && !context.bookmarkId) return null;
+  return context;
 }
 
 async function fetchProviderMetric(
@@ -140,6 +193,124 @@ async function fetchProviderMetric(
   }
 }
 
+async function fetchMixpanelSavedReportMetric(args: {
+  tokenEnvs: string[];
+  bookmarkIdEnv: string;
+  fallbackUrl?: string;
+}): Promise<ProviderResult> {
+  const token = readFirstNonEmptyEnv(args.tokenEnvs);
+  if (!token) {
+    return {
+      status: "not_configured",
+      value: null,
+      details: `Set one of: ${args.tokenEnvs.join(", ")}`,
+    };
+  }
+
+  const urlContext = extractMixpanelReportContextFromUrl(args.fallbackUrl || "");
+  const bookmarkId = parsePositiveIntegerText(String(process.env[args.bookmarkIdEnv] || "")) || urlContext?.bookmarkId || "";
+  const projectId =
+    parsePositiveIntegerText(String(process.env.MIXPANEL_PROJECT_ID || "")) ||
+    parsePositiveIntegerText(String(process.env.MODEL_UPDATE_MIXPANEL_PROJECT_ID || "")) ||
+    urlContext?.projectId ||
+    "";
+  const workspaceId =
+    parsePositiveIntegerText(String(process.env.MIXPANEL_WORKSPACE_ID || "")) ||
+    parsePositiveIntegerText(String(process.env.MODEL_UPDATE_MIXPANEL_WORKSPACE_ID || "")) ||
+    urlContext?.workspaceId ||
+    "";
+
+  if (!bookmarkId) {
+    return {
+      status: "not_configured",
+      value: null,
+      details: `${args.bookmarkIdEnv} is not set and no report id could be parsed from URL`,
+    };
+  }
+  if (!projectId) {
+    return {
+      status: "not_configured",
+      value: null,
+      details: "Set MIXPANEL_PROJECT_ID (or MODEL_UPDATE_MIXPANEL_PROJECT_ID), or provide a board URL with /project/<id>/...",
+    };
+  }
+
+  const url = new URL("https://mixpanel.com/api/query/insights");
+  url.searchParams.set("project_id", projectId);
+  url.searchParams.set("bookmark_id", bookmarkId);
+  if (workspaceId) url.searchParams.set("workspace_id", workspaceId);
+
+  try {
+    const res = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: buildBasicAuthHeader(token),
+      },
+      cache: "no-store",
+      signal: AbortSignal.timeout(20_000),
+    });
+    const text = await res.text();
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    if (!res.ok) {
+      return {
+        status: "error",
+        value: null,
+        details: `Insights API HTTP ${res.status}: ${text.slice(0, 300)}`,
+      };
+    }
+    const value = findFirstNumber(json);
+    if (value == null) {
+      return {
+        status: "error",
+        value: null,
+        details: "No numeric metric found in Mixpanel Insights response",
+      };
+    }
+    return { status: "ok", value };
+  } catch (error: unknown) {
+    return {
+      status: "error",
+      value: null,
+      details: error instanceof Error ? error.message : "Unknown error",
+    };
+  }
+}
+
+async function fetchMixpanelMetricWithFallback(args: {
+  endpointEnv: string;
+  bookmarkIdEnv: string;
+  tokenEnvs: string[];
+  queryParams: Record<string, string>;
+  baseEndpoint: string;
+}): Promise<ProviderResult> {
+  const endpointCandidate = String(process.env[args.endpointEnv] || "").trim();
+  const fallbackUrl = endpointCandidate || args.baseEndpoint;
+
+  const viaEndpoint = await fetchProviderMetric(
+    args.endpointEnv,
+    args.tokenEnvs,
+    args.queryParams,
+    args.baseEndpoint,
+  );
+  if (viaEndpoint.status === "ok") return viaEndpoint;
+
+  const viaSavedReport = await fetchMixpanelSavedReportMetric({
+    tokenEnvs: args.tokenEnvs,
+    bookmarkIdEnv: args.bookmarkIdEnv,
+    fallbackUrl,
+  });
+
+  if (viaSavedReport.status === "ok") return viaSavedReport;
+  if (viaEndpoint.status === "error") return viaEndpoint;
+  return viaSavedReport;
+}
+
 function toMonthStartIso(dateText: string) {
   return `${dateText.slice(0, 7)}-01`;
 }
@@ -170,28 +341,55 @@ async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise
 
   const [dauLastDay, wauLastDay, mauLastDay, signupsInMonth, productionMessagesInMonth, highVolumeWorkspacesInMonth, activeBuilders10of30] =
     await Promise.all([
-      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_DAU_ENDPOINT", tokenEnvs, withMetric("dau_last_day"), baseEndpoint),
-      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_WAU_ENDPOINT", tokenEnvs, withMetric("wau_last_day"), baseEndpoint),
-      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_MAU_ENDPOINT", tokenEnvs, withMetric("mau_last_day"), baseEndpoint),
-      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_SIGNUPS_ENDPOINT", tokenEnvs, withMetric("signups_in_month"), baseEndpoint),
-      fetchProviderMetric(
-        "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_ENDPOINT",
+      fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_DAU_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_DAU_BOOKMARK_ID",
         tokenEnvs,
-        withMetric("production_messages_in_month"),
+        queryParams: withMetric("dau_last_day"),
         baseEndpoint,
-      ),
-      fetchProviderMetric(
-        "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_ENDPOINT",
+      }),
+      fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_WAU_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_WAU_BOOKMARK_ID",
         tokenEnvs,
-        withMetric("high_volume_workspaces_1k_incoming"),
+        queryParams: withMetric("wau_last_day"),
         baseEndpoint,
-      ),
-      fetchProviderMetric(
-        "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_ENDPOINT",
+      }),
+      fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_MAU_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_MAU_BOOKMARK_ID",
         tokenEnvs,
-        withMetric("active_builders_10_of_30"),
+        queryParams: withMetric("mau_last_day"),
         baseEndpoint,
-      ),
+      }),
+      fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_SIGNUPS_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_SIGNUPS_BOOKMARK_ID",
+        tokenEnvs,
+        queryParams: withMetric("signups_in_month"),
+        baseEndpoint,
+      }),
+      fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_BOOKMARK_ID",
+        tokenEnvs,
+        queryParams: withMetric("production_messages_in_month"),
+        baseEndpoint,
+      }),
+      fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_BOOKMARK_ID",
+        tokenEnvs,
+        queryParams: withMetric("high_volume_workspaces_1k_incoming"),
+        baseEndpoint,
+      }),
+      fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_BOOKMARK_ID",
+        tokenEnvs,
+        queryParams: withMetric("active_builders_10_of_30"),
+        baseEndpoint,
+      }),
     ]);
 
   return {
