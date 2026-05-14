@@ -436,6 +436,9 @@ export default function CombinedAllSubsPage() {
             <Link href="/selfserve" className="stripe-ui__hero-link">
               Open Self Serve
             </Link>
+            <Link href="/weekly-dashboard" className="stripe-ui__hero-link">
+              Open Weekly Dashboard
+            </Link>
             <Link href="/access-control" className="stripe-ui__hero-link">
               Open Access Control
             </Link>

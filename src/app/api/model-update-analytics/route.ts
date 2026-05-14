@@ -72,7 +72,7 @@ function findFirstNumber(value: unknown): number | null {
 
 async function fetchProviderMetric(
   endpointEnv: string,
-  tokenEnv: string,
+  tokenEnvs: string[],
   queryParams: Record<string, string>,
   fallbackEndpoint?: string,
 ): Promise<ProviderResult> {
@@ -85,7 +85,9 @@ async function fetchProviderMetric(
     };
   }
 
-  const token = String(process.env[tokenEnv] || "").trim();
+  const token = tokenEnvs
+    .map((name) => String(process.env[name] || "").trim())
+    .find((value) => !!value) || "";
   const url = new URL(endpoint);
   for (const [key, value] of Object.entries(queryParams)) {
     url.searchParams.set(key, value);
@@ -153,7 +155,7 @@ function toMonthEndIso(dateText: string) {
 
 async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise<MixpanelMetricsResult> {
   const baseEndpoint = String(process.env.MODEL_UPDATE_MIXPANEL_ENDPOINT || "").trim();
-  const tokenEnv = "MODEL_UPDATE_MIXPANEL_BEARER_TOKEN";
+  const tokenEnvs = ["MODEL_UPDATE_MIXPANEL_BEARER_TOKEN", "MIXPANEL_SECRET"];
   const monthStart = toMonthStartIso(endDate);
   const monthEnd = toMonthEndIso(endDate);
   const baseParams = {
@@ -168,25 +170,25 @@ async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise
 
   const [dauLastDay, wauLastDay, mauLastDay, signupsInMonth, productionMessagesInMonth, highVolumeWorkspacesInMonth, activeBuilders10of30] =
     await Promise.all([
-      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_DAU_ENDPOINT", tokenEnv, withMetric("dau_last_day"), baseEndpoint),
-      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_WAU_ENDPOINT", tokenEnv, withMetric("wau_last_day"), baseEndpoint),
-      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_MAU_ENDPOINT", tokenEnv, withMetric("mau_last_day"), baseEndpoint),
-      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_SIGNUPS_ENDPOINT", tokenEnv, withMetric("signups_in_month"), baseEndpoint),
+      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_DAU_ENDPOINT", tokenEnvs, withMetric("dau_last_day"), baseEndpoint),
+      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_WAU_ENDPOINT", tokenEnvs, withMetric("wau_last_day"), baseEndpoint),
+      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_MAU_ENDPOINT", tokenEnvs, withMetric("mau_last_day"), baseEndpoint),
+      fetchProviderMetric("MODEL_UPDATE_MIXPANEL_SIGNUPS_ENDPOINT", tokenEnvs, withMetric("signups_in_month"), baseEndpoint),
       fetchProviderMetric(
         "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_ENDPOINT",
-        tokenEnv,
+        tokenEnvs,
         withMetric("production_messages_in_month"),
         baseEndpoint,
       ),
       fetchProviderMetric(
         "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_ENDPOINT",
-        tokenEnv,
+        tokenEnvs,
         withMetric("high_volume_workspaces_1k_incoming"),
         baseEndpoint,
       ),
       fetchProviderMetric(
         "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_ENDPOINT",
-        tokenEnv,
+        tokenEnvs,
         withMetric("active_builders_10_of_30"),
         baseEndpoint,
       ),
@@ -208,7 +210,7 @@ async function runReport(startDate: string, endDate: string) {
     fetchMixpanelMetrics(startDate, endDate),
     fetchProviderMetric(
       "MODEL_UPDATE_GA_ENDPOINT",
-      "MODEL_UPDATE_GA_BEARER_TOKEN",
+      ["MODEL_UPDATE_GA_BEARER_TOKEN"],
       {
         start_date: startDate,
         end_date: endDate,
