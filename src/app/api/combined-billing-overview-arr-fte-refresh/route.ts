@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { queryBambooHrFullTimeRosterByDate } from "@/lib/bamboohr";
 import { assertAdmin } from "@/lib/precomputedFacts";
-import { insertBigQueryRows, runBigQuerySqlRows, runBigQuerySqlStatement } from "@/lib/stripeBigquery";
+import { insertBigQueryRows, runBigQuerySqlRows } from "@/lib/stripeBigquery";
 
 export const runtime = "nodejs";
 export const maxDuration = 180;
@@ -168,14 +168,7 @@ type UpdateRowArgs = {
 
 async function rewriteCacheRows(rows: UpdateRowArgs[]) {
   if (!rows.length) return;
-  const { tableRef, project, dataset, table } = tableParts();
-  for (const row of rows) {
-    await runBigQuerySqlStatement(
-      `DELETE FROM ${tableRef} WHERE cache_key = @cache_key`,
-      [{ name: "cache_key", type: "STRING", value: row.cacheKey }],
-      { profile: "stripe_arr_correct" },
-    );
-  }
+  const { project, dataset, table } = tableParts();
   await insertBigQueryRows({
     projectId: project,
     dataset,
