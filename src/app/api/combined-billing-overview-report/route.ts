@@ -382,13 +382,19 @@ async function writePrecomputedCombinedBillingPayload(args: {
 
 const COMBINED_BILLING_CANONICAL_KEY_PREFIX = "api:combined-billing-overview:";
 const COMBINED_BILLING_RANGE_KEY_PREFIX = "api:combined-billing-overview:range:";
+const COMBINED_BILLING_SOURCE_SPLIT_VERSION = 2;
 
 function normalizeCachePayloadForCompare(raw: Record<string, unknown>) {
+  const sourceSplitVersionRaw = Number(raw.sourceSplitVersion || 1);
+  const sourceSplitVersion = Number.isFinite(sourceSplitVersionRaw)
+    ? Math.max(1, Math.floor(sourceSplitVersionRaw))
+    : 1;
   return {
     grain: String(raw.grain || "monthly").trim().toLowerCase(),
     includeCac: raw.includeCac !== false,
     accountIds: normalizeIdList(Array.isArray(raw.accountIds) ? raw.accountIds : []).sort(),
     accountNames: normalizeNames(Array.isArray(raw.accountNames) ? raw.accountNames : []).sort(),
+    sourceSplitVersion,
   };
 }
 
@@ -1093,14 +1099,9 @@ function resolveCombinedAllSubsPeriodKey(
 
 function sourceSegmentForCombinedAllSubsRow(
   row: CombinedAllSubsResponse["rows"][number],
-  reportPeriodKey: string,
 ): SourceSegment {
   if (row.source === "hubspot_account") return "salesled";
-  const salesAssistValue =
-    row.salesAssistByPeriod?.[reportPeriodKey] ??
-    row.salesAssist ??
-    "no";
-  return String(salesAssistValue || "").trim().toLowerCase() === "yes" ? "salesled" : "selfserve";
+  return "selfserve";
 }
 
 function applySegmentMovement(
@@ -1196,8 +1197,8 @@ function buildSourcePointsFromCombinedAllSubsReport(
     for (const row of report.rows || []) {
       const currArr = round2(Number(row.valuesByPeriod?.[period.reportKey] || 0));
       const prevArr = round2(Number(row.valuesByPeriod?.[prevKey] || 0));
-      const currSegment = sourceSegmentForCombinedAllSubsRow(row, period.reportKey);
-      const prevSegment = sourceSegmentForCombinedAllSubsRow(row, prevKey);
+      const currSegment = sourceSegmentForCombinedAllSubsRow(row);
+      const prevSegment = sourceSegmentForCombinedAllSubsRow(row);
 
       for (const segment of segmentOrder) {
         applySegmentMovement(accBySegment[segment], segment, prevSegment, currSegment, prevArr, currArr);
@@ -2858,6 +2859,7 @@ async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
       ...payload,
       accountIds: cacheScopedSelection.accountIds,
       accountNames: cacheScopedSelection.accountNames,
+      sourceSplitVersion: COMBINED_BILLING_SOURCE_SPLIT_VERSION,
     };
     const key = `api:combined-billing-overview:range:${stableStringify(roleScopedPayload)}`;
     return getOrSetCache(key, CACHE_TTL_MS, async () => {
@@ -2895,6 +2897,7 @@ async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
       endDate: canonicalEndDate,
       accountIds: cacheScopedSelection.accountIds,
       accountNames: cacheScopedSelection.accountNames,
+      sourceSplitVersion: COMBINED_BILLING_SOURCE_SPLIT_VERSION,
     };
     const canonicalKey = `api:combined-billing-overview:${stableStringify(canonicalPayload)}`;
     const canonical = await getOrSetCache(canonicalKey, CACHE_TTL_MS, async () => {
