@@ -25,7 +25,7 @@ type MixpanelMetricsResult = {
 };
 
 type MixpanelSavedReportContext = {
-  projectId: string;
+  projectId?: string;
   workspaceId?: string;
   bookmarkId?: string;
 };
