@@ -2903,6 +2903,28 @@ export default function Home() {
               />
             )}
 
+            {chartGroupingEnabled ? (
+              <MultiLineChartCard
+                title="Churn Over Time"
+                subtitle={`Period churn (MRR), split by ${chartGroupingLabel.toLowerCase()}.`}
+                periods={chartPeriodOrder}
+                series={groupedChartSeries}
+                valueAccessor={(p) => p.churnMrr}
+                valueFormatter={(v) => fmtMoney(v, "normal")}
+                includeZero
+              />
+            ) : (
+              <LineChartCard
+                title="Churn Over Time"
+                subtitle="Period churn represented as MRR."
+                points={chartPoints}
+                valueAccessor={(p) => p.churnMrr}
+                valueFormatter={(v) => fmtMoney(v, "normal")}
+                stroke="#ef4444"
+                includeZero
+              />
+            )}
+
             <DeltaBarChartCard
               title="ARR Growth Over Time"
               subtitle={
