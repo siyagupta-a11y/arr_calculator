@@ -667,44 +667,77 @@ export default function HardRefreshButton() {
       setMessage("Select both start and end dates.");
       return;
     }
+    if (arrFteEndDate < arrFteStartDate) {
+      setMessage("End date must be on or after start date.");
+      return;
+    }
     setArrFteRefreshLoading(true);
     setMessage("");
     setSyncProgress("Refreshing ARR/FTE cache rows...");
     try {
-      const res = await fetch("/api/combined-billing-overview-arr-fte-refresh", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        cache: "no-store",
-        body: JSON.stringify({
-          startDate: arrFteStartDate,
-          endDate: arrFteEndDate,
-          includeRangeKeys: true,
-          includeCanonicalKeys: true,
-        }),
-      });
+      const chunks = buildMonthChunks(arrFteStartDate, arrFteEndDate, 3);
+      if (!chunks.length) throw new Error("Invalid ARR/FTE date range.");
 
-      const text = await res.text();
-      let payload: Record<string, unknown> | null = null;
-      try {
-        payload = text ? (JSON.parse(text) as Record<string, unknown>) : null;
-      } catch {
-        payload = null;
+      let totalUpdatedRows = 0;
+      let totalScannedRows = 0;
+      const touchedMonths = new Set<string>();
+
+      for (let idx = 0; idx < chunks.length; idx += 1) {
+        const chunk = chunks[idx];
+        setSyncProgress(`Refreshing ARR/FTE (${idx + 1}/${chunks.length}): ${chunk.label}`);
+
+        let success = false;
+        let lastError = "";
+        for (let attempt = 1; attempt <= 3 && !success; attempt += 1) {
+          try {
+            const res = await fetch("/api/combined-billing-overview-arr-fte-refresh", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              cache: "no-store",
+              body: JSON.stringify({
+                startDate: chunk.startDate,
+                endDate: chunk.endDate,
+                includeRangeKeys: true,
+                includeCanonicalKeys: true,
+              }),
+            });
+
+            const text = await res.text();
+            let payload: Record<string, unknown> | null = null;
+            try {
+              payload = text ? (JSON.parse(text) as Record<string, unknown>) : null;
+            } catch {
+              payload = null;
+            }
+
+            if (!res.ok) {
+              const payloadError = String(payload?.error || "").trim();
+              const snippet = text.replace(/\s+/g, " ").slice(0, 220);
+              throw new Error(payloadError || snippet || `HTTP ${res.status}`);
+            }
+
+            totalUpdatedRows += Math.max(0, Number(payload?.updatedRows || 0));
+            totalScannedRows += Math.max(0, Number(payload?.scannedRows || 0));
+            const chunkMonths = Array.isArray(payload?.touchedMonths)
+              ? payload.touchedMonths.map((value) => String(value || "")).filter(Boolean)
+              : [];
+            for (const month of chunkMonths) touchedMonths.add(month);
+            success = true;
+          } catch (error: unknown) {
+            lastError = error instanceof Error ? error.message : "Unknown error";
+            if (attempt < 3) await sleep(500 * attempt);
+          }
+        }
+
+        if (!success) {
+          throw new Error(`ARR/FTE refresh failed for ${chunk.label}: ${lastError || "Unknown error"}`);
+        }
+        await sleep(120);
       }
 
-      if (!res.ok) {
-        const payloadError = String(payload?.error || "").trim();
-        const snippet = text.replace(/\s+/g, " ").slice(0, 220);
-        throw new Error(payloadError || snippet || `HTTP ${res.status}`);
-      }
-
-      const updatedRows = Math.max(0, Number(payload?.updatedRows || 0));
-      const scannedRows = Math.max(0, Number(payload?.scannedRows || 0));
-      const touchedMonths = Array.isArray(payload?.touchedMonths)
-        ? payload.touchedMonths.map((value) => String(value || "")).filter(Boolean)
-        : [];
       setMessage(
-        `ARR/FTE refresh done. Updated ${updatedRows} cache row(s) out of ${scannedRows} scanned. ` +
-          `Months: ${touchedMonths.slice(0, 6).join(", ")}${touchedMonths.length > 6 ? "..." : ""}`,
+        `ARR/FTE refresh done. Updated ${totalUpdatedRows} cache row(s) out of ${totalScannedRows} scanned. ` +
+          `Months: ${Array.from(touchedMonths).sort().slice(0, 6).join(", ")}${touchedMonths.size > 6 ? "..." : ""}`,
       );
     } catch (error: unknown) {
       setMessage(error instanceof Error ? error.message : "ARR/FTE refresh failed");
