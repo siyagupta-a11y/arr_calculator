@@ -291,13 +291,32 @@ async function fetchMixpanelMetricWithFallback(args: {
 }): Promise<ProviderResult> {
   const endpointCandidate = String(process.env[args.endpointEnv] || "").trim();
   const fallbackUrl = endpointCandidate || args.baseEndpoint;
+  const endpointUrlRaw = endpointCandidate || args.baseEndpoint;
+  let shouldCallCustomEndpoint = true;
+  try {
+    if (endpointUrlRaw) {
+      const parsed = new URL(endpointUrlRaw);
+      if (parsed.hostname.toLowerCase().endsWith("mixpanel.com")) {
+        // Mixpanel URLs should be queried through the saved-report API fallback, not as generic metric endpoints.
+        shouldCallCustomEndpoint = false;
+      }
+    }
+  } catch {
+    // Keep default behavior if URL is malformed; fetchProviderMetric will report a useful error.
+  }
 
-  const viaEndpoint = await fetchProviderMetric(
-    args.endpointEnv,
-    args.tokenEnvs,
-    args.queryParams,
-    args.baseEndpoint,
-  );
+  const viaEndpoint = shouldCallCustomEndpoint
+    ? await fetchProviderMetric(
+        args.endpointEnv,
+        args.tokenEnvs,
+        args.queryParams,
+        args.baseEndpoint,
+      )
+    : {
+        status: "not_configured" as const,
+        value: null,
+        details: "Using Mixpanel direct query fallback",
+      };
   if (viaEndpoint.status === "ok") return viaEndpoint;
 
   const viaSavedReport = await fetchMixpanelSavedReportMetric({
