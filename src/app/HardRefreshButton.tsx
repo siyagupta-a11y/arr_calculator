@@ -38,6 +38,9 @@ export default function HardRefreshButton() {
   const [message, setMessage] = useState("");
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
   const [remainingBackfillLoading, setRemainingBackfillLoading] = useState(false);
+  const [arrFteRefreshLoading, setArrFteRefreshLoading] = useState(false);
+  const [arrFteStartDate, setArrFteStartDate] = useState("2023-01-01");
+  const [arrFteEndDate, setArrFteEndDate] = useState(toIsoDateUtc(new Date()));
 
   useEffect(() => {
     let active = true;
@@ -659,6 +662,58 @@ export default function HardRefreshButton() {
     }
   }
 
+  async function refreshArrFteOnly() {
+    if (!arrFteStartDate || !arrFteEndDate) {
+      setMessage("Select both start and end dates.");
+      return;
+    }
+    setArrFteRefreshLoading(true);
+    setMessage("");
+    setSyncProgress("Refreshing ARR/FTE cache rows...");
+    try {
+      const res = await fetch("/api/combined-billing-overview-arr-fte-refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          startDate: arrFteStartDate,
+          endDate: arrFteEndDate,
+          includeRangeKeys: true,
+          includeCanonicalKeys: true,
+        }),
+      });
+
+      const text = await res.text();
+      let payload: Record<string, unknown> | null = null;
+      try {
+        payload = text ? (JSON.parse(text) as Record<string, unknown>) : null;
+      } catch {
+        payload = null;
+      }
+
+      if (!res.ok) {
+        const payloadError = String(payload?.error || "").trim();
+        const snippet = text.replace(/\s+/g, " ").slice(0, 220);
+        throw new Error(payloadError || snippet || `HTTP ${res.status}`);
+      }
+
+      const updatedRows = Math.max(0, Number(payload?.updatedRows || 0));
+      const scannedRows = Math.max(0, Number(payload?.scannedRows || 0));
+      const touchedMonths = Array.isArray(payload?.touchedMonths)
+        ? payload.touchedMonths.map((value) => String(value || "")).filter(Boolean)
+        : [];
+      setMessage(
+        `ARR/FTE refresh done. Updated ${updatedRows} cache row(s) out of ${scannedRows} scanned. ` +
+          `Months: ${touchedMonths.slice(0, 6).join(", ")}${touchedMonths.length > 6 ? "..." : ""}`,
+      );
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "ARR/FTE refresh failed");
+    } finally {
+      setSyncProgress("");
+      setArrFteRefreshLoading(false);
+    }
+  }
+
   return (
     <div
       style={{
@@ -745,7 +800,8 @@ export default function HardRefreshButton() {
                   remainingBackfillLoading ||
                   loading ||
                   syncLoading ||
-                  backfillLoading
+                  backfillLoading ||
+                  arrFteRefreshLoading
                 }
                 style={{
                   borderRadius: 8,
@@ -759,13 +815,76 @@ export default function HardRefreshButton() {
                     remainingBackfillLoading ||
                     loading ||
                     syncLoading ||
-                    backfillLoading
+                    backfillLoading ||
+                    arrFteRefreshLoading
                       ? "wait"
                       : "pointer",
                 }}
               >
                 {remainingBackfillLoading ? "Backfilling..." : "Backfill remaining only"}
               </button>
+            </div>
+          </div>
+          <div style={{ marginTop: 10, borderTop: "1px solid #cbd5e1", paddingTop: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>ARR/FTE refresh only</div>
+            <div style={{ fontSize: 11, color: "#334155", lineHeight: 1.4 }}>
+              Recomputes only BambooHR-based ARR/FTE values for combined billing cache rows in this date range.
+            </div>
+            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <label style={{ fontSize: 11, color: "#334155" }}>
+                  Start
+                  <input
+                    type="date"
+                    value={arrFteStartDate}
+                    onChange={(event) => setArrFteStartDate(event.target.value)}
+                    style={{
+                      marginLeft: 6,
+                      border: "1px solid #94a3b8",
+                      borderRadius: 6,
+                      padding: "4px 6px",
+                      fontSize: 12,
+                    }}
+                  />
+                </label>
+                <label style={{ fontSize: 11, color: "#334155" }}>
+                  End
+                  <input
+                    type="date"
+                    value={arrFteEndDate}
+                    onChange={(event) => setArrFteEndDate(event.target.value)}
+                    style={{
+                      marginLeft: 6,
+                      border: "1px solid #94a3b8",
+                      borderRadius: 6,
+                      padding: "4px 6px",
+                      fontSize: 12,
+                    }}
+                  />
+                </label>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  type="button"
+                  onClick={() => void refreshArrFteOnly()}
+                  disabled={arrFteRefreshLoading || loading || syncLoading || backfillLoading || remainingBackfillLoading}
+                  style={{
+                    borderRadius: 8,
+                    border: "1px solid #0f766e",
+                    background: arrFteRefreshLoading ? "#115e59" : "#0f766e",
+                    color: "#ffffff",
+                    padding: "6px 10px",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor:
+                      arrFteRefreshLoading || loading || syncLoading || backfillLoading || remainingBackfillLoading
+                        ? "wait"
+                        : "pointer",
+                  }}
+                >
+                  {arrFteRefreshLoading ? "Refreshing..." : "Refresh ARR/FTE only"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -776,7 +895,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void syncNow("fast")}
-              disabled={syncLoading || backfillLoading || remainingBackfillLoading || loading}
+              disabled={syncLoading || backfillLoading || remainingBackfillLoading || arrFteRefreshLoading || loading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #1d4ed8",
@@ -785,7 +904,10 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || backfillLoading || remainingBackfillLoading || loading ? "wait" : "pointer",
+                cursor:
+                  syncLoading || backfillLoading || remainingBackfillLoading || arrFteRefreshLoading || loading
+                    ? "wait"
+                    : "pointer",
               }}
               title="Sync dirty changes only (fast incremental)"
             >
@@ -794,7 +916,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void syncNow("full")}
-              disabled={syncLoading || backfillLoading || remainingBackfillLoading || loading}
+              disabled={syncLoading || backfillLoading || remainingBackfillLoading || arrFteRefreshLoading || loading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #475569",
@@ -803,7 +925,10 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || backfillLoading || remainingBackfillLoading || loading ? "wait" : "pointer",
+                cursor:
+                  syncLoading || backfillLoading || remainingBackfillLoading || arrFteRefreshLoading || loading
+                    ? "wait"
+                    : "pointer",
               }}
               title="Full historical sync"
             >
@@ -812,7 +937,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => setDebugPanelOpen((prev) => !prev)}
-              disabled={syncLoading || backfillLoading || remainingBackfillLoading || loading}
+              disabled={syncLoading || backfillLoading || remainingBackfillLoading || arrFteRefreshLoading || loading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #0369a1",
@@ -821,7 +946,10 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: syncLoading || backfillLoading || remainingBackfillLoading || loading ? "wait" : "pointer",
+                cursor:
+                  syncLoading || backfillLoading || remainingBackfillLoading || arrFteRefreshLoading || loading
+                    ? "wait"
+                    : "pointer",
               }}
               title="Run targeted date-range fact sync and view step-level output"
             >
@@ -830,7 +958,7 @@ export default function HardRefreshButton() {
             <button
               type="button"
               onClick={() => void backfillFacts()}
-              disabled={backfillLoading || syncLoading || remainingBackfillLoading || loading}
+              disabled={backfillLoading || syncLoading || remainingBackfillLoading || arrFteRefreshLoading || loading}
               style={{
                 borderRadius: 10,
                 border: "1px solid #065f46",
@@ -839,7 +967,10 @@ export default function HardRefreshButton() {
                 padding: "10px 12px",
                 fontSize: 13,
                 fontWeight: 700,
-                cursor: backfillLoading || syncLoading || remainingBackfillLoading || loading ? "wait" : "pointer",
+                cursor:
+                  backfillLoading || syncLoading || remainingBackfillLoading || arrFteRefreshLoading || loading
+                    ? "wait"
+                    : "pointer",
               }}
               title="Chunked full backfill into fact tables (safe retries)"
             >
@@ -850,7 +981,7 @@ export default function HardRefreshButton() {
         <button
           type="button"
           onClick={() => void hardRefresh()}
-          disabled={loading || syncLoading || backfillLoading || remainingBackfillLoading}
+          disabled={loading || syncLoading || backfillLoading || remainingBackfillLoading || arrFteRefreshLoading}
           style={{
             borderRadius: 10,
             border: "1px solid #0f172a",
@@ -859,7 +990,10 @@ export default function HardRefreshButton() {
             padding: "10px 12px",
             fontSize: 13,
             fontWeight: 700,
-            cursor: loading || syncLoading || backfillLoading || remainingBackfillLoading ? "wait" : "pointer",
+            cursor:
+              loading || syncLoading || backfillLoading || remainingBackfillLoading || arrFteRefreshLoading
+                ? "wait"
+                : "pointer",
           }}
           title="Clear server caches and reload all data from scratch"
         >
