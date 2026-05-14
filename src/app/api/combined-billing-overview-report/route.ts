@@ -2887,6 +2887,62 @@ async function validateAndRun(body: Partial<RequestBody>, isAdmin: boolean) {
   }
   if (payload.grain === "monthly") {
     const todayIso = toIsoDateOnly(new Date());
+    const requestedPayload = {
+      ...payload,
+      accountIds: cacheScopedSelection.accountIds,
+      accountNames: cacheScopedSelection.accountNames,
+      sourceSplitVersion: COMBINED_BILLING_SOURCE_SPLIT_VERSION,
+    };
+    const requestedRangeKey = `api:combined-billing-overview:range:${stableStringify(requestedPayload)}`;
+    if (!forceRefreshPrecomputed) {
+      const precomputedRequested = await readPrecomputedCombinedBillingPayload(requestedRangeKey).catch(() => null);
+      if (precomputedRequested) return precomputedRequested;
+      const stitchedRequested = await buildMonthlyCombinedBillingFromChunkRows({
+        startDate: payload.startDate,
+        endDate: payload.endDate,
+        includeCac: payload.includeCac,
+        comparePayload: requestedPayload,
+      });
+      if (stitchedRequested) {
+        await writePrecomputedCombinedBillingPayload({
+          cacheKey: requestedRangeKey,
+          includeCac: payload.includeCac,
+          canonicalStartDate: payload.startDate,
+          canonicalEndDate: payload.endDate,
+          payload: stitchedRequested,
+        }).catch(() => null);
+        return stitchedRequested;
+      }
+    }
+
+    const isWideCanonicalRequest =
+      payload.startDate <= MONTHLY_CANONICAL_START_DATE &&
+      payload.endDate >= todayIso;
+    if (!isWideCanonicalRequest) {
+      return getOrSetCache(requestedRangeKey, CACHE_TTL_MS, async () => {
+        if (!forceRefreshPrecomputed) {
+          const precomputed = await readPrecomputedCombinedBillingPayload(requestedRangeKey).catch(() => null);
+          if (precomputed) return precomputed;
+        }
+        const built = await buildCombinedBillingOverview(
+          payload.startDate,
+          payload.endDate,
+          payload.grain,
+          cacheScopedSelection.accountIds,
+          cacheScopedSelection.accountNames,
+          payload.includeCac,
+        );
+        await writePrecomputedCombinedBillingPayload({
+          cacheKey: requestedRangeKey,
+          includeCac: payload.includeCac,
+          canonicalStartDate: payload.startDate,
+          canonicalEndDate: payload.endDate,
+          payload: built,
+        }).catch(() => null);
+        return built;
+      });
+    }
+
     const canonicalStartDate = payload.startDate < MONTHLY_CANONICAL_START_DATE
       ? payload.startDate
       : MONTHLY_CANONICAL_START_DATE;
