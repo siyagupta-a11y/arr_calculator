@@ -4,7 +4,11 @@ import Link from "next/link";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type CombinedAllSubsRow = {
+  id?: string;
   source: "hubspot_account" | "stripe_only_customer";
+  customerLabel?: string;
+  accountId?: string;
+  accountName?: string;
   salesAssist: "yes" | "no";
   salesAssistByPeriod?: Record<string, "yes" | "no">;
   valuesByPeriod: Record<string, number>;
@@ -67,6 +71,13 @@ type CombinedBillingOverviewResponse = {
   arrPerEmployeePoints?: ArrPerEmployeePoint[];
 };
 
+type OpenPipelineResponse = {
+  asOfDate: string;
+  openPipelineArr: number;
+  openDealCount: number;
+  includedStageCount: number;
+};
+
 type ArrBreakdown = {
   selfserveArr: number;
   salesledArr: number;
@@ -98,8 +109,17 @@ type Snapshot = {
 
 type DashboardData = {
   currency: string;
+  openPipelineArr: number;
+  openPipelineDealCount: number;
+  churnedAccounts: ChurnedAccount[];
   current: Snapshot;
   previous: Snapshot;
+};
+
+type ChurnedAccount = {
+  accountId: string;
+  accountName: string;
+  arr: number;
 };
 
 function round2(value: number) {
@@ -201,6 +221,53 @@ function computeBreakdown(data: CombinedAllSubsResponse, periodKey: string): Arr
   return { selfserveArr, salesledArr, salesAssistArr };
 }
 
+function accountKeyForRow(row: CombinedAllSubsRow) {
+  return String(row.accountId || row.accountName || row.customerLabel || row.id || "").trim();
+}
+
+function accountLabelForRow(row: CombinedAllSubsRow) {
+  const name = String(row.accountName || "").trim();
+  const accountId = String(row.accountId || "").trim();
+  const customerLabel = String(row.customerLabel || "").trim();
+  if (name && accountId) return `${name} (${accountId})`;
+  if (name) return name;
+  if (customerLabel) return customerLabel;
+  if (accountId) return accountId;
+  return "(blank)";
+}
+
+function computeChurnedAccounts(current: CombinedAllSubsResponse, previous: CombinedAllSubsResponse): ChurnedAccount[] {
+  const currentPeriodKey = String(current.periods?.[current.periods.length - 1]?.key || "");
+  const previousPeriodKey = String(previous.periods?.[previous.periods.length - 1]?.key || "");
+  if (!currentPeriodKey || !previousPeriodKey) return [];
+
+  const currentByAccount = new Map<string, number>();
+  for (const row of current.rows || []) {
+    if (row.source !== "hubspot_account") continue;
+    const key = accountKeyForRow(row);
+    if (!key) continue;
+    const value = round2(Number(row.valuesByPeriod?.[currentPeriodKey] || 0));
+    currentByAccount.set(key, round2((currentByAccount.get(key) || 0) + value));
+  }
+
+  const churned = new Map<string, ChurnedAccount>();
+  for (const row of previous.rows || []) {
+    if (row.source !== "hubspot_account") continue;
+    const key = accountKeyForRow(row);
+    if (!key) continue;
+    const previousValue = round2(Number(row.valuesByPeriod?.[previousPeriodKey] || 0));
+    const currentValue = round2(currentByAccount.get(key) || 0);
+    if (previousValue <= 1e-9 || currentValue > 1e-9) continue;
+    churned.set(key, {
+      accountId: String(row.accountId || "").trim(),
+      accountName: accountLabelForRow(row),
+      arr: previousValue,
+    });
+  }
+
+  return Array.from(churned.values()).sort((a, b) => b.arr - a.arr || a.accountName.localeCompare(b.accountName));
+}
+
 function latestPointByAsOfDate<T extends { periodEnd: string }>(points: T[] | undefined, asOfDate: string) {
   if (!points?.length) return null;
   const inRange = points
@@ -255,9 +322,11 @@ function pctDelta(current: number, previous: number) {
 
 function deltaLabel(current: number, previous: number) {
   const delta = pctDelta(current, previous);
-  if (delta === null) return "No comparable value last week";
-  if (Math.abs(delta) < 1e-9) return "0.00% vs last week";
-  return delta > 0 ? `${formatNumber(delta, 2)}% increase vs last week` : `${formatNumber(Math.abs(delta), 2)}% decrease vs last week`;
+  if (delta === null) return { text: "No comparable value last week", tone: "neutral" as const };
+  if (Math.abs(delta) < 1e-9) return { text: "0.00% vs last week", tone: "neutral" as const };
+  return delta > 0
+    ? { text: `${formatNumber(delta, 2)}% increase vs last week`, tone: "positive" as const }
+    : { text: `${formatNumber(Math.abs(delta), 2)}% decrease vs last week`, tone: "negative" as const };
 }
 
 function metricStatusLabel(metric: AnalyticsBlock) {
@@ -265,11 +334,22 @@ function metricStatusLabel(metric: AnalyticsBlock) {
   return `${metric.status}${details}`;
 }
 
+function renderDeltaLabel(current: number, previous: number) {
+  const delta = deltaLabel(current, previous);
+  return <span style={deltaStyle(delta.tone)}>{delta.text}</span>;
+}
+
 function metricComparisonLabel(current: AnalyticsBlock, previous: AnalyticsBlock) {
   const currentValue = current.value;
   if (current.status !== "ok" || currentValue == null) return metricStatusLabel(current);
   if (previous.status !== "ok" || previous.value == null) return "No comparable value last week";
-  return deltaLabel(currentValue, previous.value);
+  return renderDeltaLabel(currentValue, previous.value);
+}
+
+function deltaStyle(tone: "positive" | "negative" | "neutral") {
+  if (tone === "positive") return { color: "#16a34a" };
+  if (tone === "negative") return { color: "#dc2626" };
+  return {};
 }
 
 export default function WeeklyDashboardPage() {
@@ -288,7 +368,7 @@ export default function WeeklyDashboardPage() {
       const currentMonthStart = startOfMonth(asOfDate);
       const previousMonthStart = startOfMonth(previousDate);
 
-      const [currentSubs, previousSubs, currentOverview, previousOverview, currentAnalytics, previousAnalytics] = await Promise.all([
+      const [currentSubs, previousSubs, currentOverview, previousOverview, currentAnalytics, previousAnalytics, openPipeline] = await Promise.all([
         postJson<CombinedAllSubsResponse>(
           "/api/combined-all-subs-report",
           {
@@ -349,6 +429,11 @@ export default function WeeklyDashboardPage() {
           },
           "Previous-week usage metrics request",
         ),
+        postJson<OpenPipelineResponse>(
+          "/api/weekly-dashboard-open-pipeline",
+          {},
+          "Open pipeline request",
+        ),
       ]);
 
       const currentBreakdown = computeBreakdown(currentSubs, asOfDate);
@@ -357,12 +442,16 @@ export default function WeeklyDashboardPage() {
       const previousOps = computeOpsSnapshot(previousOverview, previousDate);
       const currentUsage = computeUsageSnapshot(currentAnalytics);
       const previousUsage = computeUsageSnapshot(previousAnalytics);
+      const churnedAccounts = computeChurnedAccounts(currentSubs, previousSubs);
       const currency = String(
         currentOverview.targetCurrency || currentSubs.targetCurrency || previousOverview.targetCurrency || "USD",
       ).toUpperCase();
 
       setData({
         currency,
+        openPipelineArr: round2(Number(openPipeline.openPipelineArr || 0)),
+        openPipelineDealCount: Math.max(0, Math.floor(Number(openPipeline.openDealCount || 0))),
+        churnedAccounts,
         current: {
           date: asOfDate,
           breakdown: currentBreakdown,
@@ -493,35 +582,35 @@ export default function WeeklyDashboardPage() {
                 <p className="stripe-ui__stat-label">Total ARR</p>
                 <p className="stripe-ui__stat-value">{formatMoney(totalCurrent, data.currency)}</p>
                 <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
-                  {deltaLabel(totalCurrent, totalPrevious)}
+                  {renderDeltaLabel(totalCurrent, totalPrevious)}
                 </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Self-serve ARR</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.current.breakdown.selfserveArr, data.currency)}</p>
                 <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
-                  {deltaLabel(data.current.breakdown.selfserveArr, data.previous.breakdown.selfserveArr)}
+                  {renderDeltaLabel(data.current.breakdown.selfserveArr, data.previous.breakdown.selfserveArr)}
                 </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Sales-led ARR</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.current.breakdown.salesledArr, data.currency)}</p>
                 <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
-                  {deltaLabel(data.current.breakdown.salesledArr, data.previous.breakdown.salesledArr)}
+                  {renderDeltaLabel(data.current.breakdown.salesledArr, data.previous.breakdown.salesledArr)}
                 </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Sales assist ARR</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.current.breakdown.salesAssistArr, data.currency)}</p>
                 <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
-                  {deltaLabel(data.current.breakdown.salesAssistArr, data.previous.breakdown.salesAssistArr)}
+                  {renderDeltaLabel(data.current.breakdown.salesAssistArr, data.previous.breakdown.salesAssistArr)}
                 </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">AI spend ARR</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.current.ops.aiSpendArr, data.currency)}</p>
                 <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
-                  {deltaLabel(data.current.ops.aiSpendArr, data.previous.ops.aiSpendArr)}
+                  {renderDeltaLabel(data.current.ops.aiSpendArr, data.previous.ops.aiSpendArr)}
                 </p>
               </div>
             </div>
@@ -534,28 +623,28 @@ export default function WeeklyDashboardPage() {
                 <p className="stripe-ui__stat-label">Sales cycle (days)</p>
                 <p className="stripe-ui__stat-value">{formatNumber(data.current.ops.salesCycleDays, 2)}</p>
                 <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
-                  {deltaLabel(data.current.ops.salesCycleDays, data.previous.ops.salesCycleDays)}
+                  {renderDeltaLabel(data.current.ops.salesCycleDays, data.previous.ops.salesCycleDays)}
                 </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">LTV</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.current.ops.ltv, data.currency)}</p>
                 <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
-                  {deltaLabel(data.current.ops.ltv, data.previous.ops.ltv)}
+                  {renderDeltaLabel(data.current.ops.ltv, data.previous.ops.ltv)}
                 </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">ARR/FTE</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.current.ops.arrPerFte, data.currency)}</p>
                 <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
-                  {deltaLabel(data.current.ops.arrPerFte, data.previous.ops.arrPerFte)}
+                  {renderDeltaLabel(data.current.ops.arrPerFte, data.previous.ops.arrPerFte)}
                 </p>
               </div>
               <div className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">FTEs</p>
                 <p className="stripe-ui__stat-value">{formatNumber(data.current.ops.ftes, 0)}</p>
                 <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
-                  {deltaLabel(data.current.ops.ftes, data.previous.ops.ftes)}
+                  {renderDeltaLabel(data.current.ops.ftes, data.previous.ops.ftes)}
                 </p>
               </div>
             </div>
@@ -619,6 +708,49 @@ export default function WeeklyDashboardPage() {
                   )}
                 </p>
               </div>
+            </div>
+          </section>
+
+          <section className="stripe-ui__panel ui-reveal ui-reveal-4">
+            <h2 className="stripe-ui__panel-title">Pipeline and Churn</h2>
+            <div className="stripe-ui__stats">
+              <div className="stripe-ui__stat">
+                <p className="stripe-ui__stat-label">Open pipeline ARR</p>
+                <p className="stripe-ui__stat-value">{formatMoney(data.openPipelineArr, data.currency)}</p>
+                <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
+                  {formatNumber(data.openPipelineDealCount, 0)} open deals, excluding closed won and closed lost
+                </p>
+              </div>
+            </div>
+
+            <div style={{ marginTop: "1.25rem" }}>
+              <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.5rem" }}>
+                HubSpot accounts churned this week
+              </h3>
+              {data.churnedAccounts.length ? (
+                <div className="stripe-ui__table-wrap">
+                  <table className="stripe-ui__table">
+                    <thead>
+                      <tr>
+                        <th>Account</th>
+                        <th style={{ textAlign: "right" }}>ARR</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.churnedAccounts.map((account) => (
+                        <tr key={`${account.accountId || account.accountName}-${account.arr}`}>
+                          <td>{account.accountName || account.accountId || "(blank)"}</td>
+                          <td style={{ textAlign: "right" }}>{formatMoney(account.arr, data.currency)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+                  No HubSpot accounts churned in this comparison window.
+                </p>
+              )}
             </div>
           </section>
         </>
