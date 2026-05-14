@@ -78,9 +78,11 @@ type CombinedPoint = {
 };
 
 type LineSourcePoints = {
-  salesled: CombinedPoint[];
+  hubspot: CombinedPoint[];
   selfserve: CombinedPoint[];
+  salesAssist: CombinedPoint[];
   aiSpend: CombinedPoint[];
+  salesled?: CombinedPoint[];
 };
 
 type PeriodRef = {
@@ -382,7 +384,7 @@ async function writePrecomputedCombinedBillingPayload(args: {
 
 const COMBINED_BILLING_CANONICAL_KEY_PREFIX = "api:combined-billing-overview:";
 const COMBINED_BILLING_RANGE_KEY_PREFIX = "api:combined-billing-overview:range:";
-const COMBINED_BILLING_SOURCE_SPLIT_VERSION = 2;
+const COMBINED_BILLING_SOURCE_SPLIT_VERSION = 3;
 
 function normalizeCachePayloadForCompare(raw: Record<string, unknown>) {
   const sourceSplitVersionRaw = Number(raw.sourceSplitVersion || 1);
@@ -517,8 +519,11 @@ LIMIT 3000
 
   const linePoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.linePoints || []));
   const lineSourcePoints = {
-    salesled: mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.lineSourcePoints?.salesled || [])),
+    hubspot: mergeMonthlySeriesByKey(
+      chunks.map((chunk) => chunk.lineSourcePoints?.hubspot || chunk.lineSourcePoints?.salesled || []),
+    ),
     selfserve: mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.lineSourcePoints?.selfserve || [])),
+    salesAssist: mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.lineSourcePoints?.salesAssist || [])),
     aiSpend: mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.lineSourcePoints?.aiSpend || [])),
   };
   const arrPerEmployeePoints = mergeMonthlySeriesByKey(chunks.map((chunk) => chunk.arrPerEmployeePoints || []));
@@ -1042,7 +1047,7 @@ function buildAiSpendSourceSeries(
   return { points, monthlyArrByPeriod, initialPrevMrr };
 }
 
-type SourceSegment = "salesled" | "selfserve";
+type SourceSegment = "hubspot" | "selfserve" | "salesAssist";
 type SourceSegmentAccumulator = {
   prevMrr: number;
   mrrEnd: number;
@@ -1099,9 +1104,14 @@ function resolveCombinedAllSubsPeriodKey(
 
 function sourceSegmentForCombinedAllSubsRow(
   row: CombinedAllSubsResponse["rows"][number],
+  reportPeriodKey: string,
 ): SourceSegment {
-  if (row.source === "hubspot_account") return "salesled";
-  return "selfserve";
+  if (row.source === "hubspot_account") return "hubspot";
+  const salesAssistValue =
+    row.salesAssistByPeriod?.[reportPeriodKey] ??
+    row.salesAssist ??
+    "no";
+  return String(salesAssistValue || "").trim().toLowerCase() === "yes" ? "salesAssist" : "selfserve";
 }
 
 function applySegmentMovement(
@@ -1164,10 +1174,11 @@ function buildSourcePointsFromCombinedAllSubsReport(
 
   const previousCanonicalKey = periodKeyFromIsoDateForGrain(previousRange.endDate, grain);
   const previousReportKey = resolveCombinedAllSubsPeriodKey(previousCanonicalKey, grain, availablePeriodKeys);
-  const segmentOrder: SourceSegment[] = ["salesled", "selfserve"];
+  const segmentOrder: SourceSegment[] = ["hubspot", "selfserve", "salesAssist"];
   const bySegment: Record<SourceSegment, CombinedPoint[]> = {
-    salesled: [],
+    hubspot: [],
     selfserve: [],
+    salesAssist: [],
   };
 
   for (let idx = 0; idx < periodRefs.length; idx += 1) {
@@ -1176,7 +1187,7 @@ function buildSourcePointsFromCombinedAllSubsReport(
     const prevKey = prevPeriod?.reportKey || previousReportKey;
 
     const accBySegment: Record<SourceSegment, SourceSegmentAccumulator> = {
-      salesled: {
+      hubspot: {
         prevMrr: 0,
         mrrEnd: 0,
         newMrr: 0,
@@ -1192,16 +1203,38 @@ function buildSourcePointsFromCombinedAllSubsReport(
         contractionMrr: 0,
         churnMrr: 0,
       },
+      salesAssist: {
+        prevMrr: 0,
+        mrrEnd: 0,
+        newMrr: 0,
+        expansionMrr: 0,
+        contractionMrr: 0,
+        churnMrr: 0,
+      },
     };
 
     for (const row of report.rows || []) {
-      const currArr = round2(Number(row.valuesByPeriod?.[period.reportKey] || 0));
-      const prevArr = round2(Number(row.valuesByPeriod?.[prevKey] || 0));
-      const currSegment = sourceSegmentForCombinedAllSubsRow(row);
-      const prevSegment = sourceSegmentForCombinedAllSubsRow(row);
+      const currHubArr = round2(Number(row.hubspotValuesByPeriod?.[period.reportKey] || 0));
+      const prevHubArr = round2(Number(row.hubspotValuesByPeriod?.[prevKey] || 0));
+      if (Math.abs(currHubArr) > 1e-9 || Math.abs(prevHubArr) > 1e-9) {
+        applySegmentMovement(accBySegment.hubspot, "hubspot", "hubspot", "hubspot", prevHubArr, currHubArr);
+      }
 
-      for (const segment of segmentOrder) {
-        applySegmentMovement(accBySegment[segment], segment, prevSegment, currSegment, prevArr, currArr);
+      const currStripeArr = round2(Number(row.stripeValuesByPeriod?.[period.reportKey] || 0));
+      const prevStripeArr = round2(Number(row.stripeValuesByPeriod?.[prevKey] || 0));
+      const currStripeSegment = sourceSegmentForCombinedAllSubsRow(row, period.reportKey);
+      const prevStripeSegment = sourceSegmentForCombinedAllSubsRow(row, prevKey);
+      if (Math.abs(currStripeArr) > 1e-9 || Math.abs(prevStripeArr) > 1e-9) {
+        for (const segment of ["selfserve", "salesAssist"] as const) {
+          applySegmentMovement(
+            accBySegment[segment],
+            segment,
+            prevStripeSegment,
+            currStripeSegment,
+            prevStripeArr,
+            currStripeArr,
+          );
+        }
       }
     }
 
@@ -1250,24 +1283,37 @@ function buildSourcePointsFromCombinedAllSubsReport(
 function buildCombinedPointsFromSourcePoints(
   periodOrder: PeriodRef[],
   grain: CombinedGrain,
-  salesledPoints: CombinedPoint[],
+  hubspotPoints: CombinedPoint[],
   selfservePoints: CombinedPoint[],
+  salesAssistPoints: CombinedPoint[],
 ) {
   const points: CombinedPoint[] = [];
   const initialPrevCombinedMrr = round2(
-    (Number(salesledPoints[0]?.mrrEnd || 0) - Number(salesledPoints[0]?.netMrrChange || 0))
-    + (Number(selfservePoints[0]?.mrrEnd || 0) - Number(selfservePoints[0]?.netMrrChange || 0)),
+    (Number(hubspotPoints[0]?.mrrEnd || 0) - Number(hubspotPoints[0]?.netMrrChange || 0))
+    + (Number(selfservePoints[0]?.mrrEnd || 0) - Number(selfservePoints[0]?.netMrrChange || 0))
+    + (Number(salesAssistPoints[0]?.mrrEnd || 0) - Number(salesAssistPoints[0]?.netMrrChange || 0)),
   );
 
   for (let idx = 0; idx < periodOrder.length; idx += 1) {
-    const salesled = salesledPoints[idx];
+    const hubspot = hubspotPoints[idx];
     const selfserve = selfservePoints[idx];
+    const salesAssist = salesAssistPoints[idx];
     const prevMrr = idx === 0 ? initialPrevCombinedMrr : Number(points[idx - 1]?.mrrEnd || 0);
-    const mrrEnd = round2(Number(salesled?.mrrEnd || 0) + Number(selfserve?.mrrEnd || 0));
-    const newMrr = round2(Number(salesled?.newMrr || 0) + Number(selfserve?.newMrr || 0));
-    const expansionMrr = round2(Number(salesled?.expansionMrr || 0) + Number(selfserve?.expansionMrr || 0));
-    const contractionMrr = round2(Number(salesled?.contractionMrr || 0) + Number(selfserve?.contractionMrr || 0));
-    const churnMrr = round2(Number(salesled?.churnMrr || 0) + Number(selfserve?.churnMrr || 0));
+    const mrrEnd = round2(
+      Number(hubspot?.mrrEnd || 0) + Number(selfserve?.mrrEnd || 0) + Number(salesAssist?.mrrEnd || 0),
+    );
+    const newMrr = round2(
+      Number(hubspot?.newMrr || 0) + Number(selfserve?.newMrr || 0) + Number(salesAssist?.newMrr || 0),
+    );
+    const expansionMrr = round2(
+      Number(hubspot?.expansionMrr || 0) + Number(selfserve?.expansionMrr || 0) + Number(salesAssist?.expansionMrr || 0),
+    );
+    const contractionMrr = round2(
+      Number(hubspot?.contractionMrr || 0) + Number(selfserve?.contractionMrr || 0) + Number(salesAssist?.contractionMrr || 0),
+    );
+    const churnMrr = round2(
+      Number(hubspot?.churnMrr || 0) + Number(selfserve?.churnMrr || 0) + Number(salesAssist?.churnMrr || 0),
+    );
     const netMrrChange = round2(newMrr + expansionMrr + contractionMrr + churnMrr);
     const mrrGrowthRatePct =
       Math.abs(prevMrr) > 1e-9
@@ -1308,9 +1354,16 @@ function buildCoreSeriesFromCombinedAllSubs(
   report: CombinedAllSubsResponse,
 ) {
   const sourceSplit = buildSourcePointsFromCombinedAllSubsReport(periodOrder, grain, previousRange, report);
-  const salesledSourcePoints = sourceSplit.salesled;
+  const hubspotSourcePoints = sourceSplit.hubspot;
   const selfserveSourcePoints = sourceSplit.selfserve;
-  const combinedBuilt = buildCombinedPointsFromSourcePoints(periodOrder, grain, salesledSourcePoints, selfserveSourcePoints);
+  const salesAssistSourcePoints = sourceSplit.salesAssist;
+  const combinedBuilt = buildCombinedPointsFromSourcePoints(
+    periodOrder,
+    grain,
+    hubspotSourcePoints,
+    selfserveSourcePoints,
+    salesAssistSourcePoints,
+  );
 
   const availablePeriodKeys = new Set(
     (report.periods || []).map((period) => String(period.key || "").trim()).filter(Boolean),
@@ -1360,8 +1413,9 @@ function buildCoreSeriesFromCombinedAllSubs(
   return {
     points: combinedBuilt.points,
     initialPrevCombinedMrr: combinedBuilt.initialPrevCombinedMrr,
-    salesledSourcePoints,
+    hubspotSourcePoints,
     selfserveSourcePoints,
+    salesAssistSourcePoints,
     accountArrByPeriod,
     baselineAccountArrByAccount,
     stripeArrByCustomer,
@@ -2120,8 +2174,9 @@ async function buildCombinedBillingOverview(
 
   let periodOrder: PeriodRef[] = [];
   let points: CombinedPoint[] = [];
-  let salesledSourcePoints: CombinedPoint[] = [];
+  let hubspotSourcePoints: CombinedPoint[] = [];
   let selfserveSourcePoints: CombinedPoint[] = [];
+  let salesAssistSourcePoints: CombinedPoint[] = [];
   let initialPrevCombinedMrr = 0;
   let accountArrByPeriod = new Map<string, Record<string, number>>();
   let baselineAccountArrByAccount = new Map<string, number>();
@@ -2143,8 +2198,9 @@ async function buildCombinedBillingOverview(
     const core = buildCoreSeriesFromCombinedAllSubs(periodOrder, grain, previousRange, sourceCombinedAllSubs);
     points = core.points;
     initialPrevCombinedMrr = core.initialPrevCombinedMrr;
-    salesledSourcePoints = core.salesledSourcePoints;
+    hubspotSourcePoints = core.hubspotSourcePoints;
     selfserveSourcePoints = core.selfserveSourcePoints;
+    salesAssistSourcePoints = core.salesAssistSourcePoints;
     accountArrByPeriod = core.accountArrByPeriod;
     baselineAccountArrByAccount = core.baselineAccountArrByAccount;
     stripeArrByCustomer = core.stripeArrByCustomer;
@@ -2260,47 +2316,6 @@ async function buildCombinedBillingOverview(
     const hubPrevMrr = round2(hubBaselineArr / 12);
     initialPrevCombinedMrr = round2(stripePrevMrr + hubPrevMrr);
 
-    const rawSelfserve: CombinedPoint[] = periodOrder.map((period) => {
-      const canonical = canonicalHubPeriodKey(period.key, grain);
-      const stripePoint = stripePointMap.get(canonical);
-      const stripeNewWithReactivation = round2((stripePoint?.newMrr || 0) + (stripePoint?.reactivationMrr || 0));
-
-      const stripeFallbackStart =
-        grain === "daily"
-          ? period.key
-          : grain === "monthly"
-            ? `${period.key}-01`
-            : stripePoint?.periodStart || period.key;
-
-      return {
-        key: canonical || period.key,
-        label: period.label,
-        periodStart: stripePoint?.periodStart || stripeFallbackStart,
-        periodEnd: stripePoint?.periodEnd || stripeFallbackStart,
-        mrrEnd: round2(stripePoint?.mrrEnd || 0),
-        newMrr: stripeNewWithReactivation,
-        expansionMrr: round2(stripePoint?.expansionMrr || 0),
-        contractionMrr: round2(stripePoint?.contractionMrr || 0),
-        churnMrr: round2(stripePoint?.churnMrr || 0),
-        netMrrChange: round2(stripePoint?.netMrrChange || 0),
-        mrrGrowthRatePct: 0,
-        ndrPct: 0,
-        gdrPct: 0,
-        arr: round2(stripePoint?.arr || 0),
-        arrGrowth: round2(stripePoint?.arrGrowth || 0),
-      };
-    });
-
-    const selfservePointsRaw = rawSelfserve.map((point, idx) => {
-      const prevMrr = idx === 0 ? stripePrevMrr : rawSelfserve[idx - 1].mrrEnd;
-      const mrrGrowthRatePct =
-        Math.abs(prevMrr) > 1e-9
-          ? round2(((point.mrrEnd - prevMrr) / Math.abs(prevMrr)) * 100)
-          : 0;
-      const retention = calculateRetentionRates(prevMrr, point.expansionMrr, point.contractionMrr, point.churnMrr);
-      return { ...point, mrrGrowthRatePct, ndrPct: retention.ndrPct, gdrPct: retention.gdrPct };
-    });
-
     const rawCombined: CombinedPoint[] = periodOrder.map((period) => {
       const canonical = canonicalHubPeriodKey(period.key, grain);
       const hub = hubPointMap.get(canonical);
@@ -2342,8 +2357,11 @@ async function buildCombinedBillingOverview(
       const retention = calculateRetentionRates(prevMrr, point.expansionMrr, point.contractionMrr, point.churnMrr);
       return { ...point, mrrGrowthRatePct, ndrPct: retention.ndrPct, gdrPct: retention.gdrPct };
     });
-    selfserveSourcePoints = selfservePointsRaw;
-    salesledSourcePoints = hubPoints;
+    const sourceCombinedAllSubs = await sourceCombinedAllSubsPromise;
+    const sourceSplitCore = buildCoreSeriesFromCombinedAllSubs(periodOrder, grain, previousRange, sourceCombinedAllSubs);
+    hubspotSourcePoints = sourceSplitCore.hubspotSourcePoints;
+    selfserveSourcePoints = sourceSplitCore.selfserveSourcePoints;
+    salesAssistSourcePoints = sourceSplitCore.salesAssistSourcePoints;
 
     stripeArrByCustomer = new Map<string, Map<string, number>>();
     for (const row of stripeMain.customerArrRows || []) {
@@ -2432,8 +2450,9 @@ async function buildCombinedBillingOverview(
     linePoints = points;
   }
   const lineSourcePoints: LineSourcePoints = {
-    salesled: salesledSourcePoints,
+    hubspot: hubspotSourcePoints,
     selfserve: selfserveSourcePoints,
+    salesAssist: salesAssistSourcePoints,
     aiSpend: aiSpendSourcePoints,
   };
 
@@ -2503,10 +2522,10 @@ async function buildCombinedBillingOverview(
       key,
       label: period.label,
       selfserveGdrPct: lineSourcePoints.selfserve[idx]?.gdrPct || 0,
-      salesledGdrPct: lineSourcePoints.salesled[idx]?.gdrPct || 0,
+      salesledGdrPct: lineSourcePoints.hubspot[idx]?.gdrPct || 0,
       combinedGdrPct: points[idx]?.gdrPct || 0,
       selfserveNdrPct: lineSourcePoints.selfserve[idx]?.ndrPct || 0,
-      salesledNdrPct: lineSourcePoints.salesled[idx]?.ndrPct || 0,
+      salesledNdrPct: lineSourcePoints.hubspot[idx]?.ndrPct || 0,
       combinedNdrPct: points[idx]?.ndrPct || 0,
     };
   });
@@ -2780,8 +2799,13 @@ function sliceMonthlyCombinedBillingOverview(
   const points = filterMonthlyRange(canonical.points, startMonthKey, endMonthKey);
   const linePoints = filterMonthlyRange(canonical.linePoints, startMonthKey, endMonthKey);
   const lineSourcePoints = {
-    salesled: filterMonthlyRange(canonical.lineSourcePoints?.salesled || [], startMonthKey, endMonthKey),
+    hubspot: filterMonthlyRange(
+      canonical.lineSourcePoints?.hubspot || canonical.lineSourcePoints?.salesled || [],
+      startMonthKey,
+      endMonthKey,
+    ),
     selfserve: filterMonthlyRange(canonical.lineSourcePoints?.selfserve || [], startMonthKey, endMonthKey),
+    salesAssist: filterMonthlyRange(canonical.lineSourcePoints?.salesAssist || [], startMonthKey, endMonthKey),
     aiSpend: filterMonthlyRange(canonical.lineSourcePoints?.aiSpend || [], startMonthKey, endMonthKey),
   };
   const arrPerEmployeePoints = filterMonthlyRange(canonical.arrPerEmployeePoints, startMonthKey, endMonthKey);

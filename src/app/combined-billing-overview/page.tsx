@@ -27,9 +27,11 @@ type CombinedPoint = {
 };
 
 type LineSourcePoints = {
-  salesled: CombinedPoint[];
+  hubspot: CombinedPoint[];
   selfserve: CombinedPoint[];
+  salesAssist: CombinedPoint[];
   aiSpend: CombinedPoint[];
+  salesled?: CombinedPoint[];
 };
 
 type AiSpendExcludedEnterprisePrepaidCustomer = {
@@ -541,7 +543,7 @@ function LineChartCard<TPoint extends LineChartPointBase>({
 }
 
 type GroupedSourceSeries = {
-  id: "salesled" | "selfserve" | "ai";
+  id: "hubspot" | "selfserve" | "sales_assist" | "ai";
   label: string;
   color: string;
   points: CombinedPoint[];
@@ -1799,9 +1801,9 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
 
   const sourceLabel =
     source === "salesled"
-      ? "Sales-led (HubSpot only)"
+      ? "HubSpot"
       : source === "selfserve"
-        ? "Self-serve (Stripe Billing Overview only)"
+        ? "Self-serve (Stripe only)"
         : "Combined";
   const ndrFor = (point: RetentionSeriesPoint) =>
     source === "salesled"
@@ -1872,10 +1874,10 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
     const tableRows: Array<[string, number[]]> = [
       ["selfserve GDR", points.map((point) => point.selfserveGdrPct)],
-      ["salesled GDR", points.map((point) => point.salesledGdrPct)],
+      ["hubspot GDR", points.map((point) => point.salesledGdrPct)],
       ["Combined GDR", points.map((point) => point.combinedGdrPct)],
       ["selfserve NDR", points.map((point) => point.selfserveNdrPct)],
-      ["salesled NDR", points.map((point) => point.salesledNdrPct)],
+      ["hubspot NDR", points.map((point) => point.salesledNdrPct)],
       ["Combined NDR", points.map((point) => point.combinedNdrPct)],
     ];
     const rows: Array<Array<string | number>> = [
@@ -1917,7 +1919,7 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
           className={`stripe-ui__btn ${source === "salesled" ? "stripe-ui__btn--primary" : "stripe-ui__btn--secondary"}`}
           onClick={() => setSource("salesled")}
         >
-          Sales-led
+          HubSpot
         </button>
         <button
           className={`stripe-ui__btn ${source === "selfserve" ? "stripe-ui__btn--primary" : "stripe-ui__btn--secondary"}`}
@@ -2100,7 +2102,7 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
                       ))}
                     </tr>
                     <tr>
-                      <td>salesled GDR</td>
+                      <td>hubspot GDR</td>
                       {points.map((point) => (
                         <td key={`row-sales-gdr-${point.key}`} className="stripe-ui__num">
                           {formatPercent(point.salesledGdrPct)}
@@ -2124,7 +2126,7 @@ function RetentionRatesChartCard({ points }: RetentionRatesChartCardProps) {
                       ))}
                     </tr>
                     <tr>
-                      <td>salesled NDR</td>
+                      <td>hubspot NDR</td>
                       {points.map((point) => (
                         <td key={`row-sales-ndr-${point.key}`} className="stripe-ui__num">
                           {formatPercent(point.salesledNdrPct)}
@@ -2827,8 +2829,9 @@ export default function CombinedBillingOverviewPage() {
         points: overview.points || [],
         linePoints: overview.linePoints || overview.points || [],
         lineSourcePoints: {
-          salesled: overview.lineSourcePoints?.salesled || [],
+          hubspot: overview.lineSourcePoints?.hubspot || overview.lineSourcePoints?.salesled || [],
           selfserve: overview.lineSourcePoints?.selfserve || [],
+          salesAssist: overview.lineSourcePoints?.salesAssist || [],
           aiSpend: overview.lineSourcePoints?.aiSpend || [],
         },
         arrPerEmployeePoints: overview.arrPerEmployeePoints || [],
@@ -2938,8 +2941,9 @@ export default function CombinedBillingOverviewPage() {
   const lineSourcePoints = useMemo<LineSourcePoints>(
     () =>
       data?.lineSourcePoints || {
-        salesled: [],
+        hubspot: [],
         selfserve: [],
+        salesAssist: [],
         aiSpend: [],
       },
     [data],
@@ -3353,14 +3357,14 @@ export default function CombinedBillingOverviewPage() {
                 </div>
               </div>
               <p className="stripe-ui__hint" style={{ marginTop: "0.45rem", marginBottom: 0 }}>
-                Combined includes sales-led + self-serve + AI spend.
+                Combined includes HubSpot + self-serve + sales assist + AI spend.
               </p>
             </section>
 
             {lineChartMode === "combined" ? (
               <LineChartCard
                 title="MRR Over Time"
-                subtitle="Combined MRR at period end (sales-led + self-serve + AI spend)."
+                subtitle="Combined MRR at period end (HubSpot + self-serve + sales assist + AI spend)."
                 points={linePoints}
                 valueAccessor={(p) => p.mrrEnd}
                 valueFormatter={(v) => formatMoney(v, currency)}
@@ -3371,8 +3375,9 @@ export default function CombinedBillingOverviewPage() {
                 title="MRR Over Time"
                 subtitle="MRR by source."
                 series={[
-                  { id: "salesled", label: "Sales-led", color: "#4f8df9", points: lineSourcePoints.salesled },
+                  { id: "hubspot", label: "HubSpot", color: "#4f8df9", points: lineSourcePoints.hubspot },
                   { id: "selfserve", label: "Self-serve", color: "#1fc16b", points: lineSourcePoints.selfserve },
+                  { id: "sales_assist", label: "Sales assist", color: "#14b8a6", points: lineSourcePoints.salesAssist },
                   { id: "ai", label: "AI spend", color: "#f59e0b", points: lineSourcePoints.aiSpend },
                 ]}
                 valueAccessor={(p) => p.mrrEnd}
@@ -3504,8 +3509,9 @@ export default function CombinedBillingOverviewPage() {
                 title="MRR Growth Rate Over Time"
                 subtitle="MRR growth rate by source."
                 series={[
-                  { id: "salesled", label: "Sales-led", color: "#4f8df9", points: lineSourcePoints.salesled },
+                  { id: "hubspot", label: "HubSpot", color: "#4f8df9", points: lineSourcePoints.hubspot },
                   { id: "selfserve", label: "Self-serve", color: "#1fc16b", points: lineSourcePoints.selfserve },
+                  { id: "sales_assist", label: "Sales assist", color: "#14b8a6", points: lineSourcePoints.salesAssist },
                   { id: "ai", label: "AI spend", color: "#f59e0b", points: lineSourcePoints.aiSpend },
                 ]}
                 valueAccessor={(p) => p.mrrGrowthRatePct}
@@ -3518,7 +3524,7 @@ export default function CombinedBillingOverviewPage() {
             {lineChartMode === "combined" ? (
               <LineChartCard
                 title="ARR Over Time"
-                subtitle="Combined ARR at period end (sales-led + self-serve + AI spend)."
+                subtitle="Combined ARR at period end (HubSpot + self-serve + sales assist + AI spend)."
                 points={linePoints}
                 valueAccessor={(p) => p.arr}
                 valueFormatter={(v) => formatMoney(v, currency)}
@@ -3529,8 +3535,9 @@ export default function CombinedBillingOverviewPage() {
                 title="ARR Over Time"
                 subtitle="ARR by source."
                 series={[
-                  { id: "salesled", label: "Sales-led", color: "#4f8df9", points: lineSourcePoints.salesled },
+                  { id: "hubspot", label: "HubSpot", color: "#4f8df9", points: lineSourcePoints.hubspot },
                   { id: "selfserve", label: "Self-serve", color: "#1fc16b", points: lineSourcePoints.selfserve },
+                  { id: "sales_assist", label: "Sales assist", color: "#14b8a6", points: lineSourcePoints.salesAssist },
                   { id: "ai", label: "AI spend", color: "#f59e0b", points: lineSourcePoints.aiSpend },
                 ]}
                 valueAccessor={(p) => p.arr}
