@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { canonicalCountryLabel, countryCodeFromValue, countryNameKeyToCodeEntries } from "@/lib/geo";
+import { canonicalCountryKey, canonicalCountryLabel, countryCodeFromValue, countryNameKeyToCodeEntries } from "@/lib/geo";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -51,6 +51,14 @@ type HubspotViewModelResponse = {
   chartPoints?: Array<{
     key: string;
     churnMrr: number;
+  }>;
+  groupedChartSeries?: Array<{
+    key: string;
+    label: string;
+    points: Array<{
+      key: string;
+      churnMrr: number;
+    }>;
   }>;
 };
 
@@ -218,7 +226,7 @@ function emptyParsed(): ParsedQuestion {
 
 function findPointByMonth(points: CombinedPoint[] | undefined, monthKey: string) {
   const rows = points || [];
-  return rows.find((point) => String(point.key || "") === monthKey) || rows[0] || null;
+  return rows.find((point) => String(point.key || "") === monthKey) || null;
 }
 
 export async function POST(req: Request) {
@@ -275,7 +283,7 @@ export async function POST(req: Request) {
           endDate: month.endDate,
           mode: "contracted",
           grain: "monthly",
-          chartGroupBy: "none",
+          chartGroupBy: "country",
           groupByFields: [],
           filterDealName: "",
           filterDeploymentType: "all",
@@ -288,9 +296,14 @@ export async function POST(req: Request) {
           arrDisplayScope: "all",
         })) as HubspotViewModelResponse;
 
-        const point = (report.chartPoints || []).find((entry) => String(entry.key || "") === month.monthKey)
-          || report.chartPoints?.[0]
-          || null;
+        const countryKey = canonicalCountryKey(country);
+        const countrySeries = (report.groupedChartSeries || []).find((series) => String(series.key || "") === countryKey) || null;
+        const point = (countrySeries?.points || []).find((entry) => String(entry.key || "") === month.monthKey) || null;
+        if (!point) {
+          return NextResponse.json(
+            clarificationResponse(parsed, `No churn data found for ${country} in ${month.monthLabel}.`),
+          );
+        }
         const churnMrr = round2(Number(point?.churnMrr || 0));
         const churnArr = round2(churnMrr * 12);
         const currency = "USD";
@@ -331,6 +344,11 @@ export async function POST(req: Request) {
           : segment === "selfserve"
             ? findPointByMonth(report.lineSourcePoints?.selfserve, month.monthKey)
             : findPointByMonth(report.points, month.monthKey);
+      if (!segmentPoint) {
+        return NextResponse.json(
+          clarificationResponse(parsed, `No churn data found for ${month.monthLabel}.`),
+        );
+      }
       const churnMrr = round2(Number(segmentPoint?.churnMrr || 0));
       const churnArr = round2(churnMrr * 12);
 
@@ -370,6 +388,11 @@ export async function POST(req: Request) {
     })) as CombinedBillingOverviewResponse;
     const targetCurrency = String(report.targetCurrency || "USD");
     const aiPoint = findPointByMonth(report.lineSourcePoints?.aiSpend, month.monthKey);
+    if (!aiPoint) {
+      return NextResponse.json(
+        clarificationResponse(parsed, `No AI spend data found for ${month.monthLabel}.`),
+      );
+    }
     const aiArr = round2(Number(aiPoint?.arr || 0));
     const aiMrr = round2(Number(aiPoint?.mrrEnd || 0));
 
