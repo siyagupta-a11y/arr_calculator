@@ -104,12 +104,6 @@ function parseIsoDateOnlyUtc(value: string) {
   return parsed;
 }
 
-function startOfMonthIsoUtc(isoDate: string) {
-  const parsed = parseIsoDateOnlyUtc(isoDate);
-  if (!parsed) return isoDate;
-  return toIsoDateOnlyUtc(new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), 1)));
-}
-
 function parseMonthKeyUtc(value: string) {
   const match = /^(\d{4})-(\d{2})$/.exec(String(value || "").trim());
   if (!match) return null;
@@ -703,21 +697,23 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
       body: {},
     },
     {
-      key: "model-update-analytics:current-month",
+      key: "model-update-analytics:current-day",
       handler: modelUpdateAnalyticsPost,
       source: "mixed",
       body: {
-        startDate: currentMonthStart,
+        startDate: today,
         endDate: today,
+        forceRefreshPrecomputed: true,
       },
     },
     {
-      key: "model-update-analytics:previous-month",
+      key: "model-update-analytics:previous-day",
       handler: modelUpdateAnalyticsPost,
       source: "mixed",
       body: {
-        startDate: startOfMonthIsoUtc(previousDate),
+        startDate: previousDate,
         endDate: previousDate,
+        forceRefreshPrecomputed: true,
       },
     },
   );

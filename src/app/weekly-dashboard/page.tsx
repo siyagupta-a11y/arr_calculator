@@ -801,7 +801,7 @@ export default function WeeklyDashboardPage() {
       const currentAnalytics = await postJson<AnalyticsResponse>(
         "/api/model-update-analytics",
         {
-          startDate: currentMonthStart,
+          startDate: asOfDate,
           endDate: asOfDate,
         },
         "Current usage metrics request",
@@ -809,7 +809,7 @@ export default function WeeklyDashboardPage() {
       const previousAnalytics = await postJson<AnalyticsResponse>(
         "/api/model-update-analytics",
         {
-          startDate: previousMonthStart,
+          startDate: previousDate,
           endDate: previousDate,
         },
         "Previous-week usage metrics request",

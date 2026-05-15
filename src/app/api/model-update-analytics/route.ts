@@ -1,14 +1,17 @@
 import { NextResponse } from "next/server";
-import { getOrSetCache, readTtlMs } from "@/lib/serverResponseCache";
+import { getOrSetCache, readTtlMs, setServerResponseCache } from "@/lib/serverResponseCache";
+import { readPrecomputedPayload, writePrecomputedPayload } from "@/lib/precomputedPayloadStore";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 const CACHE_TTL_MS = readTtlMs("API_MODEL_UPDATE_ANALYTICS_CACHE_TTL_MS", 30 * 60 * 60 * 1000);
+const PRECOMPUTED_ENDPOINT_KEY = "model-update-analytics";
 
 type ApiBody = {
   startDate?: string;
   endDate?: string;
   includeComparisonMetricsOnly?: boolean;
+  forceRefreshPrecomputed?: boolean;
 };
 
 type ProviderResult = {
@@ -32,6 +35,13 @@ type MixpanelSavedReportContext = {
   projectId?: string;
   workspaceId?: string;
   bookmarkId?: string;
+};
+
+type ModelUpdateAnalyticsResponse = {
+  startDate: string;
+  endDate: string;
+  mixpanelMetrics: MixpanelMetricsResult;
+  googleAnalytics: ProviderResult;
 };
 
 function isIsoDate(value: string) {
@@ -523,27 +533,61 @@ async function fetchMixpanelMetrics(startDate: string, endDate: string, includeC
   };
 }
 
-async function runReport(startDate: string, endDate: string, includeComparisonMetricsOnly = false) {
-  const cacheKey = `api:model-update-analytics:${startDate}:${endDate}:${includeComparisonMetricsOnly ? "comparison-only" : "full"}`;
-  return getOrSetCache(cacheKey, CACHE_TTL_MS, async () => {
-    const [mixpanelMetrics, googleAnalytics] = await Promise.all([
-      fetchMixpanelMetrics(startDate, endDate, includeComparisonMetricsOnly),
-      fetchProviderMetric(
-        "MODEL_UPDATE_GA_ENDPOINT",
-        ["MODEL_UPDATE_GA_BEARER_TOKEN"],
-        {
-          start_date: startDate,
-          end_date: endDate,
-        },
-      ),
-    ]);
+async function buildLiveReport(startDate: string, endDate: string, includeComparisonMetricsOnly = false) {
+  const [mixpanelMetrics, googleAnalytics] = await Promise.all([
+    fetchMixpanelMetrics(startDate, endDate, includeComparisonMetricsOnly),
+    fetchProviderMetric(
+      "MODEL_UPDATE_GA_ENDPOINT",
+      ["MODEL_UPDATE_GA_BEARER_TOKEN"],
+      {
+        start_date: startDate,
+        end_date: endDate,
+      },
+    ),
+  ]);
 
-    return {
-      startDate,
-      endDate,
-      mixpanelMetrics,
-      googleAnalytics,
-    };
+  return {
+    startDate,
+    endDate,
+    mixpanelMetrics,
+    googleAnalytics,
+  } satisfies ModelUpdateAnalyticsResponse;
+}
+
+async function persistReport(cacheKey: string, response: ModelUpdateAnalyticsResponse) {
+  const payloadJson = JSON.stringify(response);
+  await writePrecomputedPayload({
+    endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+    cache_key: cacheKey,
+    start_date: response.startDate,
+    end_date: response.endDate,
+    grain: response.startDate === response.endDate ? "daily" : "range",
+    payload_json: payloadJson,
+  }).catch(() => null);
+  await setServerResponseCache(cacheKey, CACHE_TTL_MS, response).catch(() => null);
+}
+
+async function runReport(startDate: string, endDate: string, includeComparisonMetricsOnly = false, forceRefreshPrecomputed = false) {
+  const cacheKey = `api:model-update-analytics:${startDate}:${endDate}:${includeComparisonMetricsOnly ? "comparison-only" : "full"}`;
+  if (forceRefreshPrecomputed) {
+    const response = await buildLiveReport(startDate, endDate, includeComparisonMetricsOnly);
+    await persistReport(cacheKey, response);
+    return response;
+  }
+
+  return getOrSetCache(cacheKey, CACHE_TTL_MS, async () => {
+    const precomputed = await readPrecomputedPayload<ModelUpdateAnalyticsResponse>(
+      PRECOMPUTED_ENDPOINT_KEY,
+      cacheKey,
+    ).catch(() => null);
+    if (precomputed) {
+      await setServerResponseCache(cacheKey, CACHE_TTL_MS, precomputed).catch(() => null);
+      return precomputed;
+    }
+
+    const response = await buildLiveReport(startDate, endDate, includeComparisonMetricsOnly);
+    await persistReport(cacheKey, response);
+    return response;
   });
 }
 
@@ -552,7 +596,12 @@ export async function POST(req: Request) {
     const raw = await req.text();
     const body = (raw ? JSON.parse(raw) : {}) as Partial<ApiBody>;
     const { startDate, endDate } = parsePayload(body);
-    const report = await runReport(startDate, endDate, Boolean(body.includeComparisonMetricsOnly));
+    const report = await runReport(
+      startDate,
+      endDate,
+      Boolean(body.includeComparisonMetricsOnly),
+      Boolean(body.forceRefreshPrecomputed),
+    );
     return NextResponse.json(report);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";

@@ -158,6 +158,14 @@ async function writePersistentBlobEntry<T>(scopedKey: string, value: T, expiresA
   }
 }
 
+export async function setServerResponseCache<T>(key: string, ttlMs: number, value: T) {
+  if (ttlMs <= 0) return;
+  const scopedKey = cacheKeyWithGeneration(key);
+  const expiresAt = nowMs() + ttlMs;
+  VALUE_CACHE.set(scopedKey, { value, expiresAt });
+  await writePersistentBlobEntry(scopedKey, value, expiresAt);
+}
+
 export async function clearPersistentServerResponseCache() {
   if (!canUsePersistentBlobCache()) {
     return {
@@ -370,9 +378,7 @@ export async function getOrSetCache<T>(key: string, ttlMs: number, producer: () 
   const promise = (async () => {
     const value = await producer();
     if (ttlMs > 0) {
-      const expiresAt = nowMs() + ttlMs;
-      VALUE_CACHE.set(scopedKey, { value, expiresAt });
-      await writePersistentBlobEntry(scopedKey, value, expiresAt);
+      await setServerResponseCache(key, ttlMs, value);
     }
     return value;
   })();
