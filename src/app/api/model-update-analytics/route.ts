@@ -84,8 +84,25 @@ function readFirstNonEmptyEnv(names: string[]) {
   return "";
 }
 
-function buildBasicAuthHeader(token: string) {
-  return `Basic ${Buffer.from(`${token}:`).toString("base64")}`;
+function buildMixpanelBasicAuthHeader() {
+  const serviceAccountUsername = readFirstNonEmptyEnv([
+    "MIXPANEL_SERVICE_ACCOUNT_USERNAME",
+    "MODEL_UPDATE_MIXPANEL_SERVICE_ACCOUNT_USERNAME",
+  ]);
+  const serviceAccountPassword = readFirstNonEmptyEnv([
+    "MIXPANEL_SERVICE_ACCOUNT_PASSWORD",
+    "MODEL_UPDATE_MIXPANEL_SERVICE_ACCOUNT_PASSWORD",
+    "MIXPANEL_SECRET",
+    "MODEL_UPDATE_MIXPANEL_SECRET",
+  ]);
+  if (serviceAccountUsername) {
+    if (!serviceAccountPassword) return "";
+    return `Basic ${Buffer.from(`${serviceAccountUsername}:${serviceAccountPassword}`).toString("base64")}`;
+  }
+
+  const projectSecret = readFirstNonEmptyEnv(["MIXPANEL_SECRET", "MODEL_UPDATE_MIXPANEL_SECRET"]);
+  if (!projectSecret) return "";
+  return `Basic ${Buffer.from(`${projectSecret}:`).toString("base64")}`;
 }
 
 function parsePositiveIntegerText(value: string) {
@@ -199,11 +216,12 @@ async function fetchMixpanelSavedReportMetric(args: {
   fallbackUrl?: string;
 }): Promise<ProviderResult> {
   const token = readFirstNonEmptyEnv(args.tokenEnvs);
-  if (!token) {
+  const authHeader = buildMixpanelBasicAuthHeader();
+  if (!token || !authHeader) {
     return {
       status: "not_configured",
       value: null,
-      details: `Set one of: ${args.tokenEnvs.join(", ")}`,
+      details: `Set one of: ${args.tokenEnvs.join(", ")} and either MIXPANEL_SECRET or MIXPANEL_SERVICE_ACCOUNT_USERNAME with MIXPANEL_SECRET as the password`,
     };
   }
 
@@ -245,7 +263,7 @@ async function fetchMixpanelSavedReportMetric(args: {
       method: "GET",
       headers: {
         Accept: "application/json",
-        Authorization: buildBasicAuthHeader(token),
+        Authorization: authHeader,
       },
       cache: "no-store",
       signal: AbortSignal.timeout(20_000),
