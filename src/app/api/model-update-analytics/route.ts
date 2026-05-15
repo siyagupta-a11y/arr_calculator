@@ -46,7 +46,7 @@ function parsePayload(raw: Partial<ApiBody>) {
   return { startDate, endDate };
 }
 
-function findFirstNumber(value: unknown): number | null {
+function findLastNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
     const n = Number(value);
@@ -54,22 +54,40 @@ function findFirstNumber(value: unknown): number | null {
     return null;
   }
   if (Array.isArray(value)) {
-    for (const item of value) {
-      const n = findFirstNumber(item);
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      const n = findLastNumber(value[index]);
       if (n != null) return n;
     }
     return null;
   }
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    const preferredKeys = ["value", "total", "count", "metric", "number", "users", "sessions"];
+    const preferredKeys = [
+      "value",
+      "total",
+      "count",
+      "metric",
+      "number",
+      "users",
+      "sessions",
+      "series",
+      "series_data",
+      "seriesData",
+      "data",
+      "results",
+      "result",
+      "values",
+      "points",
+      "rows",
+    ];
     for (const key of preferredKeys) {
       if (!(key in record)) continue;
-      const n = findFirstNumber(record[key]);
+      const n = findLastNumber(record[key]);
       if (n != null) return n;
     }
-    for (const key of Object.keys(record)) {
-      const n = findFirstNumber(record[key]);
+    const keys = Object.keys(record);
+    for (let index = keys.length - 1; index >= 0; index -= 1) {
+      const n = findLastNumber(record[keys[index]]);
       if (n != null) return n;
     }
   }
@@ -189,7 +207,7 @@ async function fetchProviderMetric(
         details: `HTTP ${res.status}: ${text.slice(0, 300)}`,
       };
     }
-    const value = findFirstNumber(json);
+    const value = findLastNumber(json);
     if (value == null) {
       return {
         status: "error",
