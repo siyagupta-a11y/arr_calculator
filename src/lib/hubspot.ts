@@ -79,6 +79,19 @@ function normalizeStageLabelKey(value: string) {
     .replace(/[^a-z0-9]/g, "");
 }
 
+function parseIsoDateOnly(value: string) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]) - 1;
+  const day = Number(m[3]);
+  const d = new Date(Date.UTC(year, month, day));
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month || d.getUTCDate() !== day) {
+    return null;
+  }
+  return d;
+}
+
 function firstNonEmptyProperty(properties: Record<string, unknown>, candidates: string[]) {
   for (const key of candidates) {
     const value = String(properties[key] || "").trim();
@@ -129,7 +142,9 @@ async function hsFetch(url: string, init?: RequestInit) {
 }
 
 type DealSearchPayload = {
-  filterGroups: Array<{ filters: Array<{ propertyName: string; operator: "EQ"; value: string }> }>;
+  filterGroups: Array<{
+    filters: Array<{ propertyName: string; operator: "EQ" | "GTE" | "LTE"; value: string }>;
+  }>;
   properties: string[];
   limit: number;
   after?: string;
@@ -231,6 +246,58 @@ export async function fetchDealsInStage(properties: string[], dealstage: string)
   while (true) {
     const payload: DealSearchPayload = {
       filterGroups: [{ filters: [{ propertyName: "dealstage", operator: "EQ", value: dealstage }] }],
+      properties,
+      limit: 100,
+    };
+    if (after) payload.after = after;
+
+    const json: HubspotSearchResponse<HubspotDeal> = await hsFetch(url, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    results.push(...(json.results || []));
+    after = json.paging?.next?.after ?? null;
+    if (!after) break;
+  }
+
+  writeCache(DEALS_CACHE, cacheKey, results);
+  return results;
+}
+
+export async function fetchDealsInStageClosedBetween(
+  properties: string[],
+  dealstage: string,
+  closeDateStartIso: string,
+  closeDateEndIso: string,
+) {
+  const start = parseIsoDateOnly(closeDateStartIso);
+  const end = parseIsoDateOnly(closeDateEndIso);
+  if (!start || !end || end.getTime() < start.getTime()) {
+    return [];
+  }
+
+  const startMs = start.getTime();
+  const endMs = end.getTime() + (24 * 60 * 60 * 1000 - 1);
+  const cacheKey = `${dealstage}|closedate:${startMs}:${endMs}|${[...properties].sort().join(",")}`;
+  const cached = readCache(DEALS_CACHE, cacheKey);
+  if (cached) return cached;
+
+  const url = `${HUBSPOT_BASE}/crm/v3/objects/deals/search`;
+  let after: string | null = null;
+  const results: HubspotDeal[] = [];
+
+  while (true) {
+    const payload: DealSearchPayload = {
+      filterGroups: [
+        {
+          filters: [
+            { propertyName: "dealstage", operator: "EQ", value: dealstage },
+            { propertyName: "closedate", operator: "GTE", value: String(startMs) },
+            { propertyName: "closedate", operator: "LTE", value: String(endMs) },
+          ],
+        },
+      ],
       properties,
       limit: 100,
     };
