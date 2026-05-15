@@ -44,6 +44,8 @@ type ModelUpdateAnalyticsResponse = {
   googleAnalytics: ProviderResult;
 };
 
+type MixpanelMetricBlock = keyof MixpanelMetricsResult;
+
 function isIsoDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
 }
@@ -114,6 +116,30 @@ function readFirstNonEmptyEnv(names: string[]) {
     if (value) return value;
   }
   return "";
+}
+
+function isConfiguredEnv(name: string) {
+  return Boolean(String(process.env[name] || "").trim());
+}
+
+function shouldRefreshPrecomputedResponse(precomputed: ModelUpdateAnalyticsResponse, includeComparisonMetricsOnly: boolean) {
+  if (includeComparisonMetricsOnly) return false;
+  const checks: Array<[MixpanelMetricBlock, string]> = [
+    ["dauLastDay", "MODEL_UPDATE_MIXPANEL_DAU_ENDPOINT"],
+    ["wauLastDay", "MODEL_UPDATE_MIXPANEL_WAU_ENDPOINT"],
+    ["mauLastDay", "MODEL_UPDATE_MIXPANEL_MAU_ENDPOINT"],
+    ["signupsInMonth", "MODEL_UPDATE_MIXPANEL_SIGNUPS_ENDPOINT"],
+    ["newUsersInMonth", "MODEL_UPDATE_MIXPANEL_NEW_USERS_ENDPOINT"],
+    ["productionMessagesInMonth", "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_ENDPOINT"],
+    ["highVolumeWorkspacesInMonth", "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_ENDPOINT"],
+    ["activeBuilders10of30", "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_ENDPOINT"],
+  ];
+
+  return checks.some(([metricKey, endpointEnv]) => {
+    if (!isConfiguredEnv(endpointEnv)) return false;
+    const metric = precomputed.mixpanelMetrics[metricKey];
+    return metric.status === "not_configured";
+  });
 }
 
 function sleep(ms: number) {
@@ -580,7 +606,7 @@ async function runReport(startDate: string, endDate: string, includeComparisonMe
       PRECOMPUTED_ENDPOINT_KEY,
       cacheKey,
     ).catch(() => null);
-    if (precomputed) {
+    if (precomputed && !shouldRefreshPrecomputedResponse(precomputed, includeComparisonMetricsOnly)) {
       await setServerResponseCache(cacheKey, CACHE_TTL_MS, precomputed).catch(() => null);
       return precomputed;
     }

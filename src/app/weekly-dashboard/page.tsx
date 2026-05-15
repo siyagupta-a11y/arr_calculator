@@ -726,6 +726,7 @@ export default function WeeklyDashboardPage() {
   const initialDate = useMemo(() => defaultAsOfDate(), []);
   const [asOfDate, setAsOfDate] = useState(initialDate);
   const [loading, setLoading] = useState(false);
+  const [refreshingCache, setRefreshingCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<DashboardData | null>(null);
   const hasAutoRun = useRef(false);
@@ -852,6 +853,43 @@ export default function WeeklyDashboardPage() {
       setLoading(false);
     }
   }, [asOfDate]);
+
+  const refreshCache = useCallback(async () => {
+    if (loading || refreshingCache) return;
+    setRefreshingCache(true);
+    setError(null);
+    try {
+      const previousDate = addDays(asOfDate, -7);
+      await postJson<AnalyticsResponse>(
+        "/api/model-update-analytics",
+        {
+          startDate: asOfDate,
+          endDate: asOfDate,
+          forceRefreshPrecomputed: true,
+        },
+        "Refresh current usage metrics cache",
+      );
+      await postJson<AnalyticsResponse>(
+        "/api/model-update-analytics",
+        {
+          startDate: previousDate,
+          endDate: previousDate,
+          forceRefreshPrecomputed: true,
+        },
+        "Refresh previous usage metrics cache",
+      );
+      await postJson<{ ok: boolean }>(
+        "/api/cache/hard-refresh",
+        {},
+        "Clear server response cache",
+      );
+      await run();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setRefreshingCache(false);
+    }
+  }, [asOfDate, loading, refreshingCache, run]);
 
   useEffect(() => {
     if (hasAutoRun.current) return;
@@ -989,8 +1027,17 @@ export default function WeeklyDashboardPage() {
           <div className="stripe-ui__field" style={{ alignSelf: "end" }}>
             <button
               className="stripe-ui__btn stripe-ui__btn--secondary"
+              onClick={refreshCache}
+              disabled={loading || refreshingCache}
+            >
+              {refreshingCache ? "Refreshing cache..." : "Refresh Mixpanel cache"}
+            </button>
+          </div>
+          <div className="stripe-ui__field" style={{ alignSelf: "end" }}>
+            <button
+              className="stripe-ui__btn stripe-ui__btn--secondary"
               onClick={downloadHtmlSnapshot}
-              disabled={loading || !data}
+              disabled={loading || refreshingCache || !data}
             >
               Download HTML snapshot
             </button>
