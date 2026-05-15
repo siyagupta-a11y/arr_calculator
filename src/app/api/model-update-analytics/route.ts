@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
+import { getOrSetCache, readTtlMs } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
+const CACHE_TTL_MS = readTtlMs("API_MODEL_UPDATE_ANALYTICS_CACHE_TTL_MS", 15 * 60 * 1000);
 
 type ApiBody = {
   startDate?: string;
   endDate?: string;
+  includeComparisonMetricsOnly?: boolean;
 };
 
 type ProviderResult = {
@@ -380,7 +383,7 @@ function toMonthEndIso(dateText: string) {
   return d.toISOString().slice(0, 10);
 }
 
-async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise<MixpanelMetricsResult> {
+async function fetchMixpanelMetrics(startDate: string, endDate: string, includeComparisonMetricsOnly = false): Promise<MixpanelMetricsResult> {
   const baseEndpoint = String(process.env.MODEL_UPDATE_MIXPANEL_ENDPOINT || "").trim();
   const tokenEnvs = ["MODEL_UPDATE_MIXPANEL_BEARER_TOKEN", "MIXPANEL_SECRET"];
   const monthStart = toMonthStartIso(endDate);
@@ -418,20 +421,24 @@ async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise
         queryParams: withMetric("mau_last_day"),
         baseEndpoint,
       }),
-      fetchMixpanelMetricWithFallback({
-        endpointEnv: "MODEL_UPDATE_MIXPANEL_SIGNUPS_ENDPOINT",
-        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_SIGNUPS_BOOKMARK_ID",
-        tokenEnvs,
-        queryParams: withMetric("signups_in_month"),
-        baseEndpoint,
-      }),
-      fetchMixpanelMetricWithFallback({
-        endpointEnv: "MODEL_UPDATE_MIXPANEL_NEW_USERS_ENDPOINT",
-        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_NEW_USERS_BOOKMARK_ID",
-        tokenEnvs,
-        queryParams: withMetric("new_users_in_month"),
-        baseEndpoint,
-      }),
+      includeComparisonMetricsOnly
+        ? ({ status: "not_configured", value: null, details: "Skipped for comparison-only snapshot" } as ProviderResult)
+        : fetchMixpanelMetricWithFallback({
+            endpointEnv: "MODEL_UPDATE_MIXPANEL_SIGNUPS_ENDPOINT",
+            bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_SIGNUPS_BOOKMARK_ID",
+            tokenEnvs,
+            queryParams: withMetric("signups_in_month"),
+            baseEndpoint,
+          }),
+      includeComparisonMetricsOnly
+        ? ({ status: "not_configured", value: null, details: "Skipped for comparison-only snapshot" } as ProviderResult)
+        : fetchMixpanelMetricWithFallback({
+            endpointEnv: "MODEL_UPDATE_MIXPANEL_NEW_USERS_ENDPOINT",
+            bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_NEW_USERS_BOOKMARK_ID",
+            tokenEnvs,
+            queryParams: withMetric("new_users_in_month"),
+            baseEndpoint,
+          }),
       fetchMixpanelMetricWithFallback({
         endpointEnv: "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_ENDPOINT",
         bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_BOOKMARK_ID",
@@ -439,13 +446,15 @@ async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise
         queryParams: withMetric("production_messages_in_month"),
         baseEndpoint,
       }),
-      fetchMixpanelMetricWithFallback({
-        endpointEnv: "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_ENDPOINT",
-        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_BOOKMARK_ID",
-        tokenEnvs,
-        queryParams: withMetric("high_volume_workspaces_1k_incoming"),
-        baseEndpoint,
-      }),
+      includeComparisonMetricsOnly
+        ? ({ status: "not_configured", value: null, details: "Skipped for comparison-only snapshot" } as ProviderResult)
+        : fetchMixpanelMetricWithFallback({
+            endpointEnv: "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_ENDPOINT",
+            bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_BOOKMARK_ID",
+            tokenEnvs,
+            queryParams: withMetric("high_volume_workspaces_1k_incoming"),
+            baseEndpoint,
+          }),
       fetchMixpanelMetricWithFallback({
         endpointEnv: "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_ENDPOINT",
         bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_BOOKMARK_ID",
@@ -467,25 +476,28 @@ async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise
   };
 }
 
-async function runReport(startDate: string, endDate: string) {
-  const [mixpanelMetrics, googleAnalytics] = await Promise.all([
-    fetchMixpanelMetrics(startDate, endDate),
-    fetchProviderMetric(
-      "MODEL_UPDATE_GA_ENDPOINT",
-      ["MODEL_UPDATE_GA_BEARER_TOKEN"],
-      {
-        start_date: startDate,
-        end_date: endDate,
-      },
-    ),
-  ]);
+async function runReport(startDate: string, endDate: string, includeComparisonMetricsOnly = false) {
+  const cacheKey = `api:model-update-analytics:${startDate}:${endDate}:${includeComparisonMetricsOnly ? "comparison-only" : "full"}`;
+  return getOrSetCache(cacheKey, CACHE_TTL_MS, async () => {
+    const [mixpanelMetrics, googleAnalytics] = await Promise.all([
+      fetchMixpanelMetrics(startDate, endDate, includeComparisonMetricsOnly),
+      fetchProviderMetric(
+        "MODEL_UPDATE_GA_ENDPOINT",
+        ["MODEL_UPDATE_GA_BEARER_TOKEN"],
+        {
+          start_date: startDate,
+          end_date: endDate,
+        },
+      ),
+    ]);
 
-  return {
-    startDate,
-    endDate,
-    mixpanelMetrics,
-    googleAnalytics,
-  };
+    return {
+      startDate,
+      endDate,
+      mixpanelMetrics,
+      googleAnalytics,
+    };
+  });
 }
 
 export async function POST(req: Request) {
@@ -493,7 +505,7 @@ export async function POST(req: Request) {
     const raw = await req.text();
     const body = (raw ? JSON.parse(raw) : {}) as Partial<ApiBody>;
     const { startDate, endDate } = parsePayload(body);
-    const report = await runReport(startDate, endDate);
+    const report = await runReport(startDate, endDate, Boolean(body.includeComparisonMetricsOnly));
     return NextResponse.json(report);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";

@@ -174,6 +174,13 @@ function formatNumber(value: number, digits = 2) {
   }).format(value || 0);
 }
 
+function formatCompactCount(value: number) {
+  return new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value || 0);
+}
+
 function parseJsonResponseText(text: string, status: number, context: string) {
   try {
     return text ? (JSON.parse(text) as unknown) : null;
@@ -442,6 +449,7 @@ export default function WeeklyDashboardPage() {
           {
             startDate: previousMonthStart,
             endDate: previousDate,
+            includeComparisonMetricsOnly: true,
           },
           "Previous-week usage metrics request",
         ),
@@ -771,49 +779,132 @@ export default function WeeklyDashboardPage() {
               <p className="stripe-ui__panel-subtitle" style={{ marginBottom: "0.9rem" }}>
                 Current month as of {data.current.date}
               </p>
-              <div style={{ display: "grid", gap: "0.9rem" }}>
+              <div
+                style={{
+                  border: "1px solid var(--stripe-border)",
+                  background: "linear-gradient(180deg, rgba(13, 21, 39, 0.96) 0%, rgba(9, 15, 28, 0.98) 100%)",
+                  padding: "1rem",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: "1rem",
+                    marginBottom: "0.8rem",
+                    fontSize: "0.75rem",
+                    color: "var(--stripe-subtle)",
+                    letterSpacing: "0.04em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  <span>0</span>
+                  <span>{formatCompactCount(usageBarMax)}</span>
+                </div>
+                <div style={{ display: "grid", gap: "0.8rem" }}>
                 {usageBarMetrics.map((metric) => {
                   const value = metric.block.status === "ok" && metric.block.value != null ? metric.block.value : null;
-                  const widthPct = value == null ? 0 : value <= 0 ? 0 : Math.max(4, (value / usageBarMax) * 100);
+                  const widthPct = value == null ? 0 : value <= 0 ? 0 : Math.min(100, (value / usageBarMax) * 100);
                   const statusText =
                     value != null
-                      ? formatNumber(value, 0)
+                      ? formatCompactCount(value)
                       : metric.block.status === "not_configured"
                         ? "Not configured"
                         : "Unavailable";
                   return (
                     <div key={metric.key}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: "0.75rem", marginBottom: "0.34rem" }}>
-                        <span style={{ color: "var(--stripe-text)", fontSize: "0.88rem", fontWeight: 600 }}>{metric.label}</span>
-                        <span style={{ color: "var(--stripe-muted)", fontSize: "0.88rem" }}>{statusText}</span>
-                      </div>
                       <div
-                        aria-label={`${metric.label} bar`}
                         style={{
-                          width: "100%",
-                          height: "0.9rem",
-                          border: "1px solid var(--stripe-border)",
-                          background: "rgba(255, 255, 255, 0.04)",
-                          overflow: "hidden",
+                          display: "grid",
+                          gridTemplateColumns: "12.5rem minmax(0, 1fr) 5.5rem",
+                          gap: "0.8rem",
+                          alignItems: "center",
                         }}
                       >
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ color: "var(--stripe-text)", fontSize: "0.9rem", fontWeight: 700, lineHeight: 1.2 }}>
+                            {metric.label}
+                          </div>
+                          <div style={{ color: "var(--stripe-muted)", fontSize: "0.76rem", marginTop: "0.2rem" }}>
+                            {metric.block.status === "ok" ? "Mixpanel" : metric.block.details || metric.block.status}
+                          </div>
+                        </div>
                         <div
+                          aria-label={`${metric.label} bar`}
                           style={{
-                            width: `${widthPct}%`,
-                            height: "100%",
-                            background: `linear-gradient(90deg, ${metric.color}, rgba(255,255,255,0.18))`,
-                            transition: "width 180ms ease",
+                            position: "relative",
+                            height: "1.9rem",
+                            border: "1px solid var(--stripe-border)",
+                            background:
+                              "repeating-linear-gradient(90deg, rgba(255,255,255,0.03) 0, rgba(255,255,255,0.03) calc(25% - 1px), rgba(90,122,174,0.22) calc(25% - 1px), rgba(90,122,174,0.22) 25%)",
+                            overflow: "hidden",
                           }}
-                        />
-                      </div>
-                      <div className="stripe-ui__panel-subtitle" style={{ margin: "0.38rem 0 0 0" }}>
-                        {metric.block.status === "ok"
-                          ? "Pulled directly from Mixpanel"
-                          : metric.block.details || metric.block.status}
+                        >
+                          <div
+                            style={{
+                              position: "absolute",
+                              inset: 0,
+                              background:
+                                "linear-gradient(90deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0) 100%)",
+                              pointerEvents: "none",
+                            }}
+                          />
+                          <div
+                            style={{
+                              position: "absolute",
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: `${widthPct}%`,
+                              background: `linear-gradient(90deg, ${metric.color} 0%, rgba(255,255,255,0.32) 100%)`,
+                              boxShadow: `inset 0 0 0 1px rgba(255,255,255,0.08), 0 0 18px ${metric.color}44`,
+                              transition: "width 180ms ease",
+                            }}
+                          />
+                          <div
+                            style={{
+                              position: "absolute",
+                              top: 0,
+                              bottom: 0,
+                              left: "25%",
+                              width: "1px",
+                              background: "rgba(157, 181, 218, 0.28)",
+                            }}
+                          />
+                          <div
+                            style={{
+                              position: "absolute",
+                              top: 0,
+                              bottom: 0,
+                              left: "50%",
+                              width: "1px",
+                              background: "rgba(157, 181, 218, 0.28)",
+                            }}
+                          />
+                          <div
+                            style={{
+                              position: "absolute",
+                              top: 0,
+                              bottom: 0,
+                              left: "75%",
+                              width: "1px",
+                              background: "rgba(157, 181, 218, 0.28)",
+                            }}
+                          />
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          <div style={{ color: "var(--stripe-text)", fontSize: "1rem", fontWeight: 700, lineHeight: 1.1 }}>
+                            {statusText}
+                          </div>
+                          <div style={{ color: "var(--stripe-muted)", fontSize: "0.75rem", marginTop: "0.18rem" }}>
+                            {metric.block.status === "ok" ? "Current value" : "No data"}
+                          </div>
+                        </div>
                       </div>
                     </div>
                   );
                 })}
+                </div>
               </div>
             </div>
           </section>
