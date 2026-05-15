@@ -37,7 +37,6 @@ function displayValue(value: string | number | null | undefined) {
 }
 
 export default function MetricsAssistantPage() {
-  const underMaintenance = true;
   const initialQuestion = useMemo(() => defaultQuestion(), []);
   const [question, setQuestion] = useState(initialQuestion);
   const [loading, setLoading] = useState(false);
@@ -109,12 +108,10 @@ export default function MetricsAssistantPage() {
         <p className="stripe-ui__panel-subtitle">
           Examples: “total churn in Brazil in April 2025”, “self serve churn in 2025-04”, “AI spend in March 2026”.
         </p>
-        {underMaintenance ? (
-          <div className="stripe-ui__error" style={{ marginBottom: "1rem" }}>
-            <h2>Under maintenance</h2>
-            <p>Do not use this page right now.</p>
-          </div>
-        ) : null}
+        <div className="stripe-ui__error" style={{ marginBottom: "1rem" }}>
+          <h2>Under maintenance</h2>
+          <p>For testing only. Numbers may be incorrect.</p>
+        </div>
         <div className="stripe-ui__field">
           <label className="stripe-ui__field-label" htmlFor="metrics-assistant-question">
             Question
@@ -132,15 +129,15 @@ export default function MetricsAssistantPage() {
           <button
             className="stripe-ui__button stripe-ui__button--primary"
             onClick={runQuery}
-            disabled={loading || underMaintenance}
+            disabled={loading}
             type="button"
           >
-            {underMaintenance ? "Unavailable" : loading ? "Running..." : "Ask"}
+            {loading ? "Running..." : "Ask"}
           </button>
           <button
             className="stripe-ui__button"
             onClick={() => setQuestion(initialQuestion)}
-            disabled={loading || underMaintenance}
+            disabled={loading}
             type="button"
           >
             Reset Example

@@ -77,7 +77,7 @@ const MONTH_INDEX: Record<string, number> = {
   december: 11,
 };
 const MONTH_NAMES = Object.keys(MONTH_INDEX);
-const METRICS_ASSISTANT_UNDER_MAINTENANCE = true;
+const METRICS_ASSISTANT_UNDER_MAINTENANCE = false;
 
 function round2(n: number) {
   return Math.round((Number(n) || 0) * 100) / 100;
