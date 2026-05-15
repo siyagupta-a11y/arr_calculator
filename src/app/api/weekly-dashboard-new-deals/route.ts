@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import {
+  batchReadCompanies,
   batchReadLineItems,
-  fetchDealPipelineIdToLabelMap,
-  fetchDealsCreatedBetween,
+  fetchDealStageIdToLabelMap,
+  fetchDealsInStageClosedBetween,
   fetchLineItemIdsForDeals,
 } from "@/lib/hubspot";
 import { computeCalculatedArrForLineItem, LI_PROPS } from "@/lib/logic";
@@ -18,21 +19,21 @@ type RequestBody = {
   endDate?: string;
 };
 
-type NewDealRow = {
-  dealId: string;
-  dealName: string;
-  createdDate: string;
+type ClosedWonAccountRow = {
+  accountId: string;
+  accountName: string;
+  closedWonDealCount: number;
   arr: number;
-  amount: number;
-  pipelineLabel: string;
+  latestClosedDate: string;
 };
 
-type WeeklyNewDealsResponse = {
+type WeeklyClosedWonAccountsResponse = {
   startDate: string;
   endDate: string;
+  accountCount: number;
   dealCount: number;
   totalArr: number;
-  rows: NewDealRow[];
+  rows: ClosedWonAccountRow[];
 };
 
 function round2(value: number) {
@@ -69,47 +70,87 @@ function normalizePipelineLabelKey(value: string) {
     .replace(/[^a-z0-9]/g, "");
 }
 
-async function resolveIncludedPipelineIds() {
-  const configured = String(process.env.HUBSPOT_CREATED_PIPELINE_IDS || "").trim();
+async function resolveClosedWonStageIds() {
+  const configured = String(process.env.HUBSPOT_CLOSED_WON_STAGE_IDS || process.env.HUBSPOT_CLOSED_WON_STAGE_ID || "").trim();
   if (configured) {
-    return new Set(
-      configured
-        .split(/[,\n\r|;]+/)
-        .map((value) => value.trim())
-        .filter(Boolean),
+    return Array.from(
+      new Set(
+        configured
+          .split(/[,\n\r|;]+/)
+          .map((value) => value.trim())
+          .filter(Boolean),
+      ),
     );
   }
 
-  const pipelineIdToLabel = await fetchDealPipelineIdToLabelMap();
-  const out = new Set<string>();
-  for (const [pipelineId, label] of pipelineIdToLabel.entries()) {
-    const normalized = normalizePipelineLabelKey(label);
-    if (normalized.includes("salespipeline") || normalized.includes("transactionalpipeline")) {
-      out.add(pipelineId);
-    }
+  const stageIdToLabel = await fetchDealStageIdToLabelMap();
+  return Array.from(stageIdToLabel.entries())
+    .filter(([, label]) => normalizePipelineLabelKey(label || "").includes("closedwon"))
+    .map(([stageId]) => stageId);
+}
+
+function firstNonEmptyString(values: Array<string | undefined>) {
+  for (const value of values) {
+    const trimmed = String(value || "").trim();
+    if (trimmed) return trimmed;
   }
-  return out;
+  return "";
 }
 
-function pipelineLabelForDeal(pipelineId: string, pipelineIdToLabel: Map<string, string>) {
-  return String(pipelineIdToLabel.get(pipelineId) || pipelineId || "Unknown").trim() || "Unknown";
-}
-
-async function buildWeeklyNewDeals(startDate: string, endDate: string): Promise<WeeklyNewDealsResponse> {
+async function buildWeeklyClosedWonAccounts(startDate: string, endDate: string): Promise<WeeklyClosedWonAccountsResponse> {
   const start = parseIsoDateOnly(startDate);
   const end = parseIsoDateOnly(endDate);
   if (!start || !end) throw new Error("Invalid startDate/endDate");
   if (end.getTime() < start.getTime()) throw new Error("endDate must be >= startDate");
 
-  const includedPipelineIds = await resolveIncludedPipelineIds();
-  const pipelineIdToLabel = await fetchDealPipelineIdToLabelMap();
-  const deals = await fetchDealsCreatedBetween(["createdate", "dealname", "pipeline"], startDate, endDate);
-  const filteredDeals = deals.filter((deal) => {
-    const pipelineId = String(deal.properties?.pipeline || "").trim();
-    return !includedPipelineIds.size || (pipelineId && includedPipelineIds.has(pipelineId));
-  });
+  const closedWonStageIds = await resolveClosedWonStageIds();
+  if (!closedWonStageIds.length) {
+    return {
+      startDate,
+      endDate,
+      accountCount: 0,
+      dealCount: 0,
+      totalArr: 0,
+      rows: [],
+    };
+  }
 
-  const dealIds = filteredDeals.map((deal) => String(deal.id || "")).filter(Boolean);
+  const dealsById = new Map<string, {
+    dealId: string;
+    accountId: string;
+    dealName: string;
+    closedDate: string;
+    arr: number;
+    closedWonStageId: string;
+  }>();
+
+  for (const stageId of closedWonStageIds) {
+    const deals = await fetchDealsInStageClosedBetween(["createdate", "closedate", "dealname", "hs_primary_associated_company", "dealstage"], stageId, startDate, endDate);
+    for (const deal of deals || []) {
+      const dealId = String(deal.id || "").trim();
+      if (!dealId) continue;
+      const properties = deal.properties || {};
+      const accountId = firstNonEmptyString([
+        String(properties.hs_primary_associated_company || ""),
+        String(properties.account_id || ""),
+        String(properties.companyid || ""),
+      ]);
+      const closedDate = String(properties.closedate || "").trim().slice(0, 10);
+      const previous = dealsById.get(dealId);
+      if (!previous) {
+        dealsById.set(dealId, {
+          dealId,
+          accountId,
+          dealName: String(properties.dealname || "").trim() || "(no name)",
+          closedDate,
+          arr: 0,
+          closedWonStageId: stageId,
+        });
+      }
+    }
+  }
+
+  const dealIds = Array.from(dealsById.keys());
   const lineItemIdsByDeal = new Map<string, string[]>();
   const allLineItemIds = new Set<string>();
   for (const pair of await fetchLineItemIdsForDeals(dealIds)) {
@@ -117,36 +158,59 @@ async function buildWeeklyNewDeals(startDate: string, endDate: string): Promise<
     lineItemIdsByDeal.set(pair.dealId, ids);
     for (const id of ids) allLineItemIds.add(id);
   }
-
   const lineItemsById = await batchReadLineItems(Array.from(allLineItemIds), LI_PROPS);
-  const rows: NewDealRow[] = [];
-  for (const deal of filteredDeals) {
-    const dealId = String(deal.id || "").trim();
-    if (!dealId) continue;
-    const properties = deal.properties || {};
-    const liIds = lineItemIdsByDeal.get(dealId) || [];
-    let arr = 0;
+
+  const accountIds = Array.from(
+    new Set(
+      Array.from(dealsById.values())
+        .map((row) => String(row.accountId || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const companiesById = accountIds.length ? await batchReadCompanies(accountIds, ["name", "hs_name"]) : new Map();
+  const rowsByAccount = new Map<string, ClosedWonAccountRow>();
+
+  for (const deal of dealsById.values()) {
+    const liIds = lineItemIdsByDeal.get(deal.dealId) || [];
+    let dealArr = 0;
     for (const liId of liIds) {
       const lineItem = lineItemsById.get(liId);
       if (!lineItem?.properties) continue;
-      arr += computeCalculatedArrForLineItem(lineItem.properties);
+      dealArr += computeCalculatedArrForLineItem(lineItem.properties);
     }
-    rows.push({
-      dealId,
-      dealName: String(properties.dealname || "").trim() || "(no name)",
-      createdDate: String(properties.createdate || "").slice(0, 10),
-      arr: round2(arr),
-      amount: round2(Number(properties.amount || 0)),
-      pipelineLabel: pipelineLabelForDeal(String(properties.pipeline || "").trim(), pipelineIdToLabel),
-    });
+    if (dealArr <= 0) continue;
+
+    const companyId = String(deal.accountId || "").trim() || deal.dealId;
+    const company = companyId !== deal.dealId ? companiesById.get(companyId) : null;
+    const companyProps = (company?.properties || {}) as Record<string, unknown>;
+    const accountName =
+      firstNonEmptyString([
+        String(companyProps.name || ""),
+        String(companyProps.hs_name || ""),
+      ]) || deal.dealName || companyId;
+    const existing = rowsByAccount.get(companyId) || {
+      accountId: companyId,
+      accountName,
+      closedWonDealCount: 0,
+      arr: 0,
+      latestClosedDate: deal.closedDate,
+    };
+    existing.closedWonDealCount += 1;
+    existing.arr = round2(existing.arr + dealArr);
+    if (deal.closedDate && (!existing.latestClosedDate || deal.closedDate > existing.latestClosedDate)) {
+      existing.latestClosedDate = deal.closedDate;
+    }
+    if (!existing.accountName && accountName) existing.accountName = accountName;
+    rowsByAccount.set(companyId, existing);
   }
 
-  rows.sort((a, b) => b.arr - a.arr || a.createdDate.localeCompare(b.createdDate) || a.dealName.localeCompare(b.dealName));
+  const rows = Array.from(rowsByAccount.values()).sort((a, b) => b.arr - a.arr || a.accountName.localeCompare(b.accountName));
 
   return {
     startDate,
     endDate,
-    dealCount: rows.length,
+    accountCount: rows.length,
+    dealCount: dealIds.length,
     totalArr: round2(rows.reduce((sum, row) => sum + row.arr, 0)),
     rows,
   };
@@ -157,8 +221,8 @@ export async function POST(req: Request) {
     const raw = await req.text();
     const body = (raw ? JSON.parse(raw) : {}) as Partial<RequestBody>;
     const { startDate, endDate } = parsePayload(body);
-    const cacheKey = `api:weekly-dashboard-new-deals:${startDate}:${endDate}`;
-    const payload = await getOrSetCache(cacheKey, CACHE_TTL_MS, () => buildWeeklyNewDeals(startDate, endDate));
+    const cacheKey = `api:weekly-dashboard-closed-won-accounts:${startDate}:${endDate}`;
+    const payload = await getOrSetCache(cacheKey, CACHE_TTL_MS, () => buildWeeklyClosedWonAccounts(startDate, endDate));
     return NextResponse.json(payload);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";

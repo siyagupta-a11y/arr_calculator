@@ -106,6 +106,25 @@ function readFirstNonEmptyEnv(names: string[]) {
   return "";
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(raw: string | null) {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  const asNum = Number(trimmed);
+  if (Number.isFinite(asNum) && asNum >= 0) return Math.floor(asNum * 1000);
+  const asDate = Date.parse(trimmed);
+  if (Number.isNaN(asDate)) return null;
+  const delta = asDate - Date.now();
+  return delta > 0 ? delta : 0;
+}
+
+function isRetryableStatus(status: number) {
+  return status === 429 || status >= 500;
+}
+
 function buildMixpanelBasicAuthHeader() {
   const serviceAccountUsername = readFirstNonEmptyEnv([
     "MIXPANEL_SERVICE_ACCOUNT_USERNAME",
@@ -190,46 +209,64 @@ async function fetchProviderMetric(
   };
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  try {
-    const res = await fetch(url.toString(), {
-      method: "GET",
-      headers,
-      cache: "no-store",
-      signal: AbortSignal.timeout(20_000),
-    });
-    const text = await res.text();
-    let json: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = null;
-    }
-    if (!res.ok) {
+      const res = await fetch(url.toString(), {
+        method: "GET",
+        headers,
+        cache: "no-store",
+        signal: AbortSignal.timeout(20_000),
+      });
+      const text = await res.text();
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+      if (!res.ok) {
+        if (isRetryableStatus(res.status) && attempt < 2) {
+          const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
+          const backoffMs = 750 * Math.pow(2, attempt);
+          await sleep(Math.max(retryAfterMs ?? 0, backoffMs));
+          continue;
+        }
+        return {
+          status: "error",
+          value: null,
+          details: `HTTP ${res.status}: ${text.slice(0, 300)}`,
+        };
+      }
+      const value = findLastNumber(json);
+      if (value == null) {
+        return {
+          status: "error",
+          value: null,
+          details: "No numeric metric found in response",
+        };
+      }
+      return {
+        status: "ok",
+        value,
+      };
+    } catch (error: unknown) {
+      if (attempt < 2) {
+        await sleep(750 * Math.pow(2, attempt));
+        continue;
+      }
       return {
         status: "error",
         value: null,
-        details: `HTTP ${res.status}: ${text.slice(0, 300)}`,
+        details: error instanceof Error ? error.message : "Unknown error",
       };
     }
-    const value = findLastNumber(json);
-    if (value == null) {
-      return {
-        status: "error",
-        value: null,
-        details: "No numeric metric found in response",
-      };
-    }
-    return {
-      status: "ok",
-      value,
-    };
-  } catch (error: unknown) {
-    return {
-      status: "error",
-      value: null,
-      details: error instanceof Error ? error.message : "Unknown error",
-    };
   }
+
+  return {
+    status: "error",
+    value: null,
+    details: "Provider request retried but still failed",
+  };
 }
 
 async function fetchMixpanelSavedReportMetric(args: {
@@ -281,38 +318,51 @@ async function fetchMixpanelSavedReportMetric(args: {
   if (workspaceId) url.searchParams.set("workspace_id", workspaceId);
 
   try {
-    const res = await fetch(url.toString(), {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        Authorization: authHeader,
-      },
-      cache: "no-store",
-      signal: AbortSignal.timeout(20_000),
-    });
-    const text = await res.text();
-    let json: unknown = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const res = await fetch(url.toString(), {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: authHeader,
+        },
+        cache: "no-store",
+        signal: AbortSignal.timeout(20_000),
+      });
+      const text = await res.text();
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+      if (!res.ok) {
+        if (isRetryableStatus(res.status) && attempt < 2) {
+          const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
+          const backoffMs = 750 * Math.pow(2, attempt);
+          await sleep(Math.max(retryAfterMs ?? 0, backoffMs));
+          continue;
+        }
+        return {
+          status: "error",
+          value: null,
+          details: `Insights API HTTP ${res.status}: ${text.slice(0, 300)}`,
+        };
+      }
+      const value = findLastNumber(json);
+      if (value == null) {
+        return {
+          status: "error",
+          value: null,
+          details: "No numeric metric found in Mixpanel Insights response",
+        };
+      }
+      return { status: "ok", value };
     }
-    if (!res.ok) {
-      return {
-        status: "error",
-        value: null,
-        details: `Insights API HTTP ${res.status}: ${text.slice(0, 300)}`,
-      };
-    }
-    const value = findLastNumber(json);
-    if (value == null) {
-      return {
-        status: "error",
-        value: null,
-        details: "No numeric metric found in Mixpanel Insights response",
-      };
-    }
-    return { status: "ok", value };
+    return {
+      status: "error",
+      value: null,
+      details: "Mixpanel Insights request retried but still failed",
+    };
   } catch (error: unknown) {
     return {
       status: "error",
@@ -398,71 +448,68 @@ async function fetchMixpanelMetrics(startDate: string, endDate: string, includeC
 
   const withMetric = (metric: string) => ({ ...baseParams, metric });
 
-  const [dauLastDay, wauLastDay, mauLastDay, signupsInMonth, newUsersInMonth, productionMessagesInMonth, highVolumeWorkspacesInMonth, activeBuilders10of30] =
-    await Promise.all([
-      fetchMixpanelMetricWithFallback({
-        endpointEnv: "MODEL_UPDATE_MIXPANEL_DAU_ENDPOINT",
-        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_DAU_BOOKMARK_ID",
+  const dauLastDay = await fetchMixpanelMetricWithFallback({
+    endpointEnv: "MODEL_UPDATE_MIXPANEL_DAU_ENDPOINT",
+    bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_DAU_BOOKMARK_ID",
+    tokenEnvs,
+    queryParams: withMetric("dau_last_day"),
+    baseEndpoint,
+  });
+  const wauLastDay = await fetchMixpanelMetricWithFallback({
+    endpointEnv: "MODEL_UPDATE_MIXPANEL_WAU_ENDPOINT",
+    bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_WAU_BOOKMARK_ID",
+    tokenEnvs,
+    queryParams: withMetric("wau_last_day"),
+    baseEndpoint,
+  });
+  const mauLastDay = await fetchMixpanelMetricWithFallback({
+    endpointEnv: "MODEL_UPDATE_MIXPANEL_MAU_ENDPOINT",
+    bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_MAU_BOOKMARK_ID",
+    tokenEnvs,
+    queryParams: withMetric("mau_last_day"),
+    baseEndpoint,
+  });
+  const signupsInMonth = includeComparisonMetricsOnly
+    ? ({ status: "not_configured", value: null, details: "Skipped for comparison-only snapshot" } as ProviderResult)
+    : await fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_SIGNUPS_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_SIGNUPS_BOOKMARK_ID",
         tokenEnvs,
-        queryParams: withMetric("dau_last_day"),
+        queryParams: withMetric("signups_in_month"),
         baseEndpoint,
-      }),
-      fetchMixpanelMetricWithFallback({
-        endpointEnv: "MODEL_UPDATE_MIXPANEL_WAU_ENDPOINT",
-        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_WAU_BOOKMARK_ID",
+      });
+  const newUsersInMonth = includeComparisonMetricsOnly
+    ? ({ status: "not_configured", value: null, details: "Skipped for comparison-only snapshot" } as ProviderResult)
+    : await fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_NEW_USERS_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_NEW_USERS_BOOKMARK_ID",
         tokenEnvs,
-        queryParams: withMetric("wau_last_day"),
+        queryParams: withMetric("new_users_in_month"),
         baseEndpoint,
-      }),
-      fetchMixpanelMetricWithFallback({
-        endpointEnv: "MODEL_UPDATE_MIXPANEL_MAU_ENDPOINT",
-        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_MAU_BOOKMARK_ID",
+      });
+  const productionMessagesInMonth = await fetchMixpanelMetricWithFallback({
+    endpointEnv: "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_ENDPOINT",
+    bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_BOOKMARK_ID",
+    tokenEnvs,
+    queryParams: withMetric("production_messages_in_month"),
+    baseEndpoint,
+  });
+  const highVolumeWorkspacesInMonth = includeComparisonMetricsOnly
+    ? ({ status: "not_configured", value: null, details: "Skipped for comparison-only snapshot" } as ProviderResult)
+    : await fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_BOOKMARK_ID",
         tokenEnvs,
-        queryParams: withMetric("mau_last_day"),
+        queryParams: withMetric("high_volume_workspaces_1k_incoming"),
         baseEndpoint,
-      }),
-      includeComparisonMetricsOnly
-        ? ({ status: "not_configured", value: null, details: "Skipped for comparison-only snapshot" } as ProviderResult)
-        : fetchMixpanelMetricWithFallback({
-            endpointEnv: "MODEL_UPDATE_MIXPANEL_SIGNUPS_ENDPOINT",
-            bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_SIGNUPS_BOOKMARK_ID",
-            tokenEnvs,
-            queryParams: withMetric("signups_in_month"),
-            baseEndpoint,
-          }),
-      includeComparisonMetricsOnly
-        ? ({ status: "not_configured", value: null, details: "Skipped for comparison-only snapshot" } as ProviderResult)
-        : fetchMixpanelMetricWithFallback({
-            endpointEnv: "MODEL_UPDATE_MIXPANEL_NEW_USERS_ENDPOINT",
-            bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_NEW_USERS_BOOKMARK_ID",
-            tokenEnvs,
-            queryParams: withMetric("new_users_in_month"),
-            baseEndpoint,
-          }),
-      fetchMixpanelMetricWithFallback({
-        endpointEnv: "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_ENDPOINT",
-        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_BOOKMARK_ID",
-        tokenEnvs,
-        queryParams: withMetric("production_messages_in_month"),
-        baseEndpoint,
-      }),
-      includeComparisonMetricsOnly
-        ? ({ status: "not_configured", value: null, details: "Skipped for comparison-only snapshot" } as ProviderResult)
-        : fetchMixpanelMetricWithFallback({
-            endpointEnv: "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_ENDPOINT",
-            bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_HIGH_VOLUME_WORKSPACES_BOOKMARK_ID",
-            tokenEnvs,
-            queryParams: withMetric("high_volume_workspaces_1k_incoming"),
-            baseEndpoint,
-          }),
-      fetchMixpanelMetricWithFallback({
-        endpointEnv: "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_ENDPOINT",
-        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_BOOKMARK_ID",
-        tokenEnvs,
-        queryParams: withMetric("active_builders_10_of_30"),
-        baseEndpoint,
-      }),
-    ]);
+      });
+  const activeBuilders10of30 = await fetchMixpanelMetricWithFallback({
+    endpointEnv: "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_ENDPOINT",
+    bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_ACTIVE_BUILDERS_BOOKMARK_ID",
+    tokenEnvs,
+    queryParams: withMetric("active_builders_10_of_30"),
+    baseEndpoint,
+  });
 
   return {
     dauLastDay,

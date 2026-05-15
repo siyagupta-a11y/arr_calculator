@@ -81,21 +81,21 @@ type OpenPipelineResponse = {
   includedStageCount: number;
 };
 
-type WeeklyNewDealRow = {
-  dealId: string;
-  dealName: string;
-  createdDate: string;
+type ClosedWonAccountRow = {
+  accountId: string;
+  accountName: string;
+  closedWonDealCount: number;
   arr: number;
-  amount: number;
-  pipelineLabel: string;
+  latestClosedDate: string;
 };
 
-type WeeklyNewDealsResponse = {
+type WeeklyClosedWonAccountsResponse = {
   startDate: string;
   endDate: string;
+  accountCount: number;
   dealCount: number;
   totalArr: number;
-  rows: WeeklyNewDealRow[];
+  rows: ClosedWonAccountRow[];
 };
 
 type ArrBreakdown = {
@@ -134,7 +134,7 @@ type DashboardData = {
   currency: string;
   openPipelineArr: number;
   openPipelineDealCount: number;
-  newDeals: WeeklyNewDealsResponse;
+  closedWonAccounts: WeeklyClosedWonAccountsResponse;
   churnedAccounts: ChurnedAccount[];
   current: Snapshot;
   previous: Snapshot;
@@ -409,7 +409,7 @@ export default function WeeklyDashboardPage() {
       const currentMonthStart = startOfMonth(asOfDate);
       const previousMonthStart = startOfMonth(previousDate);
 
-      const [currentSubs, previousSubs, currentOverview, previousOverview, currentAnalytics, previousAnalytics, openPipeline, newDeals] = await Promise.all([
+      const [currentSubs, previousSubs, currentOverview, previousOverview, openPipeline, closedWonAccounts] = await Promise.all([
         postJson<CombinedAllSubsResponse>(
           "/api/combined-all-subs-report",
           {
@@ -454,37 +454,38 @@ export default function WeeklyDashboardPage() {
           },
           "Previous-week monthly metrics request",
         ),
-        postJson<AnalyticsResponse>(
-          "/api/model-update-analytics",
-          {
-            startDate: currentMonthStart,
-            endDate: asOfDate,
-          },
-          "Current usage metrics request",
-        ),
-        postJson<AnalyticsResponse>(
-          "/api/model-update-analytics",
-          {
-            startDate: previousMonthStart,
-            endDate: previousDate,
-            includeComparisonMetricsOnly: true,
-          },
-          "Previous-week usage metrics request",
-        ),
         postJson<OpenPipelineResponse>(
           "/api/weekly-dashboard-open-pipeline",
           {},
           "Open pipeline request",
         ),
-        postJson<WeeklyNewDealsResponse>(
+        postJson<WeeklyClosedWonAccountsResponse>(
           "/api/weekly-dashboard-new-deals",
           {
             startDate: addDays(previousDate, 1),
             endDate: asOfDate,
           },
-          "New deals request",
+          "Closed won accounts request",
         ),
       ]);
+
+      const currentAnalytics = await postJson<AnalyticsResponse>(
+        "/api/model-update-analytics",
+        {
+          startDate: currentMonthStart,
+          endDate: asOfDate,
+        },
+        "Current usage metrics request",
+      );
+      const previousAnalytics = await postJson<AnalyticsResponse>(
+        "/api/model-update-analytics",
+        {
+          startDate: previousMonthStart,
+          endDate: previousDate,
+          includeComparisonMetricsOnly: true,
+        },
+        "Previous-week usage metrics request",
+      );
 
       const currentBreakdown = computeBreakdown(currentSubs, asOfDate);
       const previousBreakdown = computeBreakdown(previousSubs, previousDate);
@@ -501,7 +502,7 @@ export default function WeeklyDashboardPage() {
         currency,
         openPipelineArr: round2(Number(openPipeline.openPipelineArr || 0)),
         openPipelineDealCount: Math.max(0, Math.floor(Number(openPipeline.openDealCount || 0))),
-        newDeals,
+        closedWonAccounts,
         churnedAccounts,
         current: {
           date: asOfDate,
@@ -950,25 +951,25 @@ export default function WeeklyDashboardPage() {
 
             <div style={{ marginTop: "1.25rem" }}>
               <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.5rem" }}>
-                New deals this week
+                Closed won accounts this week
               </h3>
-              {data.newDeals.rows.length ? (
+              {data.closedWonAccounts.rows.length ? (
                 <div className="stripe-ui__table-wrap">
-                  <table className="stripe-ui__table" aria-label="New deals table">
+                  <table className="stripe-ui__table" aria-label="Closed won accounts table">
                     <thead>
                       <tr>
-                        <th>Deal</th>
-                        <th>Created</th>
-                        <th>Pipeline</th>
+                        <th>Account</th>
+                        <th>Deals</th>
+                        <th>Latest closed</th>
                         <th style={{ textAlign: "right" }}>ARR</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {data.newDeals.rows.map((row) => (
-                        <tr key={row.dealId}>
-                          <td>{row.dealName}</td>
-                          <td>{row.createdDate || "—"}</td>
-                          <td>{row.pipelineLabel || "—"}</td>
+                      {data.closedWonAccounts.rows.map((row) => (
+                        <tr key={row.accountId}>
+                          <td>{row.accountName || row.accountId || "(blank)"}</td>
+                          <td>{row.closedWonDealCount}</td>
+                          <td>{row.latestClosedDate || "—"}</td>
                           <td style={{ textAlign: "right" }}>{formatMoney(row.arr, data.currency)}</td>
                         </tr>
                       ))}
@@ -977,7 +978,7 @@ export default function WeeklyDashboardPage() {
                 </div>
               ) : (
                 <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
-                  No new deals were created in this window.
+                  No closed won accounts were found in this window.
                 </p>
               )}
             </div>
