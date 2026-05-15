@@ -55,7 +55,6 @@ type AnalyticsResponse = {
   mixpanelMetrics: {
     dauLastDay: AnalyticsBlock;
     wauLastDay: AnalyticsBlock;
-    mauLastDay: AnalyticsBlock;
     signupsInMonth: AnalyticsBlock;
     newUsersInMonth: AnalyticsBlock;
     productionMessagesInMonth: AnalyticsBlock;
@@ -115,7 +114,6 @@ type OpsSnapshot = {
 type UsageSnapshot = {
   dauLastDay: AnalyticsBlock;
   wauLastDay: AnalyticsBlock;
-  mauLastDay: AnalyticsBlock;
   signupsInMonth: AnalyticsBlock;
   newUsersInMonth: AnalyticsBlock;
   productionMessagesInMonth: AnalyticsBlock;
@@ -344,7 +342,6 @@ function computeUsageSnapshot(data: AnalyticsResponse | null): UsageSnapshot {
   return {
     dauLastDay: metrics?.dauLastDay || EMPTY_ANALYTICS_BLOCK,
     wauLastDay: metrics?.wauLastDay || EMPTY_ANALYTICS_BLOCK,
-    mauLastDay: metrics?.mauLastDay || EMPTY_ANALYTICS_BLOCK,
     signupsInMonth: metrics?.signupsInMonth || EMPTY_ANALYTICS_BLOCK,
     newUsersInMonth: metrics?.newUsersInMonth || EMPTY_ANALYTICS_BLOCK,
     productionMessagesInMonth: metrics?.productionMessagesInMonth || EMPTY_ANALYTICS_BLOCK,
@@ -498,12 +495,6 @@ function buildWeeklyDashboardHtmlExport(args: {
       value:
         data.current.usage.wauLastDay.value != null ? formatNumber(data.current.usage.wauLastDay.value, 0) : "—",
       deltaText: metricComparisonTextForHtml(data.current.usage.wauLastDay, data.previous.usage.wauLastDay),
-    },
-    {
-      label: "MAU (last day)",
-      value:
-        data.current.usage.mauLastDay.value != null ? formatNumber(data.current.usage.mauLastDay.value, 0) : "—",
-      deltaText: metricComparisonTextForHtml(data.current.usage.mauLastDay, data.previous.usage.mauLastDay),
     },
     {
       label: "Production messages (month)",
@@ -1125,15 +1116,6 @@ export default function WeeklyDashboardPage() {
                 </p>
                 <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
                   {metricComparisonLabel(data.current.usage.wauLastDay, data.previous.usage.wauLastDay)}
-                </p>
-              </div>
-              <div className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">MAU (last day)</p>
-                <p className="stripe-ui__stat-value">
-                  {data.current.usage.mauLastDay.value != null ? formatNumber(data.current.usage.mauLastDay.value, 0) : "—"}
-                </p>
-                <p className="stripe-ui__panel-subtitle" style={{ margin: "0.35rem 0 0 0" }}>
-                  {metricComparisonLabel(data.current.usage.mauLastDay, data.previous.usage.mauLastDay)}
                 </p>
               </div>
               <div className="stripe-ui__stat">
