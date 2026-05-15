@@ -300,7 +300,7 @@ async function fetchMixpanelSavedReportMetric(args: {
         details: `Insights API HTTP ${res.status}: ${text.slice(0, 300)}`,
       };
     }
-    const value = findFirstNumber(json);
+    const value = findLastNumber(json);
     if (value == null) {
       return {
         status: "error",
