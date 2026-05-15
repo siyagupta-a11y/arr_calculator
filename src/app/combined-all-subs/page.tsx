@@ -440,7 +440,7 @@ export default function CombinedAllSubsPage() {
               Open Weekly Dashboard
             </Link>
             <Link href="/metrics-assistant" className="stripe-ui__hero-link">
-              Open Metrics Assistant
+              Open Metrics Assistant (Under maintenance, do not use)
             </Link>
             <Link href="/access-control" className="stripe-ui__hero-link">
               Open Access Control

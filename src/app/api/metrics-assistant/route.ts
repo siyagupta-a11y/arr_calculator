@@ -77,6 +77,7 @@ const MONTH_INDEX: Record<string, number> = {
   december: 11,
 };
 const MONTH_NAMES = Object.keys(MONTH_INDEX);
+const METRICS_ASSISTANT_UNDER_MAINTENANCE = true;
 
 function round2(n: number) {
   return Math.round((Number(n) || 0) * 100) / 100;
@@ -231,6 +232,19 @@ function findPointByMonth(points: CombinedPoint[] | undefined, monthKey: string)
 
 export async function POST(req: Request) {
   try {
+    if (METRICS_ASSISTANT_UNDER_MAINTENANCE) {
+      return NextResponse.json(
+        {
+          status: "needs_clarification",
+          answer: "Metrics Assistant is under maintenance. Do not use.",
+          parsed: emptyParsed(),
+          warnings: ["Under maintenance. Do not use."],
+          table: { columns: [], rows: [] },
+        } satisfies AssistantResponse,
+        { status: 503 },
+      );
+    }
+
     const raw = await req.text();
     const body = (raw ? JSON.parse(raw) : {}) as { question?: string };
     const question = String(body.question || "").trim();

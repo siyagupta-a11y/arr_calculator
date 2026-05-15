@@ -37,6 +37,7 @@ function displayValue(value: string | number | null | undefined) {
 }
 
 export default function MetricsAssistantPage() {
+  const underMaintenance = true;
   const initialQuestion = useMemo(() => defaultQuestion(), []);
   const [question, setQuestion] = useState(initialQuestion);
   const [loading, setLoading] = useState(false);
@@ -85,6 +86,9 @@ export default function MetricsAssistantPage() {
             <p className="stripe-ui__subtitle">
               Ask natural-language questions and get a table from the existing ARR metric logic.
             </p>
+            <p className="stripe-ui__subtitle" style={{ color: "#b91c1c", fontWeight: 700 }}>
+              Under maintenance. Do not use.
+            </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
             <Link href="/combined-all-subs" className="stripe-ui__hero-link">
@@ -105,6 +109,12 @@ export default function MetricsAssistantPage() {
         <p className="stripe-ui__panel-subtitle">
           Examples: “total churn in Brazil in April 2025”, “self serve churn in 2025-04”, “AI spend in March 2026”.
         </p>
+        {underMaintenance ? (
+          <div className="stripe-ui__error" style={{ marginBottom: "1rem" }}>
+            <h2>Under maintenance</h2>
+            <p>Do not use this page right now.</p>
+          </div>
+        ) : null}
         <div className="stripe-ui__field">
           <label className="stripe-ui__field-label" htmlFor="metrics-assistant-question">
             Question
@@ -122,15 +132,15 @@ export default function MetricsAssistantPage() {
           <button
             className="stripe-ui__button stripe-ui__button--primary"
             onClick={runQuery}
-            disabled={loading}
+            disabled={loading || underMaintenance}
             type="button"
           >
-            {loading ? "Running..." : "Ask"}
+            {underMaintenance ? "Unavailable" : loading ? "Running..." : "Ask"}
           </button>
           <button
             className="stripe-ui__button"
             onClick={() => setQuestion(initialQuestion)}
-            disabled={loading}
+            disabled={loading || underMaintenance}
             type="button"
           >
             Reset Example
