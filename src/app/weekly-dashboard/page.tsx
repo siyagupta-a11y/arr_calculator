@@ -81,6 +81,23 @@ type OpenPipelineResponse = {
   includedStageCount: number;
 };
 
+type WeeklyNewDealRow = {
+  dealId: string;
+  dealName: string;
+  createdDate: string;
+  arr: number;
+  amount: number;
+  pipelineLabel: string;
+};
+
+type WeeklyNewDealsResponse = {
+  startDate: string;
+  endDate: string;
+  dealCount: number;
+  totalArr: number;
+  rows: WeeklyNewDealRow[];
+};
+
 type ArrBreakdown = {
   selfserveArr: number;
   salesledArr: number;
@@ -117,6 +134,7 @@ type DashboardData = {
   currency: string;
   openPipelineArr: number;
   openPipelineDealCount: number;
+  newDeals: WeeklyNewDealsResponse;
   churnedAccounts: ChurnedAccount[];
   current: Snapshot;
   previous: Snapshot;
@@ -391,7 +409,7 @@ export default function WeeklyDashboardPage() {
       const currentMonthStart = startOfMonth(asOfDate);
       const previousMonthStart = startOfMonth(previousDate);
 
-      const [currentSubs, previousSubs, currentOverview, previousOverview, currentAnalytics, previousAnalytics, openPipeline] = await Promise.all([
+      const [currentSubs, previousSubs, currentOverview, previousOverview, currentAnalytics, previousAnalytics, openPipeline, newDeals] = await Promise.all([
         postJson<CombinedAllSubsResponse>(
           "/api/combined-all-subs-report",
           {
@@ -458,6 +476,14 @@ export default function WeeklyDashboardPage() {
           {},
           "Open pipeline request",
         ),
+        postJson<WeeklyNewDealsResponse>(
+          "/api/weekly-dashboard-new-deals",
+          {
+            startDate: addDays(previousDate, 1),
+            endDate: asOfDate,
+          },
+          "New deals request",
+        ),
       ]);
 
       const currentBreakdown = computeBreakdown(currentSubs, asOfDate);
@@ -475,6 +501,7 @@ export default function WeeklyDashboardPage() {
         currency,
         openPipelineArr: round2(Number(openPipeline.openPipelineArr || 0)),
         openPipelineDealCount: Math.max(0, Math.floor(Number(openPipeline.openDealCount || 0))),
+        newDeals,
         churnedAccounts,
         current: {
           date: asOfDate,
@@ -919,6 +946,40 @@ export default function WeeklyDashboardPage() {
                   {formatNumber(data.openPipelineDealCount, 0)} open deals, excluding closed won and closed lost
                 </p>
               </div>
+            </div>
+
+            <div style={{ marginTop: "1.25rem" }}>
+              <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.5rem" }}>
+                New deals this week
+              </h3>
+              {data.newDeals.rows.length ? (
+                <div className="stripe-ui__table-wrap">
+                  <table className="stripe-ui__table" aria-label="New deals table">
+                    <thead>
+                      <tr>
+                        <th>Deal</th>
+                        <th>Created</th>
+                        <th>Pipeline</th>
+                        <th style={{ textAlign: "right" }}>ARR</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.newDeals.rows.map((row) => (
+                        <tr key={row.dealId}>
+                          <td>{row.dealName}</td>
+                          <td>{row.createdDate || "—"}</td>
+                          <td>{row.pipelineLabel || "—"}</td>
+                          <td style={{ textAlign: "right" }}>{formatMoney(row.arr, data.currency)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="stripe-ui__panel-subtitle" style={{ margin: 0 }}>
+                  No new deals were created in this window.
+                </p>
+              )}
             </div>
 
             <div style={{ marginTop: "1.25rem" }}>
