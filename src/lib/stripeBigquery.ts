@@ -2975,7 +2975,9 @@ export async function queryStripeThroughMrrReportFromBigQuery(
   const grain = normalizeStripeThroughMrrGrain(request.grain);
   const groupBy = normalizeStripeThroughMrrGroupBy(request.groupBy);
   const countryFilterRules =
-    groupBy === "customer_id" ? normalizeStripeThroughMrrCountryFilterRules(request.countryFilters) : [];
+    groupBy === "customer_id" || groupBy === "email"
+      ? normalizeStripeThroughMrrCountryFilterRules(request.countryFilters)
+      : [];
   const countryFilter = buildStripeThroughMrrCountryFilterSql(
     countryFilterRules,
     "group_customer_country_code",

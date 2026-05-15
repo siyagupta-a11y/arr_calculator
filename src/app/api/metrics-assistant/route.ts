@@ -62,6 +62,22 @@ type HubspotViewModelResponse = {
   }>;
 };
 
+type StripeThroughMrrGroupedDetailRow = {
+  groupKey: string;
+  monthKey: string;
+  monthEndMrr: number;
+};
+
+type StripeThroughMrrReportResponse = {
+  targetCurrency: string;
+  detailRows: StripeThroughMrrGroupedDetailRow[];
+  pagination?: {
+    page: number;
+    totalPages: number;
+    hasMore: boolean;
+  };
+};
+
 const MONTH_INDEX: Record<string, number> = {
   january: 0,
   february: 1,
@@ -85,6 +101,25 @@ function round2(n: number) {
 
 function toIsoDateOnly(date: Date) {
   return date.toISOString().slice(0, 10);
+}
+
+function parseIsoMonth(value: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(value || "").trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  if (!Number.isFinite(year) || !Number.isFinite(monthIndex) || monthIndex < 0 || monthIndex > 11) return null;
+  return new Date(Date.UTC(year, monthIndex, 1, 0, 0, 0, 0));
+}
+
+function previousMonthKeyInfo(monthKey: string) {
+  const monthDate = parseIsoMonth(monthKey);
+  if (!monthDate) return null;
+  const previous = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth() - 1, 1, 0, 0, 0, 0));
+  return {
+    monthKey: toIsoDateOnly(previous).slice(0, 7),
+    startDate: toIsoDateOnly(previous),
+  };
 }
 
 function startEndForMonth(year: number, monthIndex: number) {
@@ -230,6 +265,69 @@ function findPointByMonth(points: CombinedPoint[] | undefined, monthKey: string)
   return rows.find((point) => String(point.key || "") === monthKey) || null;
 }
 
+async function computeStripeCountryChurnMrrByEmail(
+  req: Request,
+  params: {
+    country: string;
+    previousMonthKey: string;
+    targetMonthKey: string;
+    queryStartDate: string;
+    queryEndDate: string;
+  },
+) {
+  const byEmail = new Map<string, { previousMrr: number; currentMrr: number }>();
+  const pageSize = 100000;
+  let page = 1;
+  let targetCurrency = "USD";
+  let hasMore = true;
+  let safetyCounter = 0;
+
+  while (hasMore && safetyCounter < 25) {
+    safetyCounter += 1;
+    const stripeReport = (await postJson(req, "/api/stripe-through-mrr-report", {
+      startDate: params.queryStartDate,
+      endDate: params.queryEndDate,
+      detailStartMonth: params.previousMonthKey,
+      detailEndMonth: params.targetMonthKey,
+      grain: "monthly",
+      groupBy: "email",
+      countryFilters: [params.country],
+      page,
+      pageSize,
+    })) as StripeThroughMrrReportResponse;
+
+    targetCurrency = String(stripeReport.targetCurrency || targetCurrency);
+    for (const row of stripeReport.detailRows || []) {
+      const key = String(row.groupKey || "").trim();
+      const monthKey = String(row.monthKey || "").trim();
+      if (!key) continue;
+      if (monthKey !== params.previousMonthKey && monthKey !== params.targetMonthKey) continue;
+      if (!byEmail.has(key)) byEmail.set(key, { previousMrr: 0, currentMrr: 0 });
+      const bucket = byEmail.get(key)!;
+      const monthEndMrr = round2(Number(row.monthEndMrr || 0));
+      if (monthKey === params.previousMonthKey) bucket.previousMrr = monthEndMrr;
+      if (monthKey === params.targetMonthKey) bucket.currentMrr = monthEndMrr;
+    }
+
+    hasMore = stripeReport.pagination?.hasMore === true;
+    page += 1;
+  }
+
+  let churnMrr = 0;
+  for (const value of byEmail.values()) {
+    if (value.previousMrr > 1e-9 && Math.abs(value.currentMrr) <= 1e-9) {
+      churnMrr = round2(churnMrr - value.previousMrr);
+    }
+  }
+
+  return {
+    churnMrr,
+    targetCurrency: String(targetCurrency || "USD").toUpperCase(),
+    emailGroupsConsidered: byEmail.size,
+    truncated: hasMore,
+  };
+}
+
 export async function POST(req: Request) {
   try {
     if (METRICS_ASSISTANT_UNDER_MAINTENANCE) {
@@ -318,20 +416,50 @@ export async function POST(req: Request) {
             clarificationResponse(parsed, `No churn data found for ${country} in ${month.monthLabel}.`),
           );
         }
-        const churnMrr = round2(Number(point?.churnMrr || 0));
+        const hubspotChurnMrr = round2(Number(point?.churnMrr || 0));
+        const previousMonth = previousMonthKeyInfo(month.monthKey);
+        if (!previousMonth) {
+          return NextResponse.json(
+            clarificationResponse(parsed, `Could not determine previous month for ${month.monthKey}.`),
+          );
+        }
+        const stripeCountryChurn = await computeStripeCountryChurnMrrByEmail(req, {
+          country,
+          previousMonthKey: previousMonth.monthKey,
+          targetMonthKey: month.monthKey,
+          queryStartDate: previousMonth.startDate,
+          queryEndDate: month.endDate,
+        });
+        if (stripeCountryChurn.truncated) {
+          warnings.push("Stripe country churn was truncated due to pagination safety limits.");
+        }
+        const churnMrr = round2(hubspotChurnMrr + stripeCountryChurn.churnMrr);
         const churnArr = round2(churnMrr * 12);
-        const currency = "USD";
+        const currency = stripeCountryChurn.targetCurrency || "USD";
 
-        const answer = `Churn MRR for ${country} in ${month.monthLabel} is ${currencyText(churnMrr, currency)} (ARR impact ${currencyText(churnArr, currency)}).`;
-        const columns = ["metric", "segment", "country", "month", "churn_mrr", "churn_arr"];
+        const answer = `Total churn MRR for ${country} in ${month.monthLabel} is ${currencyText(churnMrr, currency)} (HubSpot ${currencyText(hubspotChurnMrr, currency)} + Stripe ${currencyText(stripeCountryChurn.churnMrr, currency)}). ARR impact ${currencyText(churnArr, currency)}.`;
+        const columns = [
+          "metric",
+          "segment",
+          "country",
+          "month",
+          "hubspot_churn_mrr",
+          "stripe_churn_mrr",
+          "total_churn_mrr",
+          "total_churn_arr",
+          "stripe_email_groups_considered",
+        ];
         const rows: AssistantRow[] = [
           {
             metric: "churn",
             segment: "total",
             country,
             month: month.monthKey,
-            churn_mrr: churnMrr,
-            churn_arr: churnArr,
+            hubspot_churn_mrr: hubspotChurnMrr,
+            stripe_churn_mrr: stripeCountryChurn.churnMrr,
+            total_churn_mrr: churnMrr,
+            total_churn_arr: churnArr,
+            stripe_email_groups_considered: stripeCountryChurn.emailGroupsConsidered,
           },
         ];
 
