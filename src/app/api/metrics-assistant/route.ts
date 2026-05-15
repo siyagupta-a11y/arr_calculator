@@ -64,6 +64,8 @@ type HubspotViewModelResponse = {
 
 type StripeThroughMrrGroupedDetailRow = {
   groupKey: string;
+  groupLabel?: string;
+  customerCountry?: string;
   monthKey: string;
   monthEndMrr: number;
 };
@@ -275,6 +277,8 @@ async function computeStripeCountryChurnMrrByEmail(
     queryEndDate: string;
   },
 ) {
+  const targetCountryLabel = canonicalCountryLabel(params.country);
+  const targetCountryKey = canonicalCountryKey(targetCountryLabel);
   const byEmail = new Map<string, { previousMrr: number; currentMrr: number }>();
   const pageSize = 100000;
   let page = 1;
@@ -300,7 +304,9 @@ async function computeStripeCountryChurnMrrByEmail(
     for (const row of stripeReport.detailRows || []) {
       const key = String(row.groupKey || "").trim();
       const monthKey = String(row.monthKey || "").trim();
+      const rowCountryKey = canonicalCountryKey(String(row.customerCountry || "").trim());
       if (!key) continue;
+      if (!rowCountryKey || rowCountryKey !== targetCountryKey) continue;
       if (monthKey !== params.previousMonthKey && monthKey !== params.targetMonthKey) continue;
       if (!byEmail.has(key)) byEmail.set(key, { previousMrr: 0, currentMrr: 0 });
       const bucket = byEmail.get(key)!;
