@@ -3,7 +3,7 @@ import { getOrSetCache, readTtlMs } from "@/lib/serverResponseCache";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
-const CACHE_TTL_MS = readTtlMs("API_MODEL_UPDATE_ANALYTICS_CACHE_TTL_MS", 15 * 60 * 1000);
+const CACHE_TTL_MS = readTtlMs("API_MODEL_UPDATE_ANALYTICS_CACHE_TTL_MS", 30 * 60 * 60 * 1000);
 
 type ApiBody = {
   startDate?: string;

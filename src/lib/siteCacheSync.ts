@@ -14,6 +14,7 @@ import { clearStripeReportMemoryCache } from "@/lib/stripeReport";
 import { POST as combinedAllSubsPost } from "@/app/api/combined-all-subs-report/route";
 import { POST as combinedBillingOverviewPost } from "@/app/api/combined-billing-overview-report/route";
 import { POST as combinedLiveArrPost } from "@/app/api/combined-live-arr/route";
+import { POST as modelUpdateAnalyticsPost } from "@/app/api/model-update-analytics/route";
 import { POST as hubspotViewModelPost } from "@/app/api/hubspot-view-model/route";
 import { POST as stripeAiSpendPost } from "@/app/api/stripe-ai-spend-report/route";
 import { POST as stripeBillingOverviewPost } from "@/app/api/stripe-billing-overview-report/route";
@@ -101,6 +102,12 @@ function parseIsoDateOnlyUtc(value: string) {
     return null;
   }
   return parsed;
+}
+
+function startOfMonthIsoUtc(isoDate: string) {
+  const parsed = parseIsoDateOnlyUtc(isoDate);
+  if (!parsed) return isoDate;
+  return toIsoDateOnlyUtc(new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), 1)));
 }
 
 function parseMonthKeyUtc(value: string) {
@@ -445,6 +452,7 @@ function buildMonthlyWarmupChunksFromDirtyMonths(monthKeys: string[], monthsPerC
 export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options: WarmupTaskOptions = {}): WarmupTaskDefinition[] {
   const normalizedMode = normalizeSyncMode(syncMode);
   const { today, currentMonthStart, effectiveStart } = defaultRanges(normalizedMode);
+  const previousDate = daysAgoIsoUtc(7);
   const defaultChunkMonths = normalizedMode === "full" ? 4 : 6;
   const chunkMonthsRaw = Number(process.env.CACHE_SYNC_MONTHLY_CHUNK_SIZE || defaultChunkMonths);
   const chunkMonths = Number.isFinite(chunkMonthsRaw) ? Math.max(1, Math.floor(chunkMonthsRaw)) : defaultChunkMonths;
@@ -693,6 +701,24 @@ export function buildWarmupTaskDefinitions(syncMode: SyncMode = "fast", options:
       handler: combinedLiveArrPost,
       source: "mixed",
       body: {},
+    },
+    {
+      key: "model-update-analytics:current-month",
+      handler: modelUpdateAnalyticsPost,
+      source: "mixed",
+      body: {
+        startDate: currentMonthStart,
+        endDate: today,
+      },
+    },
+    {
+      key: "model-update-analytics:previous-month",
+      handler: modelUpdateAnalyticsPost,
+      source: "mixed",
+      body: {
+        startDate: startOfMonthIsoUtc(previousDate),
+        endDate: previousDate,
+      },
     },
   );
 

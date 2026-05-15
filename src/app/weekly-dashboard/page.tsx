@@ -199,6 +199,15 @@ function formatCompactCount(value: number) {
   }).format(value || 0);
 }
 
+function escapeHtml(value: unknown) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function parseJsonResponseText(text: string, status: number, context: string) {
   try {
     return text ? (JSON.parse(text) as unknown) : null;
@@ -386,6 +395,335 @@ function deltaStyle(tone: "positive" | "negative" | "neutral") {
   return {};
 }
 
+function formatDeltaBadgeHtml(current: number, previous: number) {
+  const delta = deltaLabel(current, previous);
+  const className = delta.tone === "positive" ? "up" : delta.tone === "negative" ? "down" : "neutral";
+  return `<span class="delta ${className}">${escapeHtml(delta.text)}</span>`;
+}
+
+function metricComparisonTextForHtml(current: AnalyticsBlock, previous: AnalyticsBlock) {
+  if (current.status !== "ok" || current.value == null) return metricStatusLabel(current);
+  if (previous.status !== "ok" || previous.value == null) return "No comparable value last week";
+  return deltaLabel(current.value, previous.value).text;
+}
+
+function buildWeeklyDashboardHtmlExport(args: {
+  data: DashboardData;
+  totalCurrent: number;
+  totalPrevious: number;
+  usageBarMetrics: UsageBarMetric[];
+  usageBarMax: number;
+}) {
+  const { data, totalCurrent, totalPrevious, usageBarMetrics, usageBarMax } = args;
+  const generatedAt = new Date().toLocaleString();
+
+  const arrCards = [
+    {
+      label: "Total ARR",
+      value: formatMoney(totalCurrent, data.currency),
+      deltaHtml: formatDeltaBadgeHtml(totalCurrent, totalPrevious),
+    },
+    {
+      label: "Self-serve ARR",
+      value: formatMoney(data.current.breakdown.selfserveArr, data.currency),
+      deltaHtml: formatDeltaBadgeHtml(data.current.breakdown.selfserveArr, data.previous.breakdown.selfserveArr),
+    },
+    {
+      label: "Sales-led ARR",
+      value: formatMoney(data.current.breakdown.salesledArr, data.currency),
+      deltaHtml: formatDeltaBadgeHtml(data.current.breakdown.salesledArr, data.previous.breakdown.salesledArr),
+    },
+    {
+      label: "Sales assist ARR",
+      value: formatMoney(data.current.breakdown.salesAssistArr, data.currency),
+      deltaHtml: formatDeltaBadgeHtml(data.current.breakdown.salesAssistArr, data.previous.breakdown.salesAssistArr),
+    },
+    {
+      label: "AI spend ARR",
+      value: formatMoney(data.current.ops.aiSpendArr, data.currency),
+      deltaHtml: formatDeltaBadgeHtml(data.current.ops.aiSpendArr, data.previous.ops.aiSpendArr),
+    },
+  ]
+    .map(
+      (card) => `
+      <div class="card kpi">
+        <div class="kpi-label">${escapeHtml(card.label)}</div>
+        <div class="kpi-value">${escapeHtml(card.value)}</div>
+        ${card.deltaHtml}
+      </div>`,
+    )
+    .join("");
+
+  const opsCards = [
+    {
+      label: "Sales cycle (days)",
+      value: formatNumber(data.current.ops.salesCycleDays, 2),
+      deltaHtml: formatDeltaBadgeHtml(data.current.ops.salesCycleDays, data.previous.ops.salesCycleDays),
+    },
+    {
+      label: "LTV",
+      value: formatMoney(data.current.ops.ltv, data.currency),
+      deltaHtml: formatDeltaBadgeHtml(data.current.ops.ltv, data.previous.ops.ltv),
+    },
+    {
+      label: "ARR/FTE",
+      value: formatMoney(data.current.ops.arrPerFte, data.currency),
+      deltaHtml: formatDeltaBadgeHtml(data.current.ops.arrPerFte, data.previous.ops.arrPerFte),
+    },
+    {
+      label: "FTEs",
+      value: formatNumber(data.current.ops.ftes, 0),
+      deltaHtml: formatDeltaBadgeHtml(data.current.ops.ftes, data.previous.ops.ftes),
+    },
+  ]
+    .map(
+      (card) => `
+      <div class="card kpi">
+        <div class="kpi-label">${escapeHtml(card.label)}</div>
+        <div class="kpi-value">${escapeHtml(card.value)}</div>
+        ${card.deltaHtml}
+      </div>`,
+    )
+    .join("");
+
+  const usageCards = [
+    {
+      label: "DAU (last day)",
+      value:
+        data.current.usage.dauLastDay.value != null ? formatNumber(data.current.usage.dauLastDay.value, 0) : "—",
+      deltaText: metricComparisonTextForHtml(data.current.usage.dauLastDay, data.previous.usage.dauLastDay),
+    },
+    {
+      label: "WAU (last day)",
+      value:
+        data.current.usage.wauLastDay.value != null ? formatNumber(data.current.usage.wauLastDay.value, 0) : "—",
+      deltaText: metricComparisonTextForHtml(data.current.usage.wauLastDay, data.previous.usage.wauLastDay),
+    },
+    {
+      label: "MAU (last day)",
+      value:
+        data.current.usage.mauLastDay.value != null ? formatNumber(data.current.usage.mauLastDay.value, 0) : "—",
+      deltaText: metricComparisonTextForHtml(data.current.usage.mauLastDay, data.previous.usage.mauLastDay),
+    },
+    {
+      label: "Production messages (month)",
+      value:
+        data.current.usage.productionMessagesInMonth.value != null
+          ? formatNumber(data.current.usage.productionMessagesInMonth.value, 0)
+          : "—",
+      deltaText: metricComparisonTextForHtml(
+        data.current.usage.productionMessagesInMonth,
+        data.previous.usage.productionMessagesInMonth,
+      ),
+    },
+    {
+      label: "Active builders (10 of 30 days)",
+      value:
+        data.current.usage.activeBuilders10of30.value != null
+          ? formatNumber(data.current.usage.activeBuilders10of30.value, 0)
+          : "—",
+      deltaText: metricComparisonTextForHtml(
+        data.current.usage.activeBuilders10of30,
+        data.previous.usage.activeBuilders10of30,
+      ),
+    },
+  ]
+    .map((card) => {
+      const className = card.deltaText.includes("increase")
+        ? "up"
+        : card.deltaText.includes("decrease")
+          ? "down"
+          : "neutral";
+      return `
+      <div class="card kpi">
+        <div class="kpi-label">${escapeHtml(card.label)}</div>
+        <div class="kpi-value">${escapeHtml(card.value)}</div>
+        <span class="delta ${className}">${escapeHtml(card.deltaText)}</span>
+      </div>`;
+    })
+    .join("");
+
+  const usageBars = usageBarMetrics
+    .map((metric) => {
+      const value = metric.block.status === "ok" && metric.block.value != null ? metric.block.value : null;
+      const widthPct = value == null ? 0 : value <= 0 ? 0 : Math.min(100, (value / usageBarMax) * 100);
+      const statusText =
+        value != null
+          ? formatCompactCount(value)
+          : metric.block.status === "not_configured"
+            ? "Not configured"
+            : "Unavailable";
+      return `
+      <div class="bar-row">
+        <div class="bar-metric">
+          <div class="bar-metric-label">${escapeHtml(metric.label)}</div>
+          <div class="bar-metric-sub">${escapeHtml(metric.block.status === "ok" ? "Mixpanel" : metric.block.details || metric.block.status)}</div>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar-fill" style="width:${widthPct}%; background:${escapeHtml(metric.color)};"></div>
+        </div>
+        <div class="bar-value">${escapeHtml(statusText)}</div>
+      </div>`;
+    })
+    .join("");
+
+  const closedWonRows = data.closedWonAccounts.rows.length
+    ? data.closedWonAccounts.rows
+        .map(
+          (row) => `
+        <tr>
+          <td>${escapeHtml(row.accountName || row.accountId || "(blank)")}</td>
+          <td>${escapeHtml(String(row.closedWonDealCount))}</td>
+          <td>${escapeHtml(row.latestClosedDate || "—")}</td>
+          <td class="num">${escapeHtml(formatMoney(row.arr, data.currency))}</td>
+        </tr>`,
+        )
+        .join("")
+    : `
+      <tr>
+        <td colspan="4" class="empty">No closed won accounts were found in this window.</td>
+      </tr>`;
+
+  const churnRows = data.churnedAccounts.length
+    ? data.churnedAccounts
+        .map(
+          (account) => `
+        <tr>
+          <td>${escapeHtml(account.accountName || account.accountId || "(blank)")}</td>
+          <td class="num">${escapeHtml(formatMoney(account.arr, data.currency))}</td>
+        </tr>`,
+        )
+        .join("")
+    : `
+      <tr>
+        <td colspan="2" class="empty">No HubSpot accounts churned in this comparison window.</td>
+      </tr>`;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Weekly Dashboard Snapshot — ${escapeHtml(data.current.date)}</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f7f8fb;
+  --panel: #ffffff;
+  --ink: #121826;
+  --ink-2: #3f4a5f;
+  --ink-3: #6b7690;
+  --line: #e3e8f2;
+  --line-2: #edf1f7;
+  --brand: #284e8e;
+  --green: #15803d;
+  --red: #b91c1c;
+  --shadow: 0 1px 2px rgba(10, 16, 28, 0.06), 0 0 0 1px rgba(10, 16, 28, 0.03);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif; }
+.topbar { padding: 14px 22px; border-bottom: 1px solid var(--line); background: var(--panel); display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.brand-name { font-weight: 700; font-size: 16px; }
+.brand-sub { color: var(--ink-3); font-size: 12px; margin-top: 3px; }
+.page { padding: 20px; display: grid; gap: 16px; }
+.section-title { margin: 0 0 10px; font-size: 13px; font-weight: 700; letter-spacing: .02em; color: var(--ink-2); text-transform: uppercase; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; box-shadow: var(--shadow); }
+.kpi-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); }
+.kpi-label { font-size: 11px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; }
+.kpi-value { margin-top: 6px; font-size: 22px; font-weight: 700; letter-spacing: -.01em; color: var(--ink); line-height: 1.15; }
+.delta { margin-top: 8px; display: inline-block; font-size: 12px; font-weight: 600; color: var(--ink-3); }
+.delta.up { color: var(--green); }
+.delta.down { color: var(--red); }
+.delta.neutral { color: var(--ink-3); }
+.bar-panel { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
+.bar-scale { display: flex; justify-content: space-between; color: var(--ink-3); font-size: 11px; margin-bottom: 8px; }
+.bar-list { display: grid; gap: 9px; }
+.bar-row { display: grid; grid-template-columns: 200px minmax(0, 1fr) 95px; align-items: center; gap: 10px; }
+.bar-metric-label { font-size: 13px; font-weight: 600; color: var(--ink); }
+.bar-metric-sub { font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+.bar-wrap { position: relative; height: 20px; background: var(--line-2); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 6px; opacity: 0.9; }
+.bar-value { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--ink-2); }
+.table-wrap { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line-2); color: var(--ink-2); }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-3); background: #fbfcff; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: none; }
+.empty { color: var(--ink-3); }
+@media (max-width: 900px) {
+  .bar-row { grid-template-columns: 1fr; }
+  .bar-value { text-align: left; }
+}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div>
+      <div class="brand-name">Weekly Dashboard Snapshot</div>
+      <div class="brand-sub">As of ${escapeHtml(data.current.date)} · Comparing ${escapeHtml(data.current.date)} vs ${escapeHtml(data.previous.date)}</div>
+    </div>
+    <div class="brand-sub">Generated ${escapeHtml(generatedAt)}</div>
+  </div>
+  <main class="page">
+    <section>
+      <h2 class="section-title">ARR Snapshot</h2>
+      <div class="kpi-grid">${arrCards}</div>
+    </section>
+    <section>
+      <h2 class="section-title">Operating Metrics Snapshot</h2>
+      <div class="kpi-grid">${opsCards}</div>
+    </section>
+    <section>
+      <h2 class="section-title">Usage Metrics Snapshot</h2>
+      <div class="kpi-grid">${usageCards}</div>
+      <div class="bar-panel" style="margin-top: 12px;">
+        <div class="section-title" style="margin: 0 0 8px;">Mixpanel Activity Bars</div>
+        <div class="bar-scale"><span>0</span><span>${escapeHtml(formatCompactCount(usageBarMax))}</span></div>
+        <div class="bar-list">${usageBars}</div>
+      </div>
+    </section>
+    <section>
+      <h2 class="section-title">Pipeline and Churn</h2>
+      <div class="kpi-grid">
+        <div class="card kpi">
+          <div class="kpi-label">Open pipeline ARR</div>
+          <div class="kpi-value">${escapeHtml(formatMoney(data.openPipelineArr, data.currency))}</div>
+          <span class="delta neutral">${escapeHtml(formatNumber(data.openPipelineDealCount, 0))} open deals, excluding closed won and closed lost</span>
+        </div>
+      </div>
+      <h3 class="section-title" style="margin-top: 14px;">Closed won accounts this week</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Deals</th>
+              <th>Latest closed</th>
+              <th class="num">ARR</th>
+            </tr>
+          </thead>
+          <tbody>${closedWonRows}</tbody>
+        </table>
+      </div>
+      <h3 class="section-title" style="margin-top: 14px;">HubSpot accounts churned this week</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th class="num">ARR</th>
+            </tr>
+          </thead>
+          <tbody>${churnRows}</tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
 type UsageBarMetric = {
   key: string;
   label: string;
@@ -482,7 +820,6 @@ export default function WeeklyDashboardPage() {
         {
           startDate: previousMonthStart,
           endDate: previousDate,
-          includeComparisonMetricsOnly: true,
         },
         "Previous-week usage metrics request",
       );
@@ -589,6 +926,26 @@ export default function WeeklyDashboardPage() {
     return Math.max(1, ...values);
   }, [usageBarMetrics]);
 
+  const downloadHtmlSnapshot = useCallback(() => {
+    if (!data || loading) return;
+    const html = buildWeeklyDashboardHtmlExport({
+      data,
+      totalCurrent,
+      totalPrevious,
+      usageBarMetrics,
+      usageBarMax,
+    });
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `weekly-dashboard-${data.current.date}.html`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }, [data, loading, totalCurrent, totalPrevious, usageBarMetrics, usageBarMax]);
+
   return (
     <div className="stripe-ui">
       <section className="stripe-ui__hero ui-reveal">
@@ -620,7 +977,7 @@ export default function WeeklyDashboardPage() {
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Controls</h2>
         <p className="stripe-ui__panel-subtitle">Defaults to today. Change date to see the snapshot on that date.</p>
-        <div className="stripe-ui__control-grid" style={{ gridTemplateColumns: "repeat(3, minmax(180px, 1fr))" }}>
+        <div className="stripe-ui__control-grid" style={{ gridTemplateColumns: "repeat(4, minmax(180px, 1fr))" }}>
           <div className="stripe-ui__field">
             <label className="stripe-ui__field-label" htmlFor="weekly-dashboard-date">
               As-of date
@@ -636,6 +993,15 @@ export default function WeeklyDashboardPage() {
           <div className="stripe-ui__field" style={{ alignSelf: "end" }}>
             <button className="stripe-ui__btn stripe-ui__btn--primary" onClick={run} disabled={loading}>
               {loading ? "Loading..." : "Refresh dashboard"}
+            </button>
+          </div>
+          <div className="stripe-ui__field" style={{ alignSelf: "end" }}>
+            <button
+              className="stripe-ui__btn stripe-ui__btn--secondary"
+              onClick={downloadHtmlSnapshot}
+              disabled={loading || !data}
+            >
+              Download HTML snapshot
             </button>
           </div>
           {data ? (
