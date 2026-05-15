@@ -56,7 +56,10 @@ type AnalyticsResponse = {
     dauLastDay: AnalyticsBlock;
     wauLastDay: AnalyticsBlock;
     mauLastDay: AnalyticsBlock;
+    signupsInMonth: AnalyticsBlock;
+    newUsersInMonth: AnalyticsBlock;
     productionMessagesInMonth: AnalyticsBlock;
+    highVolumeWorkspacesInMonth: AnalyticsBlock;
     activeBuilders10of30: AnalyticsBlock;
   };
 };
@@ -96,7 +99,10 @@ type UsageSnapshot = {
   dauLastDay: AnalyticsBlock;
   wauLastDay: AnalyticsBlock;
   mauLastDay: AnalyticsBlock;
+  signupsInMonth: AnalyticsBlock;
+  newUsersInMonth: AnalyticsBlock;
   productionMessagesInMonth: AnalyticsBlock;
+  highVolumeWorkspacesInMonth: AnalyticsBlock;
   activeBuilders10of30: AnalyticsBlock;
 };
 
@@ -305,7 +311,10 @@ function computeUsageSnapshot(data: AnalyticsResponse | null): UsageSnapshot {
     dauLastDay: metrics?.dauLastDay || EMPTY_ANALYTICS_BLOCK,
     wauLastDay: metrics?.wauLastDay || EMPTY_ANALYTICS_BLOCK,
     mauLastDay: metrics?.mauLastDay || EMPTY_ANALYTICS_BLOCK,
+    signupsInMonth: metrics?.signupsInMonth || EMPTY_ANALYTICS_BLOCK,
+    newUsersInMonth: metrics?.newUsersInMonth || EMPTY_ANALYTICS_BLOCK,
     productionMessagesInMonth: metrics?.productionMessagesInMonth || EMPTY_ANALYTICS_BLOCK,
+    highVolumeWorkspacesInMonth: metrics?.highVolumeWorkspacesInMonth || EMPTY_ANALYTICS_BLOCK,
     activeBuilders10of30: metrics?.activeBuilders10of30 || EMPTY_ANALYTICS_BLOCK,
   };
 }
@@ -351,6 +360,13 @@ function deltaStyle(tone: "positive" | "negative" | "neutral") {
   if (tone === "negative") return { color: "#dc2626" };
   return {};
 }
+
+type UsageBarMetric = {
+  key: string;
+  label: string;
+  block: AnalyticsBlock;
+  color: string;
+};
 
 export default function WeeklyDashboardPage() {
   const initialDate = useMemo(() => defaultAsOfDate(), []);
@@ -498,6 +514,44 @@ export default function WeeklyDashboardPage() {
       + data.previous.ops.aiSpendArr,
     );
   }, [data]);
+
+  const usageBarMetrics = useMemo<UsageBarMetric[]>(
+    () =>
+      data
+        ? [
+            {
+              key: "signups",
+              label: "Signups",
+              block: data.current.usage.signupsInMonth,
+              color: "#38bdf8",
+            },
+            {
+              key: "new-users",
+              label: "New users",
+              block: data.current.usage.newUsersInMonth,
+              color: "#a78bfa",
+            },
+            {
+              key: "active-builders",
+              label: "Active builders",
+              block: data.current.usage.activeBuilders10of30,
+              color: "#22c55e",
+            },
+            {
+              key: "high-volume-workspaces",
+              label: "High volume workspaces",
+              block: data.current.usage.highVolumeWorkspacesInMonth,
+              color: "#f59e0b",
+            },
+          ]
+        : [],
+    [data],
+  );
+
+  const usageBarMax = useMemo(() => {
+    const values = usageBarMetrics.map((metric) => (metric.block.status === "ok" && metric.block.value != null ? metric.block.value : 0));
+    return Math.max(1, ...values);
+  }, [usageBarMetrics]);
 
   return (
     <div className="stripe-ui">
@@ -707,6 +761,59 @@ export default function WeeklyDashboardPage() {
                     data.previous.usage.activeBuilders10of30,
                   )}
                 </p>
+              </div>
+            </div>
+
+            <div style={{ marginTop: "1.25rem" }}>
+              <h3 className="stripe-ui__panel-title" style={{ marginBottom: "0.5rem" }}>
+                Mixpanel activity bars
+              </h3>
+              <p className="stripe-ui__panel-subtitle" style={{ marginBottom: "0.9rem" }}>
+                Current month as of {data.current.date}
+              </p>
+              <div style={{ display: "grid", gap: "0.9rem" }}>
+                {usageBarMetrics.map((metric) => {
+                  const value = metric.block.status === "ok" && metric.block.value != null ? metric.block.value : null;
+                  const widthPct = value == null ? 0 : value <= 0 ? 0 : Math.max(4, (value / usageBarMax) * 100);
+                  const statusText =
+                    value != null
+                      ? formatNumber(value, 0)
+                      : metric.block.status === "not_configured"
+                        ? "Not configured"
+                        : "Unavailable";
+                  return (
+                    <div key={metric.key}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "0.75rem", marginBottom: "0.34rem" }}>
+                        <span style={{ color: "var(--stripe-text)", fontSize: "0.88rem", fontWeight: 600 }}>{metric.label}</span>
+                        <span style={{ color: "var(--stripe-muted)", fontSize: "0.88rem" }}>{statusText}</span>
+                      </div>
+                      <div
+                        aria-label={`${metric.label} bar`}
+                        style={{
+                          width: "100%",
+                          height: "0.9rem",
+                          border: "1px solid var(--stripe-border)",
+                          background: "rgba(255, 255, 255, 0.04)",
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: `${widthPct}%`,
+                            height: "100%",
+                            background: `linear-gradient(90deg, ${metric.color}, rgba(255,255,255,0.18))`,
+                            transition: "width 180ms ease",
+                          }}
+                        />
+                      </div>
+                      <div className="stripe-ui__panel-subtitle" style={{ margin: "0.38rem 0 0 0" }}>
+                        {metric.block.status === "ok"
+                          ? "Pulled directly from Mixpanel"
+                          : metric.block.details || metric.block.status}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </section>

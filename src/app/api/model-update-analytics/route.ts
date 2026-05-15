@@ -19,6 +19,7 @@ type MixpanelMetricsResult = {
   wauLastDay: ProviderResult;
   mauLastDay: ProviderResult;
   signupsInMonth: ProviderResult;
+  newUsersInMonth: ProviderResult;
   productionMessagesInMonth: ProviderResult;
   highVolumeWorkspacesInMonth: ProviderResult;
   activeBuilders10of30: ProviderResult;
@@ -394,7 +395,7 @@ async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise
 
   const withMetric = (metric: string) => ({ ...baseParams, metric });
 
-  const [dauLastDay, wauLastDay, mauLastDay, signupsInMonth, productionMessagesInMonth, highVolumeWorkspacesInMonth, activeBuilders10of30] =
+  const [dauLastDay, wauLastDay, mauLastDay, signupsInMonth, newUsersInMonth, productionMessagesInMonth, highVolumeWorkspacesInMonth, activeBuilders10of30] =
     await Promise.all([
       fetchMixpanelMetricWithFallback({
         endpointEnv: "MODEL_UPDATE_MIXPANEL_DAU_ENDPOINT",
@@ -425,6 +426,13 @@ async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise
         baseEndpoint,
       }),
       fetchMixpanelMetricWithFallback({
+        endpointEnv: "MODEL_UPDATE_MIXPANEL_NEW_USERS_ENDPOINT",
+        bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_NEW_USERS_BOOKMARK_ID",
+        tokenEnvs,
+        queryParams: withMetric("new_users_in_month"),
+        baseEndpoint,
+      }),
+      fetchMixpanelMetricWithFallback({
         endpointEnv: "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_ENDPOINT",
         bookmarkIdEnv: "MODEL_UPDATE_MIXPANEL_PRODUCTION_MESSAGES_BOOKMARK_ID",
         tokenEnvs,
@@ -452,6 +460,7 @@ async function fetchMixpanelMetrics(startDate: string, endDate: string): Promise
     wauLastDay,
     mauLastDay,
     signupsInMonth,
+    newUsersInMonth,
     productionMessagesInMonth,
     highVolumeWorkspacesInMonth,
     activeBuilders10of30,
