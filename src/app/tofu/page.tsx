@@ -109,6 +109,14 @@ const PLAN_LABELS: Record<CombinedPlan, string> = {
   free: "Free",
 };
 
+const PLAN_DISPLAY_ORDER: CombinedPlan[] = [
+  "enterprise",
+  "managed",
+  "team",
+  "plus",
+  "pay_as_you_go",
+];
+
 const SEGMENT_LABELS: Record<TofuSegment, string> = {
   salesled: "Sales-led",
   selfserve: "Self-serve",
@@ -118,7 +126,7 @@ const SEGMENT_LABELS: Record<TofuSegment, string> = {
 const PLAN_BRIDGE_METRICS: Array<{
   key: keyof Pick<
     TofuPlanRow,
-    "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "netPlanChangeArr" | "endingArr"
+    "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "endingArr"
   >;
   label: string;
 }> = [
@@ -127,7 +135,6 @@ const PLAN_BRIDGE_METRICS: Array<{
   { key: "expansionArr", label: "Expansion ARR" },
   { key: "contractionArr", label: "Contraction ARR" },
   { key: "churnArr", label: "Churn ARR" },
-  { key: "netPlanChangeArr", label: "Net Upgrade/Downgrade to Different Plan" },
   { key: "endingArr", label: "Ending ARR" },
 ];
 
@@ -349,7 +356,7 @@ export default function TofuPage() {
         planBridgeTotals.set(key, round2((planBridgeTotals.get(key) || 0) + Number(row[metric.key] || 0)));
       }
     }
-    return (["enterprise", "managed", "team", "plus", "pay_as_you_go", "free"] as CombinedPlan[])
+    return PLAN_DISPLAY_ORDER
       .flatMap((plan) =>
         PLAN_BRIDGE_METRICS.map((metric) => ({
           plan,
@@ -769,8 +776,8 @@ export default function TofuPage() {
             </div>
             {effectiveGroupBy === "plan" ? (
               <p className="stripe-ui__panel-subtitle">
-                For plan switches, ARR is removed from the previous plan as Net upgrade/downgrade and added to the
-                new plan as Expansion ARR.
+                Paid-plan view with Enterprise, Managed, Team, Plus, and Pay as you go. Each plan shows Beginning,
+                New, Expansion, Contraction, Churn, and Ending ARR.
               </p>
             ) : effectiveGroupBy === "segment" ? (
               <p className="stripe-ui__panel-subtitle">
