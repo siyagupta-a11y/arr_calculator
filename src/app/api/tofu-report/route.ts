@@ -329,6 +329,30 @@ async function validateAndRun(body: TofuApiRequest) {
     });
   }
 
+  // Plan/segment requests are much heavier when forced through canonical full-history
+  // ranges. Serve the requested range directly so these views remain responsive.
+  if ((basePayload.groupBy || "month") !== "month") {
+    return getOrSetCache(key, CACHE_TTL_MS, async () => {
+      if (!forceRefreshPrecomputed) {
+        const precomputed = await readPrecomputedPayload<TofuResponse>(PRECOMPUTED_ENDPOINT_KEY, key).catch(() => null);
+        if (precomputed && hasOverallMonthCoverage(precomputed, basePayload.startDate, basePayload.endDate)) return precomputed;
+      }
+      const precomputedFacts = (basePayload.combineMode || "grouped") === "grouped" && isPrecomputedFactsReadEnabled()
+        ? await buildTofuFromPrecomputedFacts(basePayload).catch(() => null)
+        : null;
+      const built = precomputedFacts || await generateTofuReport(basePayload);
+      await writePrecomputedPayload({
+        endpoint_key: PRECOMPUTED_ENDPOINT_KEY,
+        cache_key: key,
+        start_date: basePayload.startDate,
+        end_date: basePayload.endDate,
+        grain: "monthly",
+        payload_json: JSON.stringify(built),
+      }).catch(() => null);
+      return built;
+    });
+  }
+
   const today = new Date().toISOString().slice(0, 10);
   const canonicalStartDate = basePayload.startDate < MONTHLY_CANONICAL_START_DATE
     ? basePayload.startDate
