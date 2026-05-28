@@ -123,21 +123,6 @@ const SEGMENT_LABELS: Record<TofuSegment, string> = {
   sales_assist: "Sales assist",
 };
 
-const PLAN_BRIDGE_METRICS: Array<{
-  key: keyof Pick<
-    TofuPlanRow,
-    "beginningArr" | "newArr" | "expansionArr" | "contractionArr" | "churnArr" | "endingArr"
-  >;
-  label: string;
-}> = [
-  { key: "beginningArr", label: "Beginning ARR" },
-  { key: "newArr", label: "New ARR" },
-  { key: "expansionArr", label: "Expansion ARR" },
-  { key: "contractionArr", label: "Contraction ARR" },
-  { key: "churnArr", label: "Churn ARR" },
-  { key: "endingArr", label: "Ending ARR" },
-];
-
 const SEGMENT_BRIDGE_METRICS: Array<{
   key: keyof Pick<
     TofuSegmentRow,
@@ -330,13 +315,14 @@ export default function TofuPage() {
   const rows = useMemo(() => data?.rows || [], [data?.rows]);
   const planRows = useMemo(() => data?.planRows || [], [data?.planRows]);
   const segmentRows = useMemo(() => data?.segmentRows || [], [data?.segmentRows]);
-  const planPeriodOrder = useMemo(
-    () =>
-      Array.from(
-        new Map(
-          planRows.map((row) => [row.periodKey, row.periodLabel]),
-        ).entries(),
-      ).map(([key, label]) => ({ key, label })),
+  const planTableRows = useMemo(
+    () => planRows
+      .filter((row) => PLAN_DISPLAY_ORDER.includes(row.plan))
+      .sort((a, b) => {
+        const planDiff = PLAN_DISPLAY_ORDER.indexOf(a.plan) - PLAN_DISPLAY_ORDER.indexOf(b.plan);
+        if (planDiff !== 0) return planDiff;
+        return a.periodKey.localeCompare(b.periodKey);
+      }),
     [planRows],
   );
   const segmentPeriodOrder = useMemo(
@@ -348,32 +334,6 @@ export default function TofuPage() {
       ).map(([key, label]) => ({ key, label })),
     [segmentRows],
   );
-  const planBridgeRows = useMemo(() => {
-    const planBridgeTotals = new Map<string, number>();
-    for (const row of planRows) {
-      for (const metric of PLAN_BRIDGE_METRICS) {
-        const key = `${row.plan}::${metric.key}::${row.periodKey}`;
-        planBridgeTotals.set(key, round2((planBridgeTotals.get(key) || 0) + Number(row[metric.key] || 0)));
-      }
-    }
-    return PLAN_DISPLAY_ORDER
-      .flatMap((plan) =>
-        PLAN_BRIDGE_METRICS.map((metric) => ({
-          plan,
-          metric: metric.label,
-          metricKey: metric.key,
-          valuesByPeriod: Object.fromEntries(
-            planPeriodOrder.map((period) => [
-              period.key,
-              round2(planBridgeTotals.get(`${plan}::${metric.key}::${period.key}`) || 0),
-            ]),
-          ) as Record<string, number>,
-        })),
-      )
-      .filter((row) =>
-        planPeriodOrder.some((period) => Math.abs(Number(row.valuesByPeriod[period.key] || 0)) > 1e-9),
-      );
-  }, [planRows, planPeriodOrder]);
 
   const segmentBridgeRows = useMemo(() => {
     const segmentBridgeTotals = new Map<string, number>();
@@ -476,14 +436,28 @@ export default function TofuPage() {
     if (!data) return;
 
     if (effectiveGroupBy === "plan") {
-      const header = ["plan", "bridge_metric", ...planPeriodOrder.map((period) => period.key)];
-      const csvRows = planBridgeRows.map((row) => [
+      const header = [
+        "plan",
+        "month",
+        "beginning_arr",
+        "new_arr",
+        "expansion_arr",
+        "contraction_arr",
+        "churn_arr",
+        "ending_arr",
+      ];
+      const csvRows = planTableRows.map((row) => [
         PLAN_LABELS[row.plan] || row.plan,
-        row.metric,
-        ...planPeriodOrder.map((period) => Number(row.valuesByPeriod[period.key] || 0)),
+        row.periodKey,
+        Number(row.beginningArr || 0),
+        Number(row.newArr || 0),
+        Number(row.expansionArr || 0),
+        Number(row.contractionArr || 0),
+        Number(row.churnArr || 0),
+        Number(row.endingArr || 0),
       ]);
       downloadCsv(
-        `tofu-plan-bridge-${effectiveCombineMode}-${csvTimestamp()}.csv`,
+        `tofu-plan-table-${effectiveCombineMode}-${csvTimestamp()}.csv`,
         header,
         csvRows,
       );
@@ -765,7 +739,7 @@ export default function TofuPage() {
                 onClick={exportMainTableCsv}
                 disabled={
                   effectiveGroupBy === "plan"
-                    ? planBridgeRows.length === 0
+                    ? planTableRows.length === 0
                     : effectiveGroupBy === "segment"
                       ? segmentBridgeRows.length === 0
                       : rows.length === 0
@@ -799,38 +773,36 @@ export default function TofuPage() {
             {effectiveGroupBy === "plan" ? (
               <>
                 <div className="stripe-ui__table-wrap" style={{ marginTop: "0.9rem" }}>
-                  <table className="stripe-ui__table" aria-label="TOFU ARR bridge by plan across months">
+                  <table className="stripe-ui__table" aria-label="TOFU ARR table by plan and month">
                     <thead>
                       <tr>
                         <th>Plan</th>
-                        <th>Bridge Metric</th>
-                        {planPeriodOrder.map((period) => (
-                          <th key={`plan-bridge-head:${period.key}`} className="stripe-ui__num">
-                            {period.label}
-                          </th>
-                        ))}
+                        <th>Month</th>
+                        <th className="stripe-ui__num">Beginning ARR</th>
+                        <th className="stripe-ui__num">New ARR</th>
+                        <th className="stripe-ui__num">Expansion ARR</th>
+                        <th className="stripe-ui__num">Contraction ARR</th>
+                        <th className="stripe-ui__num">Churn ARR</th>
+                        <th className="stripe-ui__num">Ending ARR</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {planBridgeRows.map((row) => {
-                        const metricIdx = PLAN_BRIDGE_METRICS.findIndex((metric) => metric.key === row.metricKey);
-                        return (
-                          <tr key={`plan-bridge:${row.plan}:${row.metricKey}`}>
-                            {metricIdx === 0 ? <td rowSpan={PLAN_BRIDGE_METRICS.length}>{PLAN_LABELS[row.plan] || row.plan}</td> : null}
-                            <td>{row.metric}</td>
-                            {planPeriodOrder.map((period) => (
-                              <td
-                                key={`plan-bridge:${row.plan}:${row.metricKey}:${period.key}`}
-                                className={`stripe-ui__num ${
-                                  Number(row.valuesByPeriod[period.key] || 0) < 0 ? "stripe-ui__money--negative" : ""
-                                }`}
-                              >
-                                {formatMoney(Number(row.valuesByPeriod[period.key] || 0), currency)}
-                              </td>
-                            ))}
-                          </tr>
-                        );
-                      })}
+                      {planTableRows.map((row) => (
+                        <tr key={`plan:${row.plan}:${row.periodKey}`}>
+                          <td>{PLAN_LABELS[row.plan] || row.plan}</td>
+                          <td>{row.periodLabel}</td>
+                          <td className="stripe-ui__num">{formatMoney(Number(row.beginningArr || 0), currency)}</td>
+                          <td className="stripe-ui__num">{formatMoney(Number(row.newArr || 0), currency)}</td>
+                          <td className="stripe-ui__num">{formatMoney(Number(row.expansionArr || 0), currency)}</td>
+                          <td className={`stripe-ui__num ${Number(row.contractionArr || 0) < 0 ? "stripe-ui__money--negative" : ""}`}>
+                            {formatMoney(Number(row.contractionArr || 0), currency)}
+                          </td>
+                          <td className={`stripe-ui__num ${Number(row.churnArr || 0) < 0 ? "stripe-ui__money--negative" : ""}`}>
+                            {formatMoney(Number(row.churnArr || 0), currency)}
+                          </td>
+                          <td className="stripe-ui__num">{formatMoney(Number(row.endingArr || 0), currency)}</td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>
