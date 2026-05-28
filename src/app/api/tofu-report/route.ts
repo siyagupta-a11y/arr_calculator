@@ -188,6 +188,17 @@ function sliceMonthlyTofuResponse(response: TofuResponse, startDate: string, end
 function hasOverallMonthCoverage(response: TofuResponse, startDate: string, endDate: string) {
   const expectedMonths = monthKeysBetween(startDate, endDate);
   if (!expectedMonths.length) return false;
+  const groupBy = String(response.groupBy || "month").trim().toLowerCase();
+  if (groupBy === "plan") {
+    const available = new Set((response.planRows || []).map((row) => String(row.periodKey || "")));
+    if (!available.size) return true;
+    return available.has(expectedMonths[expectedMonths.length - 1]);
+  }
+  if (groupBy === "segment") {
+    const available = new Set((response.segmentRows || []).map((row) => String(row.periodKey || "")));
+    if (!available.size) return true;
+    return available.has(expectedMonths[expectedMonths.length - 1]);
+  }
   const available = new Set((response.rows || []).map((row) => String(row.periodKey || "")));
   return expectedMonths.every((month) => available.has(month));
 }
