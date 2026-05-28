@@ -185,6 +185,13 @@ function sliceMonthlyTofuResponse(response: TofuResponse, startDate: string, end
   };
 }
 
+function hasOverallMonthCoverage(response: TofuResponse, startDate: string, endDate: string) {
+  const expectedMonths = monthKeysBetween(startDate, endDate);
+  if (!expectedMonths.length) return false;
+  const available = new Set((response.rows || []).map((row) => String(row.periodKey || "")));
+  return expectedMonths.every((month) => available.has(month));
+}
+
 async function buildTofuFromPrecomputedFacts(basePayload: TofuRequest): Promise<TofuResponse | null> {
   const rows = await queryPrecomputedTofuMonthlyCurrent({
     startDate: basePayload.startDate,
@@ -211,6 +218,9 @@ async function buildTofuFromPrecomputedFacts(basePayload: TofuRequest): Promise<
     .sort((a, b) => a.periodKey.localeCompare(b.periodKey));
 
   if (!monthlyRows.length) return null;
+  const expectedMonths = monthKeysBetween(basePayload.startDate, basePayload.endDate);
+  const availableMonths = new Set(monthlyRows.map((row) => row.periodKey));
+  if (expectedMonths.some((month) => !availableMonths.has(month))) return null;
 
   const response: TofuResponse = {
     startDate: basePayload.startDate,
@@ -290,7 +300,7 @@ async function validateAndRun(body: TofuApiRequest) {
     return getOrSetCache(key, CACHE_TTL_MS, async () => {
       if (!forceRefreshPrecomputed) {
         const precomputed = await readPrecomputedPayload<TofuResponse>(PRECOMPUTED_ENDPOINT_KEY, key).catch(() => null);
-        if (precomputed) return precomputed;
+        if (precomputed && hasOverallMonthCoverage(precomputed, basePayload.startDate, basePayload.endDate)) return precomputed;
       }
       const precomputedFacts = (basePayload.combineMode || "grouped") === "grouped" && isPrecomputedFactsReadEnabled()
         ? await buildTofuFromPrecomputedFacts(basePayload).catch(() => null)
@@ -321,7 +331,9 @@ async function validateAndRun(body: TofuApiRequest) {
   const canonicalKey = `api:tofu-report:base:${stableStringify(canonicalPayload)}`;
   const canonical = await getOrSetCache(canonicalKey, CACHE_TTL_MS, async () => {
     const precomputed = await readPrecomputedPayload<TofuResponse>(PRECOMPUTED_ENDPOINT_KEY, canonicalKey).catch(() => null);
-    if (precomputed) return precomputed;
+    if (precomputed && hasOverallMonthCoverage(precomputed, canonicalPayload.startDate, canonicalPayload.endDate)) {
+      return precomputed;
+    }
     const precomputedFacts = (canonicalPayload.combineMode || "grouped") === "grouped" && isPrecomputedFactsReadEnabled()
       ? await buildTofuFromPrecomputedFacts(canonicalPayload).catch(() => null)
       : null;
