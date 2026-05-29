@@ -188,16 +188,17 @@ function sliceMonthlyTofuResponse(response: TofuResponse, startDate: string, end
 function hasOverallMonthCoverage(response: TofuResponse, startDate: string, endDate: string) {
   const expectedMonths = monthKeysBetween(startDate, endDate);
   if (!expectedMonths.length) return false;
+  const latestExpectedMonth = expectedMonths[expectedMonths.length - 1];
   const groupBy = String(response.groupBy || "month").trim().toLowerCase();
   if (groupBy === "plan") {
     const available = new Set((response.planRows || []).map((row) => String(row.periodKey || "")));
-    if (!available.size) return true;
-    return available.has(expectedMonths[expectedMonths.length - 1]);
+    if (!available.size) return false;
+    return available.has(latestExpectedMonth);
   }
   if (groupBy === "segment") {
     const available = new Set((response.segmentRows || []).map((row) => String(row.periodKey || "")));
-    if (!available.size) return true;
-    return available.has(expectedMonths[expectedMonths.length - 1]);
+    if (!available.size) return false;
+    return available.has(latestExpectedMonth);
   }
   const available = new Set((response.rows || []).map((row) => String(row.periodKey || "")));
   return expectedMonths.every((month) => available.has(month));
@@ -257,6 +258,9 @@ async function buildTofuFromPrecomputedFacts(basePayload: TofuRequest): Promise<
         endingArr: row.endingArr,
       }))
       .sort((a, b) => `${a.periodKey}:${a.segment}`.localeCompare(`${b.periodKey}:${b.segment}`));
+    const latestExpectedMonth = expectedMonths[expectedMonths.length - 1];
+    const latestPresent = (response.segmentRows || []).some((row) => row.periodKey === latestExpectedMonth);
+    if (!latestPresent) return null;
   }
 
   if ((basePayload.groupBy || "month") === "plan") {
@@ -275,6 +279,9 @@ async function buildTofuFromPrecomputedFacts(basePayload: TofuRequest): Promise<
         endingArr: row.endingArr,
       }))
       .sort((a, b) => `${a.periodKey}:${a.plan}`.localeCompare(`${b.periodKey}:${b.plan}`));
+    const latestExpectedMonth = expectedMonths[expectedMonths.length - 1];
+    const latestPresent = (response.planRows || []).some((row) => row.periodKey === latestExpectedMonth);
+    if (!latestPresent) return null;
   }
 
   return response;
