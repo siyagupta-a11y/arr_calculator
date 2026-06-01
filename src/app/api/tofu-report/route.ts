@@ -313,7 +313,8 @@ async function validateAndRun(body: TofuApiRequest) {
 
   const precomputeRangeOnly = body.precomputeRangeOnly === true;
   const forceRefreshPrecomputed = body.forceRefreshPrecomputed === true;
-  const key = `api:tofu-report:base:${stableStringify(basePayload)}`;
+  const nonMonthCacheVersion = (basePayload.groupBy || "month") === "month" ? 1 : 2;
+  const key = `api:tofu-report:base:v${nonMonthCacheVersion}:${stableStringify(basePayload)}`;
   if (precomputeRangeOnly) {
     return getOrSetCache(key, CACHE_TTL_MS, async () => {
       if (!forceRefreshPrecomputed) {
