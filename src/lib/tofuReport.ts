@@ -180,14 +180,6 @@ function toIsoDateOnly(value: Date) {
   return value.toISOString().slice(0, 10);
 }
 
-function minIsoDateOnly(a: string, b: string) {
-  const aDate = parseIsoDateOnly(a);
-  const bDate = parseIsoDateOnly(b);
-  if (!aDate) return b;
-  if (!bDate) return a;
-  return aDate.getTime() <= bDate.getTime() ? a : b;
-}
-
 function monthBeforeRange(startDate: string) {
   const start = parseIsoDateOnly(startDate);
   if (!start) return null;
@@ -256,15 +248,10 @@ async function loadExpandedTofuSource(request: TofuRequest): Promise<{
   allPeriodKeys: string[];
 }> {
   const groupBy = normalizeTofuGroupBy(request.groupBy);
-  const stableHistoryStartDate =
-    String(process.env.TOFU_STABLE_HISTORY_START_DATE || "").trim() || "2023-10-01";
-  const sourceStartDate =
-    groupBy === "segment"
-      ? minIsoDateOnly(request.startDate, stableHistoryStartDate)
-      : request.startDate;
-  const prev = monthBeforeRange(sourceStartDate);
+  const prev = monthBeforeRange(request.startDate);
+  const sourceStartDate = prev?.startDate || request.startDate;
   const expandedSourceRequest = {
-    startDate: prev?.startDate || sourceStartDate,
+    startDate: sourceStartDate,
     endDate: request.endDate,
     combineMode: request.combineMode,
     displayMode: "arr" as const,
