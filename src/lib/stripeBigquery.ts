@@ -682,11 +682,17 @@ export type StripeUpcomingSnapshotsCleanupResult = {
   dryRun: boolean;
 };
 
-type BigQueryNamedParameter = {
-  name: string;
-  type: "INT64" | "STRING";
-  value: string;
-};
+type BigQueryNamedParameter =
+  | {
+      name: string;
+      type: "INT64" | "STRING";
+      value: string;
+    }
+  | {
+      name: string;
+      type: "ARRAY_STRING";
+      value: string[];
+    };
 
 type StripeBigQueryOptions = {
   profile?: StripeBigQueryProfile;
@@ -1723,12 +1729,20 @@ async function fetchBigQueryResultsPage(
   params: BigQueryNamedParameter[],
   pageToken?: string,
 ): Promise<BigQueryQueryResponse> {
-  const queryParameters: Array<{ name: string; parameterType: { type: string }; parameterValue: { value: string } }> =
-    params.map((p) => ({
-      name: p.name,
-      parameterType: { type: p.type },
-      parameterValue: { value: p.value },
-    }));
+  const queryParameters = params.map((parameter) => {
+    if (parameter.type === "ARRAY_STRING") {
+      return {
+        name: parameter.name,
+        parameterType: { type: "ARRAY", arrayType: { type: "STRING" } },
+        parameterValue: { arrayValues: parameter.value.map((value) => ({ value })) },
+      };
+    }
+    return {
+      name: parameter.name,
+      parameterType: { type: parameter.type },
+      parameterValue: { value: parameter.value },
+    };
+  });
 
   const body: Record<string, unknown> = {
     query,
@@ -4360,12 +4374,10 @@ export async function queryStripeCustomerIdsByWorkspaceIdsFromBigQuery(
   const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
   const accessToken = await getAccessToken(sa);
   const customersMetadataTable = getStripeCustomersMetadataTable(profile);
-  const workspaceIdsSql = normalizedWorkspaceIds.map((id) => `'${escapeSqlString(id)}'`).join(", ");
-
   const query = `
 WITH requested_workspace_ids AS (
   SELECT workspace_id
-  FROM UNNEST([${workspaceIdsSql}]) AS workspace_id
+  FROM UNNEST(@workspace_ids) AS workspace_id
 )
 SELECT
   LOWER(COALESCE(NULLIF(TRIM(CAST(m.value AS STRING)), ''), '')) AS workspace_id,
@@ -4381,7 +4393,9 @@ GROUP BY workspace_id, customer_id
 ORDER BY workspace_id ASC, customer_id ASC
 `;
 
-  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, []);
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, [
+    { name: "workspace_ids", type: "ARRAY_STRING", value: normalizedWorkspaceIds },
+  ]);
   const mappings: StripeCustomerWorkspaceCustomerMapping[] = rows
     .map((row) => ({
       workspaceId: asString(row.workspace_id).trim().toLowerCase(),
