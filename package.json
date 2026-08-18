@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build --webpack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:commissions": "node --experimental-strip-types --test tests/commissions.test.mjs"
   },
   "dependencies": {
     "@vercel/blob": "^2.3.1",

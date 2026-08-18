@@ -6,6 +6,7 @@ This is a Next.js ARR dashboard.
 - `/stripe` Stripe ARR report
 - `/stripe-arr-correct` Stripe ARR (Correct) report
 - `/combined-all-subs` Combined ARR by customer (HubSpot cloud C-ARR + Stripe through-MRR merge)
+- `/commissions` Admin-only owner commission and Stripe clawback report
 - `/tofu` Monthly TOFU ARR bridge (Beginning/New/Expansion/Contraction/Churn/Ending)
 - `/quickbooks` QuickBooks OAuth + data access page
 - `POST /api/report` HubSpot report API
@@ -14,6 +15,7 @@ This is a Next.js ARR dashboard.
 - `GET|POST /api/stripe-arr-correct-report` Stripe ARR (Correct) API (BigQuery profile)
 - `GET /api/stripe-arr-correct-report/export` Stripe ARR (Correct) CSV export API
 - `GET|POST /api/combined-all-subs-report` Combined HubSpot+Stripe customer ARR API
+- `POST /api/commissions` Admin-only monthly commissions API
 - `GET|POST /api/tofu-report` Monthly TOFU ARR bridge API based on Combined All Subs
 - `GET|POST /api/hubspot-current-metrics-sync` Push current ARR/contracted ARR values into HubSpot deal properties
 - `GET|POST /api/stripe-sync` Stripe sync API
@@ -322,6 +324,10 @@ HubSpot:
 - `HUBSPOT_PRIVATE_APP_TOKEN`
 - `INCLUDED_DEALSTAGE`
 - `HUBSPOT_TRANSACTIONAL_STAGE_ID` (optional, used by sales-assist matching on Stripe Through MRR; overrides label lookup)
+- `HUBSPOT_COMMISSION_TRANSACTIONAL_PIPELINE_ID` / `HUBSPOT_COMMISSION_TRANSACTIONAL_CLOSED_WON_STAGE_ID` (optional commissions pipeline overrides)
+- `HUBSPOT_COMMISSION_SALES_PIPELINE_ID` / `HUBSPOT_COMMISSION_SALES_CLOSED_WON_STAGE_ID` (optional commissions pipeline overrides)
+- `HUBSPOT_PORTAL_ID` (optional, used for deal links on the commissions page)
+- `COMMISSION_CLAWBACK_LOOKBACK_MONTHS` (optional, defaults to `24`)
 - `HUBSPOT_TRANSACTIONAL_STAGE_LABEL` (optional fallback label, default `Closed Won (Transactional Pipeline)`)
 - `FX_TARGET_CURRENCY`
 - `HUBSPOT_CONTRACTED_ARR_FIELD` (optional, default `contracted_arr`)

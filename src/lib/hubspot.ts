@@ -30,6 +30,15 @@ const CONTACT_EMAIL_SEARCH_CACHE = new Map<string, CacheEntry<string[]>>();
 const COMPANY_CACHE = new Map<string, CacheEntry<HubspotCompany>>();
 const CONTACT_CACHE = new Map<string, CacheEntry<HubspotContact>>();
 const LINE_ITEM_CACHE = new Map<string, CacheEntry<HubspotLineItem>>();
+const OWNERS_CACHE = new Map<string, CacheEntry<HubspotOwner[]>>();
+
+export type HubspotOwner = {
+  id: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  archived?: boolean;
+};
 
 export function clearHubspotMemoryCache() {
   DEALS_CACHE.clear();
@@ -44,6 +53,7 @@ export function clearHubspotMemoryCache() {
   COMPANY_CACHE.clear();
   CONTACT_CACHE.clear();
   LINE_ITEM_CACHE.clear();
+  OWNERS_CACHE.clear();
 }
 
 export type SalesAssistDealMatchType = "transactional_closed_won" | "closed_lost_selfserve";
@@ -201,6 +211,11 @@ type DealPipelinesResponse = {
       label?: string;
     }>;
   }>;
+};
+
+type HubspotOwnersResponse = {
+  results?: HubspotOwner[];
+  paging?: { next?: { after?: string } };
 };
 
 type DealLineItemAssociationResponse = {
@@ -466,6 +481,36 @@ export async function fetchDealPipelineIdToLabelMap() {
 
   writeCache(DEAL_PIPELINE_LABELS_CACHE, cacheKey, Array.from(out.entries()));
   return out;
+}
+
+export async function fetchHubspotOwnersById(ownerIds: string[]) {
+  const requested = Array.from(new Set((ownerIds || []).map((id) => String(id || "").trim()).filter(Boolean)));
+  if (!requested.length) return new Map<string, HubspotOwner>();
+
+  const cacheKey = "active-and-archived";
+  let owners = readCache(OWNERS_CACHE, cacheKey);
+  if (!owners) {
+    owners = [];
+    for (const archived of [false, true]) {
+      let after = "";
+      while (true) {
+        const params = new URLSearchParams({ limit: "500", archived: String(archived) });
+        if (after) params.set("after", after);
+        const json = (await hsFetch(`${HUBSPOT_BASE}/crm/v3/owners?${params.toString()}`)) as HubspotOwnersResponse;
+        owners.push(...(json.results || []));
+        after = String(json.paging?.next?.after || "");
+        if (!after) break;
+      }
+    }
+    writeCache(OWNERS_CACHE, cacheKey, owners);
+  }
+
+  const requestedSet = new Set(requested);
+  return new Map(
+    owners
+      .filter((owner) => requestedSet.has(String(owner.id || "")))
+      .map((owner) => [String(owner.id), owner]),
+  );
 }
 
 function parseCsvSet(raw: string) {

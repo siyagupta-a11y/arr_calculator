@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 type CombineMode = "grouped" | "simple";
 type DisplayMode = "arr" | "plan";
@@ -138,6 +138,22 @@ export default function CombinedAllSubsPage() {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<CombinedAllSubsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/auth/session", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((session: { user?: { role?: string } } | null) => {
+        if (!cancelled) setIsAdmin(String(session?.user?.role || "") === "admin");
+      })
+      .catch(() => {
+        if (!cancelled) setIsAdmin(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const run = useCallback(async () => {
     setLoading(true);
@@ -445,6 +461,11 @@ export default function CombinedAllSubsPage() {
             <Link href="/access-control" className="stripe-ui__hero-link">
               Open Access Control
             </Link>
+            {isAdmin ? (
+              <Link href="/commissions" className="stripe-ui__hero-link">
+                Open Commissions
+              </Link>
+            ) : null}
           </div>
         </div>
       </section>
