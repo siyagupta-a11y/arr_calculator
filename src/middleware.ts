@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
+import {
+  canViewCommissions,
+  isSalesAllowedApplicationPath,
+  isSalesOnlyRole,
+  normalizeAppRole,
+} from "@/lib/accessRoles";
 
 const PUBLIC_PAGE_PATHS = new Set<string>(["/login", "/privacy-policy", "/eula"]);
 const PUBLIC_API_PATH_PREFIXES = [
@@ -16,8 +22,10 @@ const PUBLIC_API_PATH_PREFIXES = [
   "/api/hubspot-current-metrics-sync",
   "/api/cache/nightly-sync",
 ];
-const ADMIN_PAGE_PATH_PREFIXES = ["/model-update", "/lease-prediction", "/commissions"];
-const ADMIN_API_PATH_PREFIXES = ["/api/model-update", "/api/lease-prediction", "/api/commissions"];
+const ADMIN_PAGE_PATH_PREFIXES = ["/model-update", "/lease-prediction"];
+const ADMIN_API_PATH_PREFIXES = ["/api/model-update", "/api/lease-prediction"];
+const COMMISSIONS_PAGE_PATH_PREFIXES = ["/commissions"];
+const COMMISSIONS_API_PATH_PREFIXES = ["/api/commissions"];
 
 function isPublicApiPath(pathname: string) {
   return PUBLIC_API_PATH_PREFIXES.some(
@@ -50,13 +58,32 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  const isAdmin = String(token.role || "viewer").trim().toLowerCase() === "admin";
+  const role = normalizeAppRole(token.role);
+  const isAdmin = role === "admin";
+  if (isSalesOnlyRole(role) && !isSalesAllowedApplicationPath(pathname)) {
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    return NextResponse.redirect(new URL("/commissions", request.nextUrl.origin));
+  }
+
   const requiresAdminPage = matchesAnyPrefix(pathname, ADMIN_PAGE_PATH_PREFIXES);
   const requiresAdminApi = pathname.startsWith("/api/")
     ? matchesAnyPrefix(pathname, ADMIN_API_PATH_PREFIXES)
     : false;
   if ((requiresAdminPage || requiresAdminApi) && !isAdmin) {
     if (requiresAdminApi) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    return NextResponse.redirect(new URL("/combined-all-subs?error=admin_required", request.nextUrl.origin));
+  }
+
+  const requiresCommissionsPage = matchesAnyPrefix(pathname, COMMISSIONS_PAGE_PATH_PREFIXES);
+  const requiresCommissionsApi = pathname.startsWith("/api/")
+    ? matchesAnyPrefix(pathname, COMMISSIONS_API_PATH_PREFIXES)
+    : false;
+  if ((requiresCommissionsPage || requiresCommissionsApi) && !canViewCommissions(role)) {
+    if (requiresCommissionsApi) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
     return NextResponse.redirect(new URL("/combined-all-subs?error=admin_required", request.nextUrl.origin));

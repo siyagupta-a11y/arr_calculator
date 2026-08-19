@@ -5,11 +5,12 @@ import { authOptions } from "@/lib/authOptions";
 import {
   loadAccessControlPolicy,
   removeAccessEmail,
-  setEmailAdmin,
+  setEmailRole,
   upsertAccessEmail,
 } from "@/lib/accessControlStore";
+import { normalizeAppRole, type AppRole } from "@/lib/accessRoles";
 
-const REQUIRED_ADMINS = new Set<string>(["hany.safwat@botpress.com"]);
+const REQUIRED_ADMINS = new Set<string>(["hany.safwat@botpress.com", "siya.gupta@botpress.com"]);
 
 async function requireAdminUser() {
   const session = await getServerSession(authOptions);
@@ -31,20 +32,20 @@ async function addAccessEmailAction(formData: FormData) {
   const email = String(formData.get("email") || "")
     .trim()
     .toLowerCase();
-  const makeAdmin = String(formData.get("make_admin") || "") === "1";
-  await upsertAccessEmail(email, makeAdmin);
+  const role = normalizeAppRole(formData.get("role"));
+  await upsertAccessEmail(email, role);
   redirect("/access-control?updated=1");
 }
 
-async function setEmailAdminAction(formData: FormData) {
+async function setEmailRoleAction(formData: FormData) {
   "use server";
   const { isAdmin } = await requireAdminUser();
   if (!isAdmin) redirect("/access-control?error=admin_required");
   const email = String(formData.get("email") || "")
     .trim()
     .toLowerCase();
-  const makeAdmin = String(formData.get("make_admin") || "") === "1";
-  await setEmailAdmin(email, makeAdmin);
+  const role = normalizeAppRole(formData.get("role"));
+  await setEmailRole(email, role);
   redirect("/access-control?updated=1");
 }
 
@@ -77,6 +78,7 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
   const updated = String(searchParams.updated || "") === "1";
   const error = errorMessage(String(searchParams.error || ""));
   const adminSet = new Set(policy.adminEmails);
+  const salesSet = new Set(policy.salesEmails);
 
   if (!isAdmin) {
     return (
@@ -107,7 +109,7 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
           <div>
             <h1 className="stripe-ui__title">Access Control</h1>
             <p className="stripe-ui__subtitle">
-              Manage who can sign in. Current admin: <strong>{currentEmail}</strong>.
+              Manage who can sign in and which parts of the site they can access. Current admin: <strong>{currentEmail}</strong>.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -121,7 +123,7 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Add Access Email</h2>
         <p className="stripe-ui__panel-subtitle">
-          Add an email to the allowlist. Turn on admin only if the user should manage access for others.
+          Viewers can access the standard dashboards, Sales users can access only Commissions, and Admins can access everything.
         </p>
         {updated ? (
           <p style={{ color: "#166534", background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 8, padding: "10px 12px" }}>
@@ -143,8 +145,12 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
             style={{ maxWidth: 360 }}
           />
           <label style={{ display: "inline-flex", gap: 8, alignItems: "center", color: "#374151" }}>
-            <input type="checkbox" name="make_admin" value="1" />
-            Admin
+            Role
+            <select className="stripe-ui__control" name="role" defaultValue="viewer">
+              <option value="viewer">Viewer</option>
+              <option value="sales">Sales</option>
+              <option value="admin">Admin</option>
+            </select>
           </label>
           <button type="submit" className="stripe-ui__btn stripe-ui__btn--primary">
             Add email
@@ -155,7 +161,7 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
       <section className="stripe-ui__panel ui-reveal ui-reveal-2">
         <h2 className="stripe-ui__panel-title">Allowed Emails</h2>
         <p className="stripe-ui__panel-subtitle">
-          Admin emails can edit access. Required admin(s) cannot be removed.
+          Sales users are restricted to the Commissions page and its data. Required admins cannot be changed or removed.
         </p>
         <div className="stripe-ui__table-wrap">
           <table className="stripe-ui__table">
@@ -169,18 +175,23 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
             <tbody>
               {policy.allowedEmails.map((email) => {
                 const isRowAdmin = adminSet.has(email);
+                const role: AppRole = isRowAdmin ? "admin" : salesSet.has(email) ? "sales" : "viewer";
                 const isRequired = REQUIRED_ADMINS.has(email);
                 return (
                   <tr key={email}>
                     <td>{email}</td>
-                    <td>{isRowAdmin ? "Admin" : "Viewer"}</td>
+                    <td style={{ textTransform: "capitalize" }}>{role}</td>
                     <td>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        <form action={setEmailAdminAction}>
+                        <form action={setEmailRoleAction} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                           <input type="hidden" name="email" value={email} />
-                          <input type="hidden" name="make_admin" value={isRowAdmin ? "0" : "1"} />
+                          <select className="stripe-ui__control" name="role" defaultValue={role} disabled={isRequired}>
+                            <option value="viewer">Viewer</option>
+                            <option value="sales">Sales</option>
+                            <option value="admin">Admin</option>
+                          </select>
                           <button type="submit" className="stripe-ui__btn" disabled={isRequired}>
-                            {isRowAdmin ? "Set viewer" : "Set admin"}
+                            Save role
                           </button>
                         </form>
                         <form action={removeAccessEmailAction}>

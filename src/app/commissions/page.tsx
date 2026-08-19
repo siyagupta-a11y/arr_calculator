@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CommissionDealRow, CommissionReportResponse } from "@/lib/commissionsReport";
 
 function currentMonth() {
@@ -44,8 +44,27 @@ export default function CommissionsPage() {
   const initialMonth = useMemo(currentMonth, []);
   const [month, setMonth] = useState(initialMonth);
   const [data, setData] = useState<CommissionReportResponse | null>(null);
+  const [ownerFilter, setOwnerFilter] = useState("");
+  const [sessionRole, setSessionRole] = useState<"admin" | "sales" | "">("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/session", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((session: { user?: { role?: string } } | null) => {
+        if (cancelled) return;
+        const role = String(session?.user?.role || "").trim().toLowerCase();
+        setSessionRole(role === "admin" ? "admin" : role === "sales" ? "sales" : "");
+      })
+      .catch(() => {
+        if (!cancelled) setSessionRole("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const run = useCallback(async () => {
     setLoading(true);
@@ -61,6 +80,7 @@ export default function CommissionsPage() {
       if (!response.ok) throw new Error(payload?.error || text || `HTTP ${response.status}`);
       if (!payload) throw new Error("Empty commissions response");
       setData(payload);
+      setOwnerFilter("");
     } catch (requestError: unknown) {
       setError(requestError instanceof Error ? requestError.message : "Unable to load commissions");
       setData(null);
@@ -70,11 +90,30 @@ export default function CommissionsPage() {
   }, [month]);
 
   const currency = data?.targetCurrency || "USD";
+  const filteredOwners = useMemo(() => {
+    if (!data) return [];
+    if (!ownerFilter) return data.owners;
+    return data.owners.filter((owner) => (owner.ownerId || "unassigned") === ownerFilter);
+  }, [data, ownerFilter]);
+  const filteredTotals = useMemo(() => {
+    if (!data || !ownerFilter) return data?.totals;
+    return filteredOwners.reduce(
+      (totals, owner) => ({
+        ownerCount: totals.ownerCount + 1,
+        dealCount: totals.dealCount + owner.dealCount,
+        dealAmount: totals.dealAmount + owner.dealAmount,
+        grossCommission: totals.grossCommission + owner.grossCommission,
+        clawback: totals.clawback + owner.clawback,
+        netCommission: totals.netCommission + owner.netCommission,
+      }),
+      { ownerCount: 0, dealCount: 0, dealAmount: 0, grossCommission: 0, clawback: 0, netCommission: 0 },
+    );
+  }, [data, filteredOwners, ownerFilter]);
 
   return (
     <div className="stripe-ui">
       <section className="stripe-ui__hero ui-reveal">
-        <div className="stripe-ui__eyebrow">Admin · Sales compensation</div>
+        <div className="stripe-ui__eyebrow">Sales compensation</div>
         <div className="stripe-ui__hero-row">
           <div>
             <h1 className="stripe-ui__title">Commissions</h1>
@@ -83,14 +122,16 @@ export default function CommissionsPage() {
               churn and downgrade clawbacks plus deal-backed plan replacements.
             </p>
           </div>
-          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <Link href="/combined-all-subs" className="stripe-ui__hero-link">
-              Open Combined All Subs
-            </Link>
-            <Link href="/hubspot" className="stripe-ui__hero-link">
-              Open HubSpot report
-            </Link>
-          </div>
+          {sessionRole === "admin" ? (
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <Link href="/combined-all-subs" className="stripe-ui__hero-link">
+                Open Combined All Subs
+              </Link>
+              <Link href="/hubspot" className="stripe-ui__hero-link">
+                Open HubSpot report
+              </Link>
+            </div>
+          ) : null}
         </div>
       </section>
 
@@ -113,6 +154,25 @@ export default function CommissionsPage() {
               onChange={(event) => setMonth(event.target.value)}
             />
           </div>
+          <div className="stripe-ui__field" style={{ minWidth: 220 }}>
+            <label className="stripe-ui__field-label" htmlFor="commissions-owner">
+              Deal owner
+            </label>
+            <select
+              id="commissions-owner"
+              className="stripe-ui__control"
+              value={ownerFilter}
+              onChange={(event) => setOwnerFilter(event.target.value)}
+              disabled={!data?.owners.length}
+            >
+              <option value="">All deal owners</option>
+              {(data?.owners || []).map((owner) => (
+                <option key={owner.ownerId || "unassigned"} value={owner.ownerId || "unassigned"}>
+                  {owner.ownerName}
+                </option>
+              ))}
+            </select>
+          </div>
           <button className="stripe-ui__btn stripe-ui__btn--primary" type="button" onClick={() => void run()} disabled={loading || !month}>
             {loading ? "Calculating…" : "Load commissions"}
           </button>
@@ -124,36 +184,36 @@ export default function CommissionsPage() {
         ) : null}
       </section>
 
-      {data ? (
+      {data && filteredTotals ? (
         <>
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
             <h2 className="stripe-ui__panel-title">{data.monthLabel} summary</h2>
             <div className="stripe-ui__stats" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))" }}>
               <article className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Deal owners</p>
-                <p className="stripe-ui__stat-value">{data.totals.ownerCount}</p>
+                <p className="stripe-ui__stat-value">{filteredTotals.ownerCount}</p>
               </article>
               <article className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Commissioned deals</p>
-                <p className="stripe-ui__stat-value">{data.totals.dealCount}</p>
+                <p className="stripe-ui__stat-value">{filteredTotals.dealCount}</p>
               </article>
               <article className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Commissioned deal amount</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.totals.dealAmount, currency)}</p>
+                <p className="stripe-ui__stat-value">{formatMoney(filteredTotals.dealAmount, currency)}</p>
               </article>
               <article className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Gross commission</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.totals.grossCommission, currency)}</p>
+                <p className="stripe-ui__stat-value">{formatMoney(filteredTotals.grossCommission, currency)}</p>
               </article>
               <article className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Clawbacks</p>
-                <p className="stripe-ui__stat-value" style={{ color: data.totals.clawback > 0 ? "#b91c1c" : undefined }}>
-                  {formatMoney(data.totals.clawback, currency)}
+                <p className="stripe-ui__stat-value" style={{ color: filteredTotals.clawback > 0 ? "#b91c1c" : undefined }}>
+                  {formatMoney(filteredTotals.clawback, currency)}
                 </p>
               </article>
               <article className="stripe-ui__stat">
                 <p className="stripe-ui__stat-label">Net commission</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.totals.netCommission, currency)}</p>
+                <p className="stripe-ui__stat-value">{formatMoney(filteredTotals.netCommission, currency)}</p>
               </article>
             </div>
             {data.warnings.length ? (
@@ -163,7 +223,7 @@ export default function CommissionsPage() {
             ) : null}
           </section>
 
-          {data.owners.length ? data.owners.map((owner) => (
+          {filteredOwners.length ? filteredOwners.map((owner) => (
             <section className="stripe-ui__panel ui-reveal" key={owner.ownerId || "unassigned"}>
               <div className="stripe-ui__hero-row" style={{ alignItems: "end" }}>
                 <div>
