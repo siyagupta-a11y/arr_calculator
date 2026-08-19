@@ -100,6 +100,13 @@ export function isCommissionPlanLineDescription(value: string) {
   return true;
 }
 
+export function isCommissionPlanActivityDescription(values: string[]) {
+  const descriptions = values
+    .map((value) => String(value || "").trim())
+    .filter((value) => value && value !== "(blank)" && value !== "(unknown)");
+  return descriptions.length > 0 && isCommissionPlanLineDescription(descriptions.join(" "));
+}
+
 export function calculateNetCommissionPlanPayment(input: CommissionPlanPaymentInput) {
   const invoiceAmountPaid = Math.max(0, Number(input.invoiceAmountPaid || 0));
   const amountRefunded = Math.max(0, Number(input.amountRefunded || 0));

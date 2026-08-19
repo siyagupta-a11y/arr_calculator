@@ -17,6 +17,7 @@ import {
   calculateNetCommissionPlanPayment,
   calculateCommissionClawbacks,
   commissionMonthKey,
+  isCommissionPlanActivityDescription,
   isCommissionPlanLineDescription,
   shouldIncludeCommissionDeal,
   type CommissionDealRuleInput,
@@ -141,7 +142,12 @@ const DEFAULT_SALES_PIPELINE_ID = "0cbbc8c6-dccf-4601-8d59-b6a15ed5129b";
 const DEFAULT_SALES_CLOSED_WON_STAGE_ID = "f12c408f-f92b-4a95-8b59-9f801b19b105";
 const DEFAULT_STRIPE_INVOICES_TABLE = "botpress-stripe-data-pipeline.stripe.invoices";
 const DEFAULT_STRIPE_INVOICE_LINES_TABLE = "botpress-stripe-data-pipeline.stripe.invoice_lines_helper";
+const DEFAULT_STRIPE_RAW_INVOICE_LINES_TABLE = "botpress-stripe-data-pipeline.stripe.invoice_lines";
+const DEFAULT_STRIPE_INVOICE_LINE_DISCOUNTS_TABLE =
+  "botpress-stripe-data-pipeline.stripe.invoice_line_item_discount_amounts";
 const DEFAULT_STRIPE_CHARGES_TABLE = "botpress-stripe-data-pipeline.stripe.charges";
+const DEFAULT_STRIPE_PRICES_TABLE = "botpress-stripe-data-pipeline.stripe.prices";
+const DEFAULT_STRIPE_PRODUCTS_TABLE = "botpress-stripe-data-pipeline.stripe.products";
 const DEFAULT_STRIPE_MRR_EVENTS_TABLE =
   "botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta";
 const DEFAULT_HUBSPOT_PORTAL_ID = "20692578";
@@ -294,9 +300,17 @@ async function queryStripeActivity(customerIds: string[], startDate: string, end
   const invoiceLinesTable = safeBigQueryTable(
     envValue("BIGQUERY_STRIPE_ARR_CORRECT_TABLE", DEFAULT_STRIPE_INVOICE_LINES_TABLE),
   );
+  const rawInvoiceLinesTable = safeBigQueryTable(
+    envValue("BIGQUERY_STRIPE_INVOICE_LINES_RAW_TABLE", DEFAULT_STRIPE_RAW_INVOICE_LINES_TABLE),
+  );
+  const invoiceLineDiscountsTable = safeBigQueryTable(
+    envValue("BIGQUERY_STRIPE_INVOICE_LINE_DISCOUNTS_TABLE", DEFAULT_STRIPE_INVOICE_LINE_DISCOUNTS_TABLE),
+  );
   const chargesTable = safeBigQueryTable(
     envValue("BIGQUERY_STRIPE_ARR_CORRECT_CHARGES_TABLE", DEFAULT_STRIPE_CHARGES_TABLE),
   );
+  const pricesTable = safeBigQueryTable(envValue("BIGQUERY_STRIPE_PRICES_TABLE", DEFAULT_STRIPE_PRICES_TABLE));
+  const productsTable = safeBigQueryTable(envValue("BIGQUERY_STRIPE_PRODUCTS_TABLE", DEFAULT_STRIPE_PRODUCTS_TABLE));
   const eventsTable = safeBigQueryTable(
     envValue("BIGQUERY_STRIPE_ARR_CORRECT_MRR_CHANGE_TABLE", DEFAULT_STRIPE_MRR_EVENTS_TABLE),
   );
@@ -347,7 +361,7 @@ charge_refunds AS (
   FROM latest_charges
   GROUP BY invoice_id
 ),
-invoice_lines AS (
+helper_invoice_lines AS (
   SELECT
     CAST(invoice_id AS STRING) AS invoice_id,
     CAST(line_item_id AS STRING) AS line_item_id,
@@ -356,6 +370,59 @@ invoice_lines AS (
   FROM \`${invoiceLinesTable}\`
   WHERE CAST(invoice_id AS STRING) IN (SELECT CAST(id AS STRING) FROM latest_invoices)
   GROUP BY invoice_id, line_item_id, line_item_description
+),
+latest_raw_invoice_lines AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      line_row.*,
+      ROW_NUMBER() OVER (PARTITION BY line_row.id ORDER BY line_row.batch_timestamp DESC) AS rn
+    FROM \`${rawInvoiceLinesTable}\` line_row
+    WHERE CAST(line_row.invoice_id AS STRING) IN (SELECT CAST(id AS STRING) FROM latest_invoices)
+  )
+  WHERE rn = 1
+),
+raw_line_discounts AS (
+  SELECT
+    CAST(invoice_line_item_id AS STRING) AS line_item_id,
+    SUM(COALESCE(amount, 0)) AS discount_amount
+  FROM \`${invoiceLineDiscountsTable}\`
+  WHERE CAST(invoice_line_item_id AS STRING) IN (SELECT CAST(id AS STRING) FROM latest_raw_invoice_lines)
+  GROUP BY line_item_id
+),
+raw_invoice_lines AS (
+  SELECT
+    CAST(line_row.invoice_id AS STRING) AS invoice_id,
+    CAST(line_row.id AS STRING) AS line_item_id,
+    CAST(line_row.description AS STRING) AS line_item_description,
+    GREATEST(
+      CAST(
+        COALESCE(line_row.amount, 0) - COALESCE(discount.discount_amount, line_row.total_discount, 0)
+        AS FLOAT64
+      ),
+      0
+    ) / 100.0 AS line_amount
+  FROM latest_raw_invoice_lines line_row
+  LEFT JOIN raw_line_discounts discount
+    ON discount.line_item_id = CAST(line_row.id AS STRING)
+  WHERE COALESCE(
+      NULLIF(TRIM(CAST(line_row.subscription_item_id AS STRING)), ''),
+      NULLIF(TRIM(CAST(line_row.subscription AS STRING)), ''),
+      NULLIF(TRIM(CAST(line_row.plan_id AS STRING)), ''),
+      ''
+    ) != ''
+    AND NOT EXISTS (
+      SELECT 1
+      FROM helper_invoice_lines helper
+      WHERE helper.invoice_id = CAST(line_row.invoice_id AS STRING)
+    )
+),
+invoice_lines AS (
+  SELECT invoice_id, line_item_id, line_item_description, line_amount
+  FROM helper_invoice_lines
+  UNION ALL
+  SELECT invoice_id, line_item_id, line_item_description, line_amount
+  FROM raw_invoice_lines
 )
 SELECT
   CAST(i.id AS STRING) AS payment_id,
@@ -390,19 +457,79 @@ parsed AS (
   SELECT
     COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_id')), ''), '') AS customer_id,
     event_timestamp,
-    event_type
+    event_type,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item_id')), ''), '') AS subscription_item_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price.id')), ''),
+      ''
+    ) AS price_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product.id')), ''),
+      ''
+    ) AS product_id,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_nickname')), ''),
+      ''
+    ) AS event_price_description,
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_description')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.product_name')), ''),
+      ''
+    ) AS event_product_description
   FROM source
+),
+latest_prices AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      price_row.*,
+      ROW_NUMBER() OVER (PARTITION BY price_row.id ORDER BY price_row.batch_timestamp DESC) AS rn
+    FROM \`${pricesTable}\` price_row
+  )
+  WHERE rn = 1
+),
+latest_products AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      product_row.*,
+      ROW_NUMBER() OVER (PARTITION BY product_row.id ORDER BY product_row.batch_timestamp DESC) AS rn
+    FROM \`${productsTable}\` product_row
+  )
+  WHERE rn = 1
 )
 SELECT DISTINCT
   CONCAT(
     CAST(customer_id AS STRING), '|',
     FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E3SZ', event_timestamp, 'UTC'), '|',
-    UPPER(CAST(event_type AS STRING))
+    UPPER(CAST(event_type AS STRING)), '|',
+    COALESCE(NULLIF(TRIM(subscription_item_id), ''), '(no item)')
   ) AS event_id,
   CAST(customer_id AS STRING) AS customer_id,
   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E3SZ', event_timestamp, 'UTC') AS occurred_at,
-  UPPER(CAST(event_type AS STRING)) AS event_type
-FROM parsed
+  UPPER(CAST(event_type AS STRING)) AS event_type,
+  COALESCE(
+    NULLIF(TRIM(event_price_description), ''),
+    NULLIF(TRIM(CAST(price_row.nickname AS STRING)), ''),
+    ''
+  ) AS price_description,
+  COALESCE(
+    NULLIF(TRIM(event_product_description), ''),
+    NULLIF(TRIM(CAST(product_row.name AS STRING)), ''),
+    NULLIF(TRIM(CAST(product_row.description AS STRING)), ''),
+    ''
+  ) AS product_description
+FROM parsed AS parsed_event
+LEFT JOIN latest_prices price_row
+  ON CAST(price_row.id AS STRING) = parsed_event.price_id
+LEFT JOIN latest_products product_row
+  ON CAST(product_row.id AS STRING) = COALESCE(
+    NULLIF(parsed_event.product_id, ''),
+    NULLIF(CAST(price_row.product_id AS STRING), '')
+  )
 WHERE COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '') IN (${requestedIdsSql})
 ORDER BY occurred_at ASC, event_id ASC`;
 
@@ -464,12 +591,19 @@ ORDER BY occurred_at ASC, event_id ASC`;
 
   return {
     payments,
-    risks: riskRows.map((row) => ({
-      eventId: String(row.event_id || ""),
-      customerId: String(row.customer_id || ""),
-      occurredAt: String(row.occurred_at || ""),
-      type: String(row.event_type || "").toUpperCase() === "ACTIVE_DOWNGRADE" ? "downgrade" : "churn",
-    } as RawStripeRisk)),
+    risks: riskRows
+      .filter((row) =>
+        isCommissionPlanActivityDescription([
+          String(row.price_description || ""),
+          String(row.product_description || ""),
+        ]),
+      )
+      .map((row) => ({
+        eventId: String(row.event_id || ""),
+        customerId: String(row.customer_id || ""),
+        occurredAt: String(row.occurred_at || ""),
+        type: String(row.event_type || "").toUpperCase() === "ACTIVE_DOWNGRADE" ? "downgrade" : "churn",
+      } as RawStripeRisk)),
   };
 }
 

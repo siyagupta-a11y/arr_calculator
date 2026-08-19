@@ -4,6 +4,7 @@ import {
   calculateCommissionClawbacks,
   calculateNetCommissionPlanPayment,
   commissionMonthKey,
+  isCommissionPlanActivityDescription,
   isCommissionPlanLineDescription,
   shouldIncludeCommissionDeal,
 } from "../src/lib/commissionRules.ts";
@@ -158,6 +159,22 @@ test("commission payments exclude add-ons and AI tokens and use the refund-adjus
     }),
     0,
   );
+});
+
+test("commission risk events only include identified primary plan products", () => {
+  assert.equal(
+    isCommissionPlanActivityDescription(["Plan - Plus monthly (v4)", "Plan - Plus"]),
+    true,
+  );
+  assert.equal(
+    isCommissionPlanActivityDescription([
+      "Add-on - Conversation Sessions monthly (v4)",
+      "Add-on - Conversation Sessions",
+    ]),
+    false,
+  );
+  assert.equal(isCommissionPlanActivityDescription(["AI Tokens", ""]), false);
+  assert.equal(isCommissionPlanActivityDescription(["", "(blank)"]), false);
 });
 
 test("Existing Business is limited to the approved New Business reps", () => {
