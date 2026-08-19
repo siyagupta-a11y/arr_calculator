@@ -14,8 +14,11 @@ import {
 } from "@/lib/stripeBigquery";
 import type { HubspotDeal, HubspotLineItem } from "@/lib/types";
 import {
+  calculateNetCommissionPlanPayment,
   calculateCommissionClawbacks,
   commissionMonthKey,
+  isCommissionPlanLineDescription,
+  shouldIncludeCommissionDeal,
   type CommissionDealRuleInput,
   type CommissionPaymentRuleInput,
   type CommissionRiskRuleInput,
@@ -37,6 +40,7 @@ export type CommissionDealRow = {
   ownerName: string;
   pipelineId: string;
   pipelineName: string;
+  dealType: string;
   closeDate: string;
   workspaceId: string;
   stripeCustomerIds: string[];
@@ -87,7 +91,8 @@ export type CommissionReportResponse = {
   warnings: string[];
   methodology: {
     includedPipelines: string[];
-    dealType: "newbusiness";
+    dealTypes: string[];
+    existingBusinessOwners: string[];
     commissionRates: Record<PaymentFrequency, number>;
     clawbackRule: string;
     paymentSource: string;
@@ -98,6 +103,7 @@ type PreparedDeal = CommissionDealRuleInput & {
   dealName: string;
   pipelineId: string;
   pipelineName: string;
+  dealType: string;
   dealCurrency: string;
   dealAmountOriginal: number;
   paymentFrequency: string;
@@ -132,9 +138,12 @@ const DEFAULT_TRANSACTIONAL_CLOSED_WON_STAGE_ID = "1064537523";
 const DEFAULT_SALES_PIPELINE_ID = "0cbbc8c6-dccf-4601-8d59-b6a15ed5129b";
 const DEFAULT_SALES_CLOSED_WON_STAGE_ID = "f12c408f-f92b-4a95-8b59-9f801b19b105";
 const DEFAULT_STRIPE_INVOICES_TABLE = "botpress-stripe-data-pipeline.stripe.invoices";
+const DEFAULT_STRIPE_INVOICE_LINES_TABLE = "botpress-stripe-data-pipeline.stripe.invoice_lines_helper";
+const DEFAULT_STRIPE_CHARGES_TABLE = "botpress-stripe-data-pipeline.stripe.charges";
 const DEFAULT_STRIPE_MRR_EVENTS_TABLE =
   "botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta";
 const DEFAULT_HUBSPOT_PORTAL_ID = "20692578";
+const DEFAULT_EXISTING_BUSINESS_OWNER_NAMES = ["Tyler", "Luca", "Evan", "Felipe", "Antonin", "Sarah"];
 
 function round2(value: number) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -230,6 +239,20 @@ function envValue(name: string, fallback: string) {
   return String(process.env[name] || fallback).trim() || fallback;
 }
 
+function existingBusinessOwnerNames() {
+  const configured = String(process.env.COMMISSION_EXISTING_BUSINESS_OWNER_NAMES || "").trim();
+  const values = configured ? configured.split(/[;,|\n\r]+/) : DEFAULT_EXISTING_BUSINESS_OWNER_NAMES;
+  return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function ownerIdentities(owner: HubspotOwner | undefined) {
+  const firstName = String(owner?.firstName || "").trim();
+  const lastName = String(owner?.lastName || "").trim();
+  const email = String(owner?.email || "").trim();
+  const emailLocalPart = email.split("@")[0] || "";
+  return [firstName, [firstName, lastName].filter(Boolean).join(" "), email, emailLocalPart].filter(Boolean);
+}
+
 function safeBigQueryTable(value: string) {
   const table = String(value || "").trim();
   if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(table)) {
@@ -266,6 +289,12 @@ async function queryStripeActivity(customerIds: string[], startDate: string, end
   const invoicesTable = safeBigQueryTable(
     envValue("BIGQUERY_STRIPE_INVOICES_TABLE", DEFAULT_STRIPE_INVOICES_TABLE),
   );
+  const invoiceLinesTable = safeBigQueryTable(
+    envValue("BIGQUERY_STRIPE_ARR_CORRECT_TABLE", DEFAULT_STRIPE_INVOICE_LINES_TABLE),
+  );
+  const chargesTable = safeBigQueryTable(
+    envValue("BIGQUERY_STRIPE_ARR_CORRECT_CHARGES_TABLE", DEFAULT_STRIPE_CHARGES_TABLE),
+  );
   const eventsTable = safeBigQueryTable(
     envValue("BIGQUERY_STRIPE_ARR_CORRECT_MRR_CHANGE_TABLE", DEFAULT_STRIPE_MRR_EVENTS_TABLE),
   );
@@ -293,17 +322,57 @@ WITH latest_invoices AS (
       AND DATE(i.date) BETWEEN DATE(@start_date) AND DATE(@end_date)
   )
   WHERE rn = 1
+),
+latest_charges AS (
+  SELECT raw_json
+  FROM (
+    SELECT
+      TO_JSON_STRING(c) AS raw_json,
+      ROW_NUMBER() OVER (PARTITION BY c.id ORDER BY c.batch_timestamp DESC) AS rn
+    FROM \`${chargesTable}\` c
+    WHERE COALESCE(NULLIF(TRIM(CAST(c.customer_id AS STRING)), ''), '') IN (${requestedIdsSql})
+  )
+  WHERE rn = 1
+),
+charge_refunds AS (
+  SELECT
+    COALESCE(
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.invoice_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.invoice')), ''),
+      NULLIF(TRIM(JSON_VALUE(raw_json, '$.invoice.id')), '')
+    ) AS invoice_id,
+    SUM(GREATEST(COALESCE(SAFE_CAST(JSON_VALUE(raw_json, '$.amount_refunded') AS FLOAT64), 0), 0)) AS amount_refunded
+  FROM latest_charges
+  GROUP BY invoice_id
+),
+invoice_lines AS (
+  SELECT
+    CAST(invoice_id AS STRING) AS invoice_id,
+    CAST(line_item_id AS STRING) AS line_item_id,
+    CAST(line_item_description AS STRING) AS line_item_description,
+    MAX(CAST(COALESCE(amount_minor, 0) AS FLOAT64)) AS line_amount
+  FROM \`${invoiceLinesTable}\`
+  WHERE CAST(invoice_id AS STRING) IN (SELECT CAST(id AS STRING) FROM latest_invoices)
+  GROUP BY invoice_id, line_item_id, line_item_description
 )
 SELECT
-  CAST(id AS STRING) AS payment_id,
-  CAST(customer_id AS STRING) AS customer_id,
-  FORMAT_DATE('%Y-%m-%d', DATE(date)) AS paid_date,
-  CAST(COALESCE(amount_paid, 0) AS FLOAT64) / 100.0 AS amount_paid,
-  UPPER(TRIM(COALESCE(CAST(currency AS STRING), 'USD'))) AS currency
-FROM latest_invoices
-WHERE LOWER(TRIM(COALESCE(CAST(status AS STRING), ''))) = 'paid'
-  AND COALESCE(amount_paid, 0) > 0
-ORDER BY paid_date ASC, payment_id ASC`;
+  CAST(i.id AS STRING) AS payment_id,
+  CAST(i.customer_id AS STRING) AS customer_id,
+  FORMAT_DATE('%Y-%m-%d', DATE(i.date)) AS paid_date,
+  CAST(COALESCE(i.amount_paid, 0) AS FLOAT64) / 100.0 AS invoice_amount_paid,
+  CAST(COALESCE(r.amount_refunded, 0) AS FLOAT64) / 100.0 AS amount_refunded,
+  UPPER(TRIM(COALESCE(CAST(i.currency AS STRING), 'USD'))) AS currency,
+  COALESCE(l.line_item_id, '') AS line_item_id,
+  COALESCE(l.line_item_description, '') AS line_item_description,
+  COALESCE(l.line_amount, 0) AS line_amount
+FROM latest_invoices i
+LEFT JOIN charge_refunds r
+  ON r.invoice_id = CAST(i.id AS STRING)
+LEFT JOIN invoice_lines l
+  ON l.invoice_id = CAST(i.id AS STRING)
+WHERE LOWER(TRIM(COALESCE(CAST(i.status AS STRING), ''))) = 'paid'
+  AND COALESCE(i.amount_paid, 0) > 0
+ORDER BY paid_date ASC, payment_id ASC, line_item_id ASC`;
 
   const riskSql = `
 WITH source AS (
@@ -340,14 +409,59 @@ ORDER BY occurred_at ASC, event_id ASC`;
     runBigQuerySqlRows(riskSql, sharedParams, { profile: "stripe_arr_correct" }),
   ]);
 
+  const invoices = new Map<
+    string,
+    {
+      paymentId: string;
+      customerId: string;
+      paidDate: string;
+      invoiceAmountPaid: number;
+      amountRefunded: number;
+      currency: string;
+      planLineAmount: number;
+      totalPositiveLineAmount: number;
+      seenLineItems: Set<string>;
+    }
+  >();
+  for (const row of invoiceRows) {
+    const paymentId = String(row.payment_id || "");
+    if (!paymentId) continue;
+    if (!invoices.has(paymentId)) {
+      invoices.set(paymentId, {
+        paymentId,
+        customerId: String(row.customer_id || ""),
+        paidDate: String(row.paid_date || ""),
+        invoiceAmountPaid: Math.max(0, Number(row.invoice_amount_paid || 0)),
+        amountRefunded: Math.max(0, Number(row.amount_refunded || 0)),
+        currency: String(row.currency || "USD").trim().toUpperCase(),
+        planLineAmount: 0,
+        totalPositiveLineAmount: 0,
+        seenLineItems: new Set<string>(),
+      });
+    }
+    const invoice = invoices.get(paymentId)!;
+    const lineItemId = String(row.line_item_id || "");
+    const lineDescription = String(row.line_item_description || "");
+    const lineAmount = Math.max(0, Number(row.line_amount || 0));
+    const lineKey = lineItemId || `${lineDescription}|${lineAmount}`;
+    if (!lineAmount || invoice.seenLineItems.has(lineKey)) continue;
+    invoice.seenLineItems.add(lineKey);
+    invoice.totalPositiveLineAmount += lineAmount;
+    if (isCommissionPlanLineDescription(lineDescription)) invoice.planLineAmount += lineAmount;
+  }
+
+  const payments = Array.from(invoices.values())
+    .map((invoice) => ({
+      paymentId: invoice.paymentId,
+      customerId: invoice.customerId,
+      paidDate: invoice.paidDate,
+      amount: calculateNetCommissionPlanPayment(invoice),
+      currency: invoice.currency,
+    }))
+    .filter((payment) => payment.amount > 0);
+
   return {
-    payments: invoiceRows.map((row) => ({
-      paymentId: String(row.payment_id || ""),
-      customerId: String(row.customer_id || ""),
-      paidDate: String(row.paid_date || ""),
-      amount: Math.max(0, Number(row.amount_paid || 0)),
-      currency: String(row.currency || "USD").trim().toUpperCase(),
-    })),
+    payments,
     risks: riskRows.map((row) => ({
       eventId: String(row.event_id || ""),
       customerId: String(row.customer_id || ""),
@@ -385,6 +499,13 @@ function ownerDisplayName(owner: { firstName?: string; lastName?: string; email?
   return fullName || String(owner?.email || "").trim() || (ownerId ? `Owner ${ownerId}` : "Unassigned");
 }
 
+function dealTypeLabel(value: unknown) {
+  const normalized = String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (normalized === "existingbusiness") return "Existing Business";
+  if (normalized === "newbusiness") return "New Business";
+  return String(value || "").trim() || "Unknown";
+}
+
 function hubspotDealUrl(dealId: string) {
   const portalId = envValue("HUBSPOT_PORTAL_ID", DEFAULT_HUBSPOT_PORTAL_ID);
   return `https://app.hubspot.com/contacts/${encodeURIComponent(portalId)}/record/0-3/${encodeURIComponent(dealId)}`;
@@ -400,6 +521,8 @@ export async function generateCommissionReport(request: CommissionReportRequest)
   const lookbackMonths = Math.max(3, Math.min(60, Number(process.env.COMMISSION_CLAWBACK_LOOKBACK_MONTHS || 24)));
   const lookbackStartDate = addMonthsUtc(selected.start, -lookbackMonths).toISOString().slice(0, 10);
   const pipelines = pipelineConfiguration();
+  const includedExistingBusinessOwners = existingBusinessOwnerNames();
+  const warnings = new Set<string>();
   const dealProperties = [
     "dealname",
     "dealtype",
@@ -423,19 +546,44 @@ export async function generateCommissionReport(request: CommissionReportRequest)
       ),
     })),
   );
-  const candidateDeals: Array<{ deal: HubspotDeal; pipelineName: string }> = [];
+  const dealsWithSupportedTypes: Array<{ deal: HubspotDeal; pipelineName: string }> = [];
   const seenDealIds = new Set<string>();
   for (const fetched of fetchedByPipeline) {
     for (const deal of fetched.deals) {
       const properties = deal.properties || {};
       if (String(properties.pipeline || "") !== fetched.pipeline.id) continue;
-      if (String(properties.dealtype || "").trim().toLowerCase() !== "newbusiness") continue;
+      const normalizedDealType = String(properties.dealtype || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+      if (normalizedDealType !== "newbusiness" && normalizedDealType !== "existingbusiness") continue;
       const dealId = String(deal.id || "");
       if (!dealId || seenDealIds.has(dealId)) continue;
       seenDealIds.add(dealId);
-      candidateDeals.push({ deal, pipelineName: fetched.pipeline.name });
+      dealsWithSupportedTypes.push({ deal, pipelineName: fetched.pipeline.name });
     }
   }
+
+  const ownerIds = Array.from(
+    new Set(
+      dealsWithSupportedTypes
+        .map(({ deal }) => String(deal.properties?.hubspot_owner_id || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  let ownersById = new Map<string, HubspotOwner>();
+  try {
+    ownersById = await fetchHubspotOwnersById(ownerIds);
+  } catch {
+    warnings.add("HubSpot owner names were unavailable; owner IDs are shown instead and Existing Business deals could not be matched to the approved reps.");
+  }
+
+  const candidateDeals = dealsWithSupportedTypes.filter(({ deal }) => {
+    const properties = deal.properties || {};
+    const ownerId = String(properties.hubspot_owner_id || "").trim();
+    return shouldIncludeCommissionDeal({
+      dealType: String(properties.dealtype || ""),
+      ownerIdentities: ownerIdentities(ownersById.get(ownerId)),
+      existingBusinessOwnerNames: includedExistingBusinessOwners,
+    });
+  });
 
   const dealIds = candidateDeals.map(({ deal }) => String(deal.id));
   const dealLineItemAssociations = await fetchLineItemIdsForDeals(dealIds);
@@ -457,7 +605,6 @@ export async function generateCommissionReport(request: CommissionReportRequest)
     "hs_sku",
   ]);
 
-  const warnings = new Set<string>();
   const preparedDeals: PreparedDeal[] = [];
   for (const { deal, pipelineName } of candidateDeals) {
     const properties = deal.properties || {};
@@ -499,6 +646,7 @@ export async function generateCommissionReport(request: CommissionReportRequest)
       grossCommission,
       pipelineId: String(properties.pipeline || ""),
       pipelineName,
+      dealType: dealTypeLabel(properties.dealtype),
       dealCurrency,
       dealAmountOriginal,
       paymentFrequency: profile.frequencyLabel || "unsupported",
@@ -597,14 +745,6 @@ export async function generateCommissionReport(request: CommissionReportRequest)
   const ruleResults = new Map(
     calculateCommissionClawbacks(preparedDeals, payments, riskEvents).map((result) => [result.dealId, result]),
   );
-  const ownerIds = Array.from(new Set(preparedDeals.map((deal) => deal.ownerId).filter(Boolean)));
-  let ownersById = new Map<string, HubspotOwner>();
-  try {
-    ownersById = await fetchHubspotOwnersById(ownerIds);
-  } catch {
-    warnings.add("HubSpot owner names were unavailable; owner IDs are shown instead.");
-  }
-
   const visibleRows: CommissionDealRow[] = [];
   for (const deal of preparedDeals) {
     const result = ruleResults.get(deal.dealId);
@@ -631,6 +771,7 @@ export async function generateCommissionReport(request: CommissionReportRequest)
       ownerName: ownerDisplayName(ownersById.get(deal.ownerId), deal.ownerId),
       pipelineId: deal.pipelineId,
       pipelineName: deal.pipelineName,
+      dealType: deal.dealType,
       closeDate: deal.closeDate.slice(0, 10),
       workspaceId: deal.workspaceId,
       stripeCustomerIds: deal.stripeCustomerIds,
@@ -714,11 +855,13 @@ export async function generateCommissionReport(request: CommissionReportRequest)
     warnings: Array.from(warnings),
     methodology: {
       includedPipelines: pipelines.map((pipeline) => pipeline.name),
-      dealType: "newbusiness",
+      dealTypes: ["New Business", "Existing Business for approved reps"],
+      existingBusinessOwners: includedExistingBusinessOwners,
       commissionRates: COMMISSION_RATES,
       clawbackRule:
-        "A churn or downgrade is assigned to one deal only. Until Stripe shows full payment for the first three months, commission is retained only on the amount actually paid; the difference is recognized once in the event month.",
-      paymentSource: "botpress-stripe-data-pipeline.stripe BigQuery tables (stripe_arr_correct profile)",
+        "A churn or downgrade is assigned to one deal only. Until Stripe shows full plan payments for the first three months, commission is retained only on plan payments net of refunds; the difference is recognized once in the event month.",
+      paymentSource:
+        "botpress-stripe-data-pipeline.stripe BigQuery tables (stripe_arr_correct profile; plan lines only, net of refunds)",
     },
   };
 }

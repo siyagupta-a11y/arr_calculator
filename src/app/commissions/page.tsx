@@ -76,7 +76,8 @@ export default function CommissionsPage() {
           <div>
             <h1 className="stripe-ui__title">Commissions</h1>
             <p className="stripe-ui__subtitle">
-              Closed-won new business by deal owner, with Stripe payment-based churn and downgrade clawbacks.
+              Closed-won New Business and approved-rep Existing Business by deal owner, with Stripe payment-based
+              churn and downgrade clawbacks.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -130,11 +131,11 @@ export default function CommissionsPage() {
                 <p className="stripe-ui__stat-value">{data.totals.ownerCount}</p>
               </article>
               <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">New deals</p>
+                <p className="stripe-ui__stat-label">Commissioned deals</p>
                 <p className="stripe-ui__stat-value">{data.totals.dealCount}</p>
               </article>
               <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">New deal amount</p>
+                <p className="stripe-ui__stat-label">Commissioned deal amount</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.totals.dealAmount, currency)}</p>
               </article>
               <article className="stripe-ui__stat">
@@ -165,7 +166,7 @@ export default function CommissionsPage() {
                 <div>
                   <h2 className="stripe-ui__panel-title">{owner.ownerName}</h2>
                   <p className="stripe-ui__panel-subtitle">
-                    {owner.dealCount} new deal{owner.dealCount === 1 ? "" : "s"} · Net {formatMoney(owner.netCommission, currency)}
+                    {owner.dealCount} commissioned deal{owner.dealCount === 1 ? "" : "s"} · Net {formatMoney(owner.netCommission, currency)}
                   </p>
                 </div>
                 <div style={{ color: "#475569", textAlign: "right" }}>
@@ -182,7 +183,7 @@ export default function CommissionsPage() {
                       <th>Frequency</th>
                       <th>Deal amount</th>
                       <th>Gross</th>
-                      <th>Stripe paid</th>
+                      <th>Stripe plan paid (net)</th>
                       <th>Clawback</th>
                       <th>Net</th>
                       <th>Status</th>
@@ -200,6 +201,7 @@ export default function CommissionsPage() {
                         <td>
                           <div>{deal.closeDate}</div>
                           <div style={{ color: "#64748b", fontSize: 12 }}>{deal.pipelineName}</div>
+                          <div style={{ color: "#64748b", fontSize: 12 }}>{deal.dealType}</div>
                         </td>
                         <td style={{ maxWidth: 210, overflowWrap: "anywhere" }}>
                           {deal.workspaceId || "—"}
@@ -259,7 +261,7 @@ export default function CommissionsPage() {
             <h2 className="stripe-ui__panel-title">Methodology</h2>
             <p className="stripe-ui__panel-subtitle">{data.methodology.clawbackRule}</p>
             <p style={{ color: "#475569", marginBottom: 0 }}>
-              HubSpot: {data.methodology.includedPipelines.join(" + ")} · Deal type: New Business · Rates: monthly 8%, quarterly 10%, annual 11%.
+              HubSpot: {data.methodology.includedPipelines.join(" + ")} · Deal types: {data.methodology.dealTypes.join(" + ")} ({data.methodology.existingBusinessOwners.join(", ")}) · Rates: monthly 8%, quarterly 10%, annual 11%.{" "}
               Stripe source: {data.methodology.paymentSource}.
             </p>
           </section>

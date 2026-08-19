@@ -38,6 +38,13 @@ export type CommissionDealRuleResult = {
   clawback: number;
 };
 
+export type CommissionPlanPaymentInput = {
+  invoiceAmountPaid: number;
+  amountRefunded: number;
+  planLineAmount: number;
+  totalPositiveLineAmount: number;
+};
+
 function round2(value: number) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
@@ -65,6 +72,48 @@ function monthKey(value: string) {
 
 function normalizedWorkspace(value: string) {
   return String(value || "").trim().toLowerCase();
+}
+
+function normalizedWords(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+export function isCommissionPlanLineDescription(value: string) {
+  const normalized = normalizedWords(value);
+  if (!normalized || normalized === "refund" || normalized === "discount") return false;
+  if (/\badd\s*ons?\b/.test(normalized)) return false;
+  if (/\bai\s+tokens?\b/.test(normalized)) return false;
+  if (normalized.includes("web search and crawl")) return false;
+  return true;
+}
+
+export function calculateNetCommissionPlanPayment(input: CommissionPlanPaymentInput) {
+  const invoiceAmountPaid = Math.max(0, Number(input.invoiceAmountPaid || 0));
+  const amountRefunded = Math.max(0, Number(input.amountRefunded || 0));
+  const planLineAmount = Math.max(0, Number(input.planLineAmount || 0));
+  const totalPositiveLineAmount = Math.max(0, Number(input.totalPositiveLineAmount || 0));
+  if (!invoiceAmountPaid || !planLineAmount || !totalPositiveLineAmount) return 0;
+
+  const netInvoicePayment = Math.max(0, invoiceAmountPaid - amountRefunded);
+  const planShare = Math.min(1, planLineAmount / totalPositiveLineAmount);
+  return round2(netInvoicePayment * planShare);
+}
+
+export function shouldIncludeCommissionDeal(input: {
+  dealType: string;
+  ownerIdentities: string[];
+  existingBusinessOwnerNames: string[];
+}) {
+  const dealType = normalizedWords(input.dealType).replace(/\s+/g, "");
+  if (dealType === "newbusiness") return true;
+  if (dealType !== "existingbusiness") return false;
+
+  const allowedOwners = new Set(input.existingBusinessOwnerNames.map(normalizedWords).filter(Boolean));
+  return input.ownerIdentities.some((identity) => allowedOwners.has(normalizedWords(identity)));
 }
 
 function sortedWorkspaceDeals(deals: CommissionDealRuleInput[]) {
@@ -181,8 +230,9 @@ export function calculateCommissionClawbacks(
 
     const effectiveRate = dealAmount > 0 ? Math.max(0, Number(deal.grossCommission || 0)) / dealAmount : 0;
     const earnedCommission = round2(paidBeforeRisk * effectiveRate);
+    const grossCommission = Math.max(0, Number(deal.grossCommission || 0));
     const clawback = eligibleRisk
-      ? round2(Math.max(0, Number(deal.grossCommission || 0) - earnedCommission))
+      ? round2(Math.min(grossCommission, Math.max(0, grossCommission - earnedCommission)))
       : 0;
 
     return {

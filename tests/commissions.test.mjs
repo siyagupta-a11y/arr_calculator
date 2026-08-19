@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { calculateCommissionClawbacks, commissionMonthKey } from "../src/lib/commissionRules.ts";
+import {
+  calculateCommissionClawbacks,
+  calculateNetCommissionPlanPayment,
+  commissionMonthKey,
+  isCommissionPlanLineDescription,
+  shouldIncludeCommissionDeal,
+} from "../src/lib/commissionRules.ts";
 
 function deal(overrides = {}) {
   return {
@@ -85,4 +91,69 @@ test("a late churn remains monitored until the first-three-month payment thresho
 
   assert.equal(result.riskEventId, "late-churn");
   assert.equal(result.clawback, 88);
+});
+
+test("commission payments exclude add-ons and AI tokens and use the refund-adjusted plan share", () => {
+  assert.equal(isCommissionPlanLineDescription("Team Plan"), true);
+  assert.equal(isCommissionPlanLineDescription("AI Tokens"), false);
+  assert.equal(isCommissionPlanLineDescription("Extra seats Add-On"), false);
+  assert.equal(isCommissionPlanLineDescription("Refund"), false);
+
+  assert.equal(
+    calculateNetCommissionPlanPayment({
+      invoiceAmountPaid: 150,
+      amountRefunded: 30,
+      planLineAmount: 100,
+      totalPositiveLineAmount: 150,
+    }),
+    80,
+  );
+  assert.equal(
+    calculateNetCommissionPlanPayment({
+      invoiceAmountPaid: 100,
+      amountRefunded: 150,
+      planLineAmount: 100,
+      totalPositiveLineAmount: 100,
+    }),
+    0,
+  );
+});
+
+test("Existing Business is limited to the approved New Business reps", () => {
+  const approvedOwners = ["Tyler", "Luca", "Evan", "Felipe", "Antonin", "Sarah"];
+
+  assert.equal(
+    shouldIncludeCommissionDeal({
+      dealType: "newbusiness",
+      ownerIdentities: ["Someone Else"],
+      existingBusinessOwnerNames: approvedOwners,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldIncludeCommissionDeal({
+      dealType: "existing_business",
+      ownerIdentities: ["Sarah", "Sarah Example"],
+      existingBusinessOwnerNames: approvedOwners,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldIncludeCommissionDeal({
+      dealType: "existingbusiness",
+      ownerIdentities: ["Someone Else"],
+      existingBusinessOwnerNames: approvedOwners,
+    }),
+    false,
+  );
+});
+
+test("a clawback never exceeds the commission originally paid", () => {
+  const [result] = calculateCommissionClawbacks(
+    [deal({ dealAmount: 1200, grossCommission: 96 })],
+    [],
+    [{ eventId: "churn-1", workspaceId: "workspace-1", occurredAt: "2026-02-01T00:00:00.000Z", type: "churn" }],
+  );
+
+  assert.equal(result.clawback, 96);
 });
