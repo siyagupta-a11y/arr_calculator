@@ -16,7 +16,9 @@ import type { HubspotDeal, HubspotLineItem } from "@/lib/types";
 import {
   calculateNetCommissionPlanPayment,
   calculateCommissionClawbacks,
+  commissionPlanKey,
   commissionMonthKey,
+  deriveCommissionRisksFromStripePlanEvents,
   isCommissionPlanActivityDescription,
   isCommissionPlanLineDescription,
   shouldIncludeCommissionDeal,
@@ -24,6 +26,7 @@ import {
   type CommissionPaymentRuleInput,
   type CommissionRiskRuleInput,
   type CommissionRiskType,
+  type CommissionStripePlanEventInput,
 } from "@/lib/commissionRules";
 
 type PaymentFrequency = "monthly" | "quarterly" | "annual";
@@ -212,10 +215,17 @@ function termMonthsForLineItem(lineItem: HubspotLineItem) {
 function commissionProfileForLineItems(lineItems: HubspotLineItem[]) {
   const weights = new Map<PaymentFrequency, number>();
   const starts: Date[] = [];
+  const planDescriptions: string[] = [];
   let maxTermMonths = 0;
 
   for (const lineItem of lineItems) {
     const properties = lineItem.properties || {};
+    planDescriptions.push(
+      String(properties.name || ""),
+      String(properties.description || ""),
+      String(properties.hs_product_name || ""),
+      String(properties.hs_sku || ""),
+    );
     const frequency = normalizeFrequency(properties.recurringbillingfrequency);
     if (!frequency) continue;
     const termMonths = termMonthsForLineItem(lineItem) || 12;
@@ -240,6 +250,7 @@ function commissionProfileForLineItems(lineItems: HubspotLineItem[]) {
     frequencyLabel: frequencies.length === 1 ? frequencies[0] : frequencies.length > 1 ? "mixed" : "",
     termMonths: maxTermMonths || 12,
     effectiveStartDate: starts[0]?.toISOString() || "",
+    planKey: commissionPlanKey(planDescriptions),
   };
 }
 
@@ -451,13 +462,15 @@ WITH source AS (
     TO_JSON_STRING(event_row) AS raw_json
   FROM \`${eventsTable}\` AS event_row
   WHERE DATE(event_timestamp) BETWEEN DATE(@start_date) AND DATE(@end_date)
-    AND UPPER(CAST(event_type AS STRING)) IN ('ACTIVE_END', 'ACTIVE_DOWNGRADE')
+    AND UPPER(CAST(event_type AS STRING)) IN ('ACTIVE_START', 'ACTIVE_UPGRADE', 'ACTIVE_END', 'ACTIVE_DOWNGRADE')
 ),
 parsed AS (
   SELECT
     COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.customer_id')), ''), '') AS customer_id,
     event_timestamp,
     event_type,
+    COALESCE(SAFE_CAST(JSON_VALUE(raw_json, '$.mrr_change') AS FLOAT64), 0) AS mrr_change,
+    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_id')), ''), '') AS subscription_id,
     COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.subscription_item_id')), ''), '') AS subscription_item_id,
     COALESCE(
       NULLIF(TRIM(JSON_VALUE(raw_json, '$.price_id')), ''),
@@ -511,6 +524,8 @@ SELECT DISTINCT
   CAST(customer_id AS STRING) AS customer_id,
   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E3SZ', event_timestamp, 'UTC') AS occurred_at,
   UPPER(CAST(event_type AS STRING)) AS event_type,
+  CAST(mrr_change AS FLOAT64) AS mrr_change,
+  subscription_id,
   COALESCE(
     NULLIF(TRIM(event_price_description), ''),
     NULLIF(TRIM(CAST(price_row.nickname AS STRING)), ''),
@@ -533,7 +548,7 @@ LEFT JOIN latest_products product_row
 WHERE COALESCE(NULLIF(TRIM(CAST(customer_id AS STRING)), ''), '') IN (${requestedIdsSql})
 ORDER BY occurred_at ASC, event_id ASC`;
 
-  const [invoiceRows, riskRows] = await Promise.all([
+  const [invoiceRows, eventRows] = await Promise.all([
     runBigQuerySqlRows(invoiceSql, sharedParams, { profile: "stripe_arr_correct" }),
     runBigQuerySqlRows(riskSql, sharedParams, { profile: "stripe_arr_correct" }),
   ]);
@@ -591,7 +606,8 @@ ORDER BY occurred_at ASC, event_id ASC`;
 
   return {
     payments,
-    risks: riskRows
+    risks: deriveCommissionRisksFromStripePlanEvents(
+      eventRows
       .filter((row) =>
         isCommissionPlanActivityDescription([
           String(row.price_description || ""),
@@ -601,9 +617,12 @@ ORDER BY occurred_at ASC, event_id ASC`;
       .map((row) => ({
         eventId: String(row.event_id || ""),
         customerId: String(row.customer_id || ""),
+        subscriptionId: String(row.subscription_id || ""),
         occurredAt: String(row.occurred_at || ""),
-        type: String(row.event_type || "").toUpperCase() === "ACTIVE_DOWNGRADE" ? "downgrade" : "churn",
-      } as RawStripeRisk)),
+        eventType: String(row.event_type || "").toUpperCase(),
+        mrrChange: Number(row.mrr_change || 0),
+      } as CommissionStripePlanEventInput)),
+    ).map((risk) => risk as RawStripeRisk),
   };
 }
 
@@ -769,14 +788,16 @@ export async function generateCommissionReport(request: CommissionReportRequest)
     if (!workspaceId) notes.push("Missing primary workspace ID; clawback unavailable");
     const grossCommission = round2(dealAmount * profile.rate);
     const effectiveStartDate = profile.effectiveStartDate || `${closeDate}T00:00:00.000Z`;
+    const dealName = String(properties.dealname || `Deal ${dealId}`);
 
     preparedDeals.push({
       dealId,
-      dealName: String(properties.dealname || `Deal ${dealId}`),
+      dealName,
       ownerId: String(properties.hubspot_owner_id || "").trim(),
       workspaceId,
       closeDate: `${closeDate}T00:00:00.000Z`,
       effectiveStartDate,
+      planKey: profile.planKey || commissionPlanKey([dealName]),
       termMonths: profile.termMonths,
       dealAmount,
       grossCommission,
@@ -891,10 +912,17 @@ export async function generateCommissionReport(request: CommissionReportRequest)
     const hasClawbackThisMonth = !!result.clawback && clawbackMonth === month;
     if (!hasGrossThisMonth && !hasClawbackThisMonth) continue;
 
-    const grossCommission = hasGrossThisMonth ? deal.grossCommission : 0;
+    const grossCommission = hasGrossThisMonth ? result.commissionableGrossCommission : 0;
     const clawback = hasClawbackThisMonth ? result.clawback : 0;
+    const commissionableScale = deal.dealAmount > 0 ? result.commissionableDealAmount / deal.dealAmount : 1;
+    const rowNotes = deal.notes.slice();
+    if (result.commissionableTermMonths < deal.termMonths) {
+      rowNotes.push(
+        `Deal-backed plan replacement: commission limited to ${result.commissionableTermMonths} remaining contract months.`,
+      );
+    }
     let status: CommissionDealRow["status"] = "monitoring";
-    if (!deal.grossCommission) status = "ineligible";
+    if (!result.commissionableGrossCommission) status = "ineligible";
     else if (!deal.workspaceId || !deal.stripeCustomerIds.length) status = "unmapped";
     else if (hasClawbackThisMonth) status = "clawback";
     else if (result.fullyProtectedAt) status = "protected";
@@ -913,10 +941,10 @@ export async function generateCommissionReport(request: CommissionReportRequest)
       stripeCustomerIds: deal.stripeCustomerIds,
       paymentFrequency: deal.paymentFrequency,
       commissionRatePct: deal.commissionRatePct,
-      termMonths: deal.termMonths,
+      termMonths: result.commissionableTermMonths,
       dealCurrency: deal.dealCurrency,
-      dealAmountOriginal: deal.dealAmountOriginal,
-      dealAmount: deal.dealAmount,
+      dealAmountOriginal: round2(deal.dealAmountOriginal * commissionableScale),
+      dealAmount: result.commissionableDealAmount,
       initialGrossCommission: deal.grossCommission,
       grossCommission,
       paidAmount: result.riskEventId ? result.paidBeforeRisk : result.allocatedPaidAmount,
@@ -929,7 +957,7 @@ export async function generateCommissionReport(request: CommissionReportRequest)
       clawback,
       netCommission: round2(grossCommission - clawback),
       status,
-      notes: deal.notes,
+      notes: rowNotes,
     });
   }
 
@@ -997,7 +1025,7 @@ export async function generateCommissionReport(request: CommissionReportRequest)
       existingBusinessOwners: includedExistingBusinessOwners,
       commissionRates: COMMISSION_RATES,
       clawbackRule:
-        "A churn or downgrade is assigned to one deal only. Until Stripe shows full plan payments for the first three eligible months, commission is retained only on plan payments net of refunds; for mid-month starts, the prorated opening month does not advance the three-month clock, which begins on the next 1st.",
+        "A churn or downgrade is assigned to one deal only. Stripe upgrades do not change commissions unless a qualifying replacement HubSpot deal exists; then the prior deal is retained only on its plan payments and the replacement deal is commissioned for the original contract's remaining months, with no overlap. Until Stripe shows full plan payments for the first three eligible months, commission is retained only on plan payments net of refunds; for mid-month starts, the prorated opening month does not advance the three-month clock, which begins on the next 1st.",
       paymentSource:
         "botpress-stripe-data-pipeline.stripe BigQuery tables (stripe_arr_correct profile; plan lines only, net of refunds)",
     },

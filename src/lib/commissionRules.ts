@@ -1,4 +1,6 @@
-export type CommissionRiskType = "churn" | "downgrade";
+export type CommissionRiskType = "churn" | "downgrade" | "upgrade";
+
+export type CommissionPlanKey = "free" | "pay_as_you_go" | "plus" | "team" | "managed" | "enterprise";
 
 export type CommissionDealRuleInput = {
   dealId: string;
@@ -6,6 +8,7 @@ export type CommissionDealRuleInput = {
   workspaceId: string;
   closeDate: string;
   effectiveStartDate: string;
+  planKey: CommissionPlanKey | "";
   termMonths: number;
   dealAmount: number;
   grossCommission: number;
@@ -38,6 +41,10 @@ export type CommissionDealRuleResult = {
   riskType: CommissionRiskType | "";
   paidBeforeRisk: number;
   clawback: number;
+  commissionableTermMonths: number;
+  commissionableDealAmount: number;
+  commissionableGrossCommission: number;
+  replacementDealId: string;
 };
 
 export type CommissionPlanPaymentInput = {
@@ -45,6 +52,22 @@ export type CommissionPlanPaymentInput = {
   amountRefunded: number;
   planLineAmount: number;
   totalPositiveLineAmount: number;
+};
+
+export type CommissionStripePlanEventInput = {
+  eventId: string;
+  customerId: string;
+  subscriptionId: string;
+  occurredAt: string;
+  eventType: string;
+  mrrChange: number;
+};
+
+export type CommissionStripeRiskResult = {
+  eventId: string;
+  customerId: string;
+  occurredAt: string;
+  type: Exclude<CommissionRiskType, "upgrade">;
 };
 
 function round2(value: number) {
@@ -91,6 +114,18 @@ function normalizedWords(value: string) {
     .replace(/\s+/g, " ");
 }
 
+export function commissionPlanKey(values: string[]): CommissionPlanKey | "" {
+  const normalized = normalizedWords(values.filter(Boolean).join(" "));
+  if (!normalized) return "";
+  if (/\benterprise\b/.test(normalized)) return "enterprise";
+  if (/\bmanaged\b/.test(normalized)) return "managed";
+  if (/\bteam\b/.test(normalized)) return "team";
+  if (/\bplus\b/.test(normalized)) return "plus";
+  if (/\bpay\s+as\s+you\s+go\b|\bpayg\b/.test(normalized)) return "pay_as_you_go";
+  if (/\bfree\b/.test(normalized)) return "free";
+  return "";
+}
+
 export function isCommissionPlanLineDescription(value: string) {
   const normalized = normalizedWords(value);
   if (!normalized || normalized === "refund" || normalized === "discount") return false;
@@ -117,6 +152,75 @@ export function calculateNetCommissionPlanPayment(input: CommissionPlanPaymentIn
   const netInvoicePayment = Math.max(0, invoiceAmountPaid - amountRefunded);
   const planShare = Math.min(1, planLineAmount / totalPositiveLineAmount);
   return round2(netInvoicePayment * planShare);
+}
+
+const STRIPE_PLAN_TRANSITION_WINDOW_MS = 5 * 60 * 1000;
+
+export function deriveCommissionRisksFromStripePlanEvents(
+  events: CommissionStripePlanEventInput[],
+): CommissionStripeRiskResult[] {
+  const grouped = new Map<string, CommissionStripePlanEventInput[]>();
+  for (const event of events) {
+    const customerId = String(event.customerId || "").trim();
+    const occurredAtMs = dateMs(event.occurredAt);
+    if (!customerId || !Number.isFinite(occurredAtMs)) continue;
+    const subscriptionId = String(event.subscriptionId || "").trim();
+    const key = `${customerId}|${subscriptionId || "(no subscription)"}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key)!.push(event);
+  }
+
+  const risks: CommissionStripeRiskResult[] = [];
+  for (const groupedEvents of grouped.values()) {
+    const sorted = groupedEvents
+      .slice()
+      .sort((a, b) => dateMs(a.occurredAt) - dateMs(b.occurredAt) || a.eventId.localeCompare(b.eventId));
+    const clusters: CommissionStripePlanEventInput[][] = [];
+    for (const event of sorted) {
+      const cluster = clusters.at(-1);
+      const previous = cluster?.at(-1);
+      if (!cluster || !previous || dateMs(event.occurredAt) - dateMs(previous.occurredAt) > STRIPE_PLAN_TRANSITION_WINDOW_MS) {
+        clusters.push([event]);
+      } else {
+        cluster.push(event);
+      }
+    }
+
+    for (const cluster of clusters) {
+      const candidates = cluster.filter((event) => {
+        const type = String(event.eventType || "").trim().toUpperCase();
+        return type === "ACTIVE_DOWNGRADE" || type === "ACTIVE_END";
+      });
+      if (!candidates.length) continue;
+
+      const hasReplacementStart = cluster.some((event) => {
+        const type = String(event.eventType || "").trim().toUpperCase();
+        return (type === "ACTIVE_START" || type === "ACTIVE_UPGRADE") && Number(event.mrrChange || 0) > 0;
+      });
+      const netMrrChange = cluster.reduce((sum, event) => sum + Number(event.mrrChange || 0), 0);
+      // A net-positive Stripe plan transition is an upgrade signal, not a clawback by itself.
+      // It is handled only when a qualifying replacement HubSpot deal exists.
+      if (hasReplacementStart && netMrrChange >= 0) continue;
+
+      const chosen =
+        candidates.find((event) => String(event.eventType || "").trim().toUpperCase() === "ACTIVE_DOWNGRADE") ||
+        candidates[0];
+      risks.push({
+        eventId: chosen.eventId,
+        customerId: chosen.customerId,
+        occurredAt: chosen.occurredAt,
+        type: candidates.some(
+          (event) => String(event.eventType || "").trim().toUpperCase() === "ACTIVE_DOWNGRADE",
+        )
+          ? "downgrade"
+          : "churn",
+      });
+    }
+  }
+
+  return risks.sort(
+    (a, b) => dateMs(a.occurredAt) - dateMs(b.occurredAt) || a.eventId.localeCompare(b.eventId),
+  );
 }
 
 export function shouldIncludeCommissionDeal(input: {
@@ -152,6 +256,93 @@ function sortedWorkspaceDeals(deals: CommissionDealRuleInput[]) {
   return byWorkspace;
 }
 
+type DealCommissionWindow = {
+  commissionableTermMonths: number;
+  commissionableDealAmount: number;
+  commissionableGrossCommission: number;
+  replacementDeal: CommissionDealRuleInput | null;
+  replacementType: "upgrade" | "downgrade" | "";
+};
+
+const PLAN_RANK: Record<CommissionPlanKey, number> = {
+  free: 0,
+  pay_as_you_go: 1,
+  plus: 2,
+  team: 3,
+  managed: 4,
+  enterprise: 5,
+};
+
+function dateMonthIndex(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return NaN;
+  return parsed.getUTCFullYear() * 12 + parsed.getUTCMonth();
+}
+
+function isDealBackedPlanReplacement(current: CommissionDealRuleInput, replacement: CommissionDealRuleInput) {
+  return !!current.planKey && !!replacement.planKey && current.planKey !== replacement.planKey;
+}
+
+function buildDealCommissionWindows(
+  deals: CommissionDealRuleInput[],
+  byWorkspace: Map<string, CommissionDealRuleInput[]>,
+) {
+  const windows = new Map<string, DealCommissionWindow>();
+  for (const deal of deals) {
+    windows.set(deal.dealId, {
+      commissionableTermMonths: Math.max(1, Number(deal.termMonths || 12)),
+      commissionableDealAmount: Math.max(0, Number(deal.dealAmount || 0)),
+      commissionableGrossCommission: Math.max(0, Number(deal.grossCommission || 0)),
+      replacementDeal: null,
+      replacementType: "",
+    });
+  }
+
+  for (const workspaceDeals of byWorkspace.values()) {
+    let contractEndMonth = Number.NEGATIVE_INFINITY;
+    let previous: CommissionDealRuleInput | null = null;
+    for (const deal of workspaceDeals) {
+      const rawStartMonth = dateMonthIndex(deal.effectiveStartDate);
+      const replacementStartMonth = dateMonthIndex(monitoringStartIso(deal.effectiveStartDate));
+      const termMonths = Math.max(1, Number(deal.termMonths || 12));
+      const isReplacement =
+        !!previous &&
+        Number.isFinite(replacementStartMonth) &&
+        replacementStartMonth < contractEndMonth &&
+        isDealBackedPlanReplacement(previous, deal);
+
+      if (!isReplacement) {
+        contractEndMonth = Number.isFinite(rawStartMonth)
+          ? rawStartMonth + termMonths
+          : Number.NEGATIVE_INFINITY;
+        previous = deal;
+        continue;
+      }
+
+      const remainingTermMonths = Math.max(
+        1,
+        Math.min(termMonths, contractEndMonth - replacementStartMonth),
+      );
+      const scale = Math.min(1, remainingTermMonths / termMonths);
+      const currentWindow = windows.get(deal.dealId)!;
+      currentWindow.commissionableTermMonths = remainingTermMonths;
+      currentWindow.commissionableDealAmount = round2(Math.max(0, Number(deal.dealAmount || 0)) * scale);
+      currentWindow.commissionableGrossCommission = round2(
+        Math.max(0, Number(deal.grossCommission || 0)) * scale,
+      );
+
+      const previousWindow = windows.get(previous!.dealId)!;
+      previousWindow.replacementDeal = deal;
+      previousWindow.replacementType = PLAN_RANK[deal.planKey as CommissionPlanKey] > PLAN_RANK[previous!.planKey as CommissionPlanKey]
+        ? "upgrade"
+        : "downgrade";
+      previous = deal;
+    }
+  }
+
+  return windows;
+}
+
 function choosePaymentDeal(deals: CommissionDealRuleInput[], paidAtMs: number) {
   let chosen: CommissionDealRuleInput | null = null;
   for (const deal of deals) {
@@ -181,6 +372,7 @@ export function calculateCommissionClawbacks(
   riskEvents: CommissionRiskRuleInput[],
 ): CommissionDealRuleResult[] {
   const byWorkspace = sortedWorkspaceDeals(deals);
+  const dealWindows = buildDealCommissionWindows(deals, byWorkspace);
   const paymentsByDeal = new Map<string, CommissionPaymentRuleInput[]>();
   const risksByDeal = new Map<string, CommissionRiskRuleInput[]>();
 
@@ -212,9 +404,23 @@ export function calculateCommissionClawbacks(
     risksByDeal.get(deal.dealId)!.push(event);
   }
 
+  for (const deal of deals) {
+    const window = dealWindows.get(deal.dealId);
+    const replacement = window?.replacementDeal;
+    if (!window || !replacement || !window.replacementType) continue;
+    if (!risksByDeal.has(deal.dealId)) risksByDeal.set(deal.dealId, []);
+    risksByDeal.get(deal.dealId)!.push({
+      eventId: `deal-replacement:${deal.dealId}:${replacement.dealId}`,
+      workspaceId: deal.workspaceId,
+      occurredAt: replacement.closeDate,
+      type: window.replacementType,
+    });
+  }
+
   return deals.map((deal) => {
-    const termMonths = Math.max(1, Number(deal.termMonths || 12));
-    const dealAmount = Math.max(0, Number(deal.dealAmount || 0));
+    const window = dealWindows.get(deal.dealId)!;
+    const termMonths = window.commissionableTermMonths;
+    const dealAmount = window.commissionableDealAmount;
     const protectedAmount = round2(Math.min(dealAmount, dealAmount * (Math.min(3, termMonths) / termMonths)));
     const monitoringStart = monitoringStartIso(deal.effectiveStartDate);
     const monitoringStartMs = dateMs(monitoringStart);
@@ -242,7 +448,10 @@ export function calculateCommissionClawbacks(
 
     const fullProtectionMs = fullyProtectedAt ? dateMs(fullyProtectedAt) : Number.POSITIVE_INFINITY;
     const eligibleRisk = (risksByDeal.get(deal.dealId) || [])
-      .filter((event) => dateMs(event.occurredAt) < fullProtectionMs)
+      .filter(
+        (event) =>
+          event.eventId.startsWith("deal-replacement:") || dateMs(event.occurredAt) < fullProtectionMs,
+      )
       .sort((a, b) => dateMs(a.occurredAt) - dateMs(b.occurredAt) || a.eventId.localeCompare(b.eventId))[0];
 
     let paidBeforeRisk = 0;
@@ -254,9 +463,10 @@ export function calculateCommissionClawbacks(
     }
     paidBeforeRisk = round2(Math.min(dealAmount, paidBeforeRisk));
 
-    const effectiveRate = dealAmount > 0 ? Math.max(0, Number(deal.grossCommission || 0)) / dealAmount : 0;
+    const effectiveRate =
+      dealAmount > 0 ? Math.max(0, Number(window.commissionableGrossCommission || 0)) / dealAmount : 0;
     const earnedCommission = round2(paidBeforeRisk * effectiveRate);
-    const grossCommission = Math.max(0, Number(deal.grossCommission || 0));
+    const grossCommission = Math.max(0, Number(window.commissionableGrossCommission || 0));
     const clawback = eligibleRisk
       ? round2(Math.min(grossCommission, Math.max(0, grossCommission - earnedCommission)))
       : 0;
@@ -274,6 +484,10 @@ export function calculateCommissionClawbacks(
       riskType: eligibleRisk?.type || "",
       paidBeforeRisk,
       clawback,
+      commissionableTermMonths: window.commissionableTermMonths,
+      commissionableDealAmount: window.commissionableDealAmount,
+      commissionableGrossCommission: window.commissionableGrossCommission,
+      replacementDealId: window.replacementDeal?.dealId || "",
     };
   });
 }

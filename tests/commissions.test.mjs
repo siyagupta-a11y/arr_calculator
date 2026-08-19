@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   calculateCommissionClawbacks,
   calculateNetCommissionPlanPayment,
+  commissionPlanKey,
   commissionMonthKey,
+  deriveCommissionRisksFromStripePlanEvents,
   isCommissionPlanActivityDescription,
   isCommissionPlanLineDescription,
   shouldIncludeCommissionDeal,
@@ -16,6 +18,7 @@ function deal(overrides = {}) {
     workspaceId: "workspace-1",
     closeDate: "2026-01-01T00:00:00.000Z",
     effectiveStartDate: "2026-01-01T00:00:00.000Z",
+    planKey: "plus",
     termMonths: 12,
     dealAmount: 1200,
     grossCommission: 96,
@@ -96,9 +99,10 @@ test("opening proration still counts as paid cash if churn occurs before three f
 test("replacement deal receives new payments while the downgrade claws back only the prior deal", () => {
   const results = calculateCommissionClawbacks(
     [
-      deal(),
+      deal({ planKey: "team" }),
       deal({
         dealId: "deal-new",
+        planKey: "plus",
         closeDate: "2026-02-10T00:00:00.000Z",
         effectiveStartDate: "2026-02-15T00:00:00.000Z",
         dealAmount: 600,
@@ -122,6 +126,109 @@ test("replacement deal receives new payments while the downgrade claws back only
   assert.equal(oldDeal?.clawback, 88);
   assert.equal(newDeal?.allocatedPaidAmount, 50);
   assert.equal(newDeal?.clawback, 0);
+});
+
+test("Magicplan deal-backed Plus to Team upgrade pays Plus actuals and ten Team months", () => {
+  const workspaceId = "wkspace_01KPEJBS3JFWFPKQWPECPXA48Z";
+  const results = calculateCommissionClawbacks(
+    [
+      deal({
+        dealId: "59369587569",
+        workspaceId,
+        closeDate: "2026-05-05T00:00:00.000Z",
+        effectiveStartDate: "2026-05-05T00:00:00.000Z",
+        planKey: "plus",
+        dealAmount: 1068,
+        grossCommission: 85.44,
+      }),
+      deal({
+        dealId: "60033742225",
+        workspaceId,
+        closeDate: "2026-06-08T00:00:00.000Z",
+        effectiveStartDate: "2026-06-08T00:00:00.000Z",
+        planKey: "team",
+        dealAmount: 5940,
+        grossCommission: 475.2,
+      }),
+    ],
+    [
+      { paymentId: "plus-opening", workspaceId, paidDate: "2026-05-05T23:59:59.999Z", amount: 76.21 },
+      { paymentId: "plus-june", workspaceId, paidDate: "2026-06-01T23:59:59.999Z", amount: 89 },
+      { paymentId: "team-opening", workspaceId, paidDate: "2026-06-08T23:59:59.999Z", amount: 301.94 },
+      { paymentId: "team-july", workspaceId, paidDate: "2026-07-01T23:59:59.999Z", amount: 495 },
+      { paymentId: "team-august", workspaceId, paidDate: "2026-08-01T23:59:59.999Z", amount: 495 },
+    ],
+    [],
+  );
+  const plusDeal = results.find((result) => result.dealId === "59369587569");
+  const teamDeal = results.find((result) => result.dealId === "60033742225");
+
+  assert.equal(plusDeal?.riskType, "upgrade");
+  assert.equal(plusDeal?.replacementDealId, "60033742225");
+  assert.equal(plusDeal?.paidBeforeRisk, 165.21);
+  assert.equal(plusDeal?.clawback, 72.22);
+  assert.equal(teamDeal?.commissionableTermMonths, 10);
+  assert.equal(teamDeal?.commissionableDealAmount, 4950);
+  assert.equal(teamDeal?.commissionableGrossCommission, 396);
+  assert.equal(teamDeal?.proratedOpeningPaymentAmount, 301.94);
+  assert.equal(teamDeal?.allocatedPaidAmount, 1291.94);
+});
+
+test("Magicplan net-positive Stripe transition is not a clawback without its HubSpot upgrade deal", () => {
+  const customerId = "cus_UM16U7mBhcTdEX";
+  const subscriptionId = "sub_1TTgdqKDjVRgNn7vdhEEaa4D";
+  const risks = deriveCommissionRisksFromStripePlanEvents([
+    {
+      eventId: "plus-down",
+      customerId,
+      subscriptionId,
+      occurredAt: "2026-06-08T16:32:36.141Z",
+      eventType: "ACTIVE_DOWNGRADE",
+      mrrChange: -8900,
+    },
+    {
+      eventId: "team-start",
+      customerId,
+      subscriptionId,
+      occurredAt: "2026-06-08T16:32:36.141Z",
+      eventType: "ACTIVE_START",
+      mrrChange: 49500,
+    },
+    {
+      eventId: "plus-end",
+      customerId,
+      subscriptionId,
+      occurredAt: "2026-06-08T16:32:39.539Z",
+      eventType: "ACTIVE_END",
+      mrrChange: 0,
+    },
+  ]);
+
+  assert.deepEqual(risks, []);
+});
+
+test("a net-negative Stripe plan replacement remains a downgrade risk", () => {
+  const risks = deriveCommissionRisksFromStripePlanEvents([
+    {
+      eventId: "team-down",
+      customerId: "customer-1",
+      subscriptionId: "subscription-1",
+      occurredAt: "2026-02-15T12:00:00.000Z",
+      eventType: "ACTIVE_DOWNGRADE",
+      mrrChange: -49500,
+    },
+    {
+      eventId: "plus-start",
+      customerId: "customer-1",
+      subscriptionId: "subscription-1",
+      occurredAt: "2026-02-15T12:00:00.000Z",
+      eventType: "ACTIVE_START",
+      mrrChange: 8900,
+    },
+  ]);
+
+  assert.equal(risks.length, 1);
+  assert.equal(risks[0].type, "downgrade");
 });
 
 test("a late churn remains monitored until the first-three-month payment threshold is met", () => {
@@ -175,6 +282,12 @@ test("commission risk events only include identified primary plan products", () 
   );
   assert.equal(isCommissionPlanActivityDescription(["AI Tokens", ""]), false);
   assert.equal(isCommissionPlanActivityDescription(["", "(blank)"]), false);
+});
+
+test("commission plan keys identify Magicplan replacement tiers", () => {
+  assert.equal(commissionPlanKey(["Magicplan - Plus Plan"]), "plus");
+  assert.equal(commissionPlanKey(["Magicplan - Team Plan"]), "team");
+  assert.equal(commissionPlanKey(["Add-on - Collaborators"]), "");
 });
 
 test("Existing Business is limited to the approved New Business reps", () => {

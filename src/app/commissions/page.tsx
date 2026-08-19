@@ -23,7 +23,10 @@ function formatMoney(value: number, currency: string) {
 }
 
 function statusLabel(row: CommissionDealRow) {
-  if (row.status === "clawback") return `${row.clawbackType === "downgrade" ? "Downgrade" : "Churn"} clawback`;
+  if (row.status === "clawback") {
+    const label = row.clawbackType === "upgrade" ? "Upgrade" : row.clawbackType === "downgrade" ? "Downgrade" : "Churn";
+    return `${label} clawback`;
+  }
   if (row.status === "protected") return "3-month payment cleared";
   if (row.status === "unmapped") return "Stripe mapping missing";
   if (row.status === "ineligible") return "Frequency ineligible";
@@ -77,7 +80,7 @@ export default function CommissionsPage() {
             <h1 className="stripe-ui__title">Commissions</h1>
             <p className="stripe-ui__subtitle">
               Closed-won New Business and approved-rep Existing Business by deal owner, with Stripe payment-based
-              churn and downgrade clawbacks.
+              churn and downgrade clawbacks plus deal-backed plan replacements.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -94,8 +97,8 @@ export default function CommissionsPage() {
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Report month</h2>
         <p className="stripe-ui__panel-subtitle">
-          Gross commissions are booked in the deal close month. Clawbacks appear only in the Stripe churn or downgrade
-          month, including adjustments to deals closed in an earlier month.
+          Gross commissions are booked in the deal close month. Clawbacks appear in the Stripe churn or downgrade
+          month, or alongside a qualifying HubSpot plan-replacement deal, including adjustments to earlier deals.
         </p>
         <div style={{ display: "flex", gap: 12, alignItems: "end", flexWrap: "wrap" }}>
           <div className="stripe-ui__field" style={{ minWidth: 220 }}>
