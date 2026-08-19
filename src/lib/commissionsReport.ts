@@ -54,7 +54,9 @@ export type CommissionDealRow = {
   grossCommission: number;
   paidAmount: number;
   protectedAmount: number;
+  monitoringStart: string;
   fullyProtectedAt: string;
+  proratedOpeningPaymentAmount: number;
   clawbackEventDate: string;
   clawbackType: CommissionRiskType | "";
   clawback: number;
@@ -785,7 +787,9 @@ export async function generateCommissionReport(request: CommissionReportRequest)
       grossCommission,
       paidAmount: result.riskEventId ? result.paidBeforeRisk : result.allocatedPaidAmount,
       protectedAmount: result.protectedAmount,
+      monitoringStart: result.monitoringStart ? result.monitoringStart.slice(0, 10) : "",
       fullyProtectedAt: result.fullyProtectedAt ? result.fullyProtectedAt.slice(0, 10) : "",
+      proratedOpeningPaymentAmount: result.proratedOpeningPaymentAmount,
       clawbackEventDate: hasClawbackThisMonth ? result.riskEventDate.slice(0, 10) : "",
       clawbackType: hasClawbackThisMonth ? result.riskType : "",
       clawback,
@@ -859,7 +863,7 @@ export async function generateCommissionReport(request: CommissionReportRequest)
       existingBusinessOwners: includedExistingBusinessOwners,
       commissionRates: COMMISSION_RATES,
       clawbackRule:
-        "A churn or downgrade is assigned to one deal only. Until Stripe shows full plan payments for the first three months, commission is retained only on plan payments net of refunds; the difference is recognized once in the event month.",
+        "A churn or downgrade is assigned to one deal only. Until Stripe shows full plan payments for the first three eligible months, commission is retained only on plan payments net of refunds; for mid-month starts, the prorated opening month does not advance the three-month clock, which begins on the next 1st.",
       paymentSource:
         "botpress-stripe-data-pipeline.stripe BigQuery tables (stripe_arr_correct profile; plan lines only, net of refunds)",
     },

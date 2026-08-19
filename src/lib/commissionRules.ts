@@ -29,8 +29,10 @@ export type CommissionDealRuleResult = {
   dealId: string;
   allocatedPaidAmount: number;
   protectedAmount: number;
+  monitoringStart: string;
   protectedUntil: string;
   fullyProtectedAt: string;
+  proratedOpeningPaymentAmount: number;
   riskEventId: string;
   riskEventDate: string;
   riskType: CommissionRiskType | "";
@@ -62,6 +64,13 @@ function addMonthsIso(value: string, months: number) {
   const monthEndDay = new Date(Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0)).getUTCDate();
   result.setUTCDate(Math.min(day, monthEndDay));
   return result.toISOString();
+}
+
+function monitoringStartIso(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const monthOffset = parsed.getUTCDate() === 1 ? 0 : 1;
+  return new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth() + monthOffset, 1)).toISOString();
 }
 
 function monthKey(value: string) {
@@ -200,16 +209,26 @@ export function calculateCommissionClawbacks(
     const termMonths = Math.max(1, Number(deal.termMonths || 12));
     const dealAmount = Math.max(0, Number(deal.dealAmount || 0));
     const protectedAmount = round2(Math.min(dealAmount, dealAmount * (Math.min(3, termMonths) / termMonths)));
-    const protectedUntil = addMonthsIso(deal.effectiveStartDate, 3);
+    const monitoringStart = monitoringStartIso(deal.effectiveStartDate);
+    const monitoringStartMs = dateMs(monitoringStart);
+    const protectedUntil = addMonthsIso(monitoringStart, 3);
     const dealPayments = (paymentsByDeal.get(deal.dealId) || [])
       .slice()
       .sort((a, b) => dateMs(a.paidDate) - dateMs(b.paidDate) || a.paymentId.localeCompare(b.paymentId));
 
     let cumulativePaid = 0;
+    let protectionEligiblePaid = 0;
+    let proratedOpeningPaymentAmount = 0;
     let fullyProtectedAt = "";
     for (const payment of dealPayments) {
-      cumulativePaid = round2(cumulativePaid + Math.max(0, Number(payment.amount || 0)));
-      if (!fullyProtectedAt && protectedAmount > 0 && cumulativePaid + 0.005 >= protectedAmount) {
+      const paymentAmount = Math.max(0, Number(payment.amount || 0));
+      cumulativePaid = round2(cumulativePaid + paymentAmount);
+      if (dateMs(payment.paidDate) < monitoringStartMs) {
+        proratedOpeningPaymentAmount = round2(proratedOpeningPaymentAmount + paymentAmount);
+        continue;
+      }
+      protectionEligiblePaid = round2(protectionEligiblePaid + paymentAmount);
+      if (!fullyProtectedAt && protectedAmount > 0 && protectionEligiblePaid + 0.005 >= protectedAmount) {
         fullyProtectedAt = payment.paidDate;
       }
     }
@@ -239,8 +258,10 @@ export function calculateCommissionClawbacks(
       dealId: deal.dealId,
       allocatedPaidAmount: round2(Math.min(dealAmount, cumulativePaid)),
       protectedAmount,
+      monitoringStart,
       protectedUntil,
       fullyProtectedAt,
+      proratedOpeningPaymentAmount,
       riskEventId: eligibleRisk?.eventId || "",
       riskEventDate: eligibleRisk?.occurredAt || "",
       riskType: eligibleRisk?.type || "",

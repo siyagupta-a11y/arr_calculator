@@ -227,6 +227,11 @@ export default function CommissionsPage() {
                           <div style={{ color: "#64748b", fontSize: 12 }}>
                             3-mo target {formatMoney(deal.protectedAmount, currency)}
                           </div>
+                          {deal.proratedOpeningPaymentAmount > 0 ? (
+                            <div style={{ color: "#92400e", fontSize: 12 }}>
+                              Opening proration {formatMoney(deal.proratedOpeningPaymentAmount, currency)} excluded from target · Clock starts {deal.monitoringStart}
+                            </div>
+                          ) : null}
                         </td>
                         <td style={{ color: deal.clawback > 0 ? "#b91c1c" : undefined }}>
                           {formatMoney(deal.clawback, currency)}

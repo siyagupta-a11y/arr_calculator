@@ -51,6 +51,47 @@ test("risk after three full monthly payments does not claw back", () => {
   assert.equal(result.riskEventId, "");
 });
 
+test("a prorated opening month does not advance the three-full-month protection clock", () => {
+  const [result] = calculateCommissionClawbacks(
+    [deal({
+      closeDate: "2026-01-15T00:00:00.000Z",
+      effectiveStartDate: "2026-01-15T00:00:00.000Z",
+    })],
+    [
+      { paymentId: "opening-proration", workspaceId: "workspace-1", paidDate: "2026-01-15T00:00:00.000Z", amount: 50 },
+      { paymentId: "feb-full", workspaceId: "workspace-1", paidDate: "2026-02-01T00:00:00.000Z", amount: 100 },
+      { paymentId: "mar-full", workspaceId: "workspace-1", paidDate: "2026-03-01T00:00:00.000Z", amount: 100 },
+      { paymentId: "apr-full", workspaceId: "workspace-1", paidDate: "2026-04-01T00:00:00.000Z", amount: 100 },
+    ],
+    [],
+  );
+
+  assert.equal(result.monitoringStart, "2026-02-01T00:00:00.000Z");
+  assert.equal(result.protectedUntil, "2026-05-01T00:00:00.000Z");
+  assert.equal(result.proratedOpeningPaymentAmount, 50);
+  assert.equal(result.allocatedPaidAmount, 350);
+  assert.equal(result.fullyProtectedAt, "2026-04-01T00:00:00.000Z");
+});
+
+test("opening proration still counts as paid cash if churn occurs before three full months", () => {
+  const [result] = calculateCommissionClawbacks(
+    [deal({
+      closeDate: "2026-01-15T00:00:00.000Z",
+      effectiveStartDate: "2026-01-15T00:00:00.000Z",
+    })],
+    [
+      { paymentId: "opening-proration", workspaceId: "workspace-1", paidDate: "2026-01-15T00:00:00.000Z", amount: 50 },
+      { paymentId: "feb-full", workspaceId: "workspace-1", paidDate: "2026-02-01T00:00:00.000Z", amount: 100 },
+      { paymentId: "mar-full", workspaceId: "workspace-1", paidDate: "2026-03-01T00:00:00.000Z", amount: 100 },
+    ],
+    [{ eventId: "churn-1", workspaceId: "workspace-1", occurredAt: "2026-03-20T00:00:00.000Z", type: "churn" }],
+  );
+
+  assert.equal(result.fullyProtectedAt, "");
+  assert.equal(result.paidBeforeRisk, 250);
+  assert.equal(result.clawback, 76);
+});
+
 test("replacement deal receives new payments while the downgrade claws back only the prior deal", () => {
   const results = calculateCommissionClawbacks(
     [
