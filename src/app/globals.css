@@ -243,6 +243,200 @@ textarea:focus-visible {
   color: var(--stripe-muted);
 }
 
+.commissions-quota {
+  border-color: #31568f;
+  background: linear-gradient(180deg, #0d1729 0%, #0a1220 100%);
+}
+
+.commissions-quota__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.commissions-quota__as-of {
+  flex: 0 0 auto;
+  color: #c7d9f5;
+  border: 1px solid #355681;
+  background: #101f36;
+  padding: 0.38rem 0.58rem;
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.commissions-quota__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: -0.15rem 0 0.85rem;
+  color: #9fb5d8;
+  font-size: 0.75rem;
+}
+
+.commissions-quota__legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+}
+
+.commissions-quota__legend i {
+  display: inline-block;
+  width: 1.1rem;
+  height: 0.45rem;
+}
+
+.commissions-quota__legend-sold {
+  background: #4597ff;
+}
+
+.commissions-quota__legend-expected {
+  position: relative;
+  border-top: 2px solid #f4f8ff;
+}
+
+.commissions-quota__legend-expected::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -0.28rem;
+  height: 0.55rem;
+  border-left: 2px solid #f4f8ff;
+}
+
+.commissions-quota__list {
+  display: grid;
+  gap: 0.72rem;
+}
+
+.commissions-quota__row {
+  border: 1px solid #263e64;
+  background: #0b1628;
+  padding: 0.8rem;
+}
+
+.commissions-quota__row-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 0.62rem;
+}
+
+.commissions-quota__owner {
+  color: #f2f7ff;
+  font-family: var(--font-heading);
+  font-size: 1rem;
+  font-weight: 750;
+}
+
+.commissions-quota__period {
+  margin-top: 0.18rem;
+  color: #8fa8cd;
+  font-size: 0.72rem;
+}
+
+.commissions-quota__attainment {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: #eef5ff;
+}
+
+.commissions-quota__attainment strong {
+  font-size: 1rem;
+}
+
+.commissions-quota__pace {
+  border: 1px solid #925c32;
+  background: #38200f;
+  color: #ffc88a;
+  padding: 0.2rem 0.38rem;
+  font-size: 0.67rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.commissions-quota__pace--on {
+  border-color: #246c68;
+  background: #0b302f;
+  color: #8af1e8;
+}
+
+.commissions-quota__track {
+  position: relative;
+  height: 1.15rem;
+  overflow: visible;
+  border: 1px solid #385681;
+  background: #09101d;
+}
+
+.commissions-quota__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 0;
+  background: linear-gradient(90deg, #24599c 0%, #4597ff 100%);
+  transition: width 360ms ease;
+}
+
+.commissions-quota__fill--on {
+  background: linear-gradient(90deg, #15706b 0%, #36c8bc 100%);
+}
+
+.commissions-quota__marker {
+  position: absolute;
+  z-index: 2;
+  top: -0.32rem;
+  bottom: -0.32rem;
+  width: 2px;
+  background: #f5f8ff;
+  box-shadow: 0 0 0 1px rgba(5, 7, 13, 0.62);
+  transform: translateX(-1px);
+}
+
+.commissions-quota__marker::before {
+  content: "";
+  position: absolute;
+  top: -0.08rem;
+  left: 50%;
+  width: 0.38rem;
+  height: 0.38rem;
+  background: #f5f8ff;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.commissions-quota__details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  margin-top: 0.58rem;
+  color: #91a9cd;
+  font-size: 0.73rem;
+}
+
+.commissions-quota__details strong {
+  color: #dfeaff;
+  font-weight: 700;
+}
+
+.commissions-quota__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.commissions-quota__warnings {
+  margin-top: 0.75rem;
+  border: 1px solid #74572b;
+  background: #2c210e;
+  color: #f6d28f;
+  padding: 0.65rem 0.72rem;
+  font-size: 0.76rem;
+}
+
 .stripe-ui__control-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(150px, 1fr));
@@ -655,5 +849,16 @@ textarea:focus-visible {
   .stripe-ui__toolbar {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .commissions-quota__heading,
+  .commissions-quota__row-heading,
+  .commissions-quota__error {
+    flex-direction: column;
+  }
+
+  .commissions-quota__attainment {
+    width: 100%;
+    justify-content: space-between;
   }
 }

@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CommissionDealRow, CommissionReportResponse } from "@/lib/commissionsReport";
+import type { SalesQuotaProgress } from "@/lib/salesQuotaRules";
+import type { SalesQuotaReportResponse } from "@/lib/salesQuotaReport";
 
 function currentMonth() {
   const now = new Date();
@@ -20,6 +22,31 @@ function formatMoney(value: number, currency: string) {
   } catch {
     return Number(value || 0).toFixed(2);
   }
+}
+
+function formatCompactMoney(value: number, currency: string) {
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency,
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }).format(Number(value || 0));
+  } catch {
+    return Number(value || 0).toFixed(0);
+  }
+}
+
+function formatDate(value: string, options: Intl.DateTimeFormatOptions) {
+  return new Intl.DateTimeFormat("en-US", { ...options, timeZone: "UTC" }).format(
+    new Date(`${value}T12:00:00.000Z`),
+  );
+}
+
+function quotaPeriodLabel(quota: SalesQuotaProgress) {
+  const start = formatDate(quota.periodStart, { month: "short", day: "numeric" });
+  const end = formatDate(quota.periodEnd, { month: "short", day: "numeric", year: "numeric" });
+  return `${quota.cadence === "quarterly" ? "Quarterly" : "Monthly"} · ${start}–${end}`;
 }
 
 function statusLabel(row: CommissionDealRow) {
@@ -46,6 +73,9 @@ export default function CommissionsPage() {
   const [data, setData] = useState<CommissionReportResponse | null>(null);
   const [ownerFilter, setOwnerFilter] = useState("");
   const [sessionRole, setSessionRole] = useState<"admin" | "sales" | "">("");
+  const [quotaData, setQuotaData] = useState<SalesQuotaReportResponse | null>(null);
+  const [quotaLoading, setQuotaLoading] = useState(true);
+  const [quotaError, setQuotaError] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -65,6 +95,28 @@ export default function CommissionsPage() {
       cancelled = true;
     };
   }, []);
+
+  const loadQuota = useCallback(async () => {
+    setQuotaLoading(true);
+    setQuotaError("");
+    try {
+      const response = await fetch("/api/commissions/quota", { cache: "no-store" });
+      const text = await response.text();
+      const payload = text ? (JSON.parse(text) as SalesQuotaReportResponse & { error?: string }) : null;
+      if (!response.ok) throw new Error(payload?.error || text || `HTTP ${response.status}`);
+      if (!payload) throw new Error("Empty sales quota response");
+      setQuotaData(payload);
+    } catch (requestError: unknown) {
+      setQuotaError(requestError instanceof Error ? requestError.message : "Unable to load sales quotas");
+      setQuotaData(null);
+    } finally {
+      setQuotaLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadQuota();
+  }, [loadQuota]);
 
   const run = useCallback(async () => {
     setLoading(true);
@@ -135,7 +187,95 @@ export default function CommissionsPage() {
         </div>
       </section>
 
-      <section className="stripe-ui__panel ui-reveal ui-reveal-1">
+      <section className="stripe-ui__panel commissions-quota ui-reveal ui-reveal-1">
+        <div className="commissions-quota__heading">
+          <div>
+            <h2 className="stripe-ui__panel-title">Sales vs quota</h2>
+            <p className="stripe-ui__panel-subtitle">
+              Closed-won HubSpot deal amount in USD. The marker shows the prorated pace expected by today.
+            </p>
+          </div>
+          {quotaData ? (
+            <div className="commissions-quota__as-of">
+              As of {formatDate(quotaData.asOfDate, { month: "long", day: "numeric", year: "numeric" })}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="commissions-quota__legend" aria-label="Chart legend">
+          <span><i className="commissions-quota__legend-sold" /> Sold</span>
+          <span><i className="commissions-quota__legend-expected" /> Expected by today</span>
+        </div>
+
+        {quotaLoading ? (
+          <div className="stripe-ui__skeleton-grid" aria-label="Loading sales quotas">
+            <div className="stripe-ui__skeleton-row" />
+            <div className="stripe-ui__skeleton-row" />
+            <div className="stripe-ui__skeleton-row" />
+            <div className="stripe-ui__skeleton-row stripe-ui__skeleton-row--short" />
+          </div>
+        ) : null}
+
+        {quotaError ? (
+          <div className="stripe-ui__error commissions-quota__error">
+            <span>{quotaError}</span>
+            <button className="stripe-ui__btn stripe-ui__btn--secondary" type="button" onClick={() => void loadQuota()}>
+              Retry
+            </button>
+          </div>
+        ) : null}
+
+        {quotaData ? (
+          <div className="commissions-quota__list">
+            {quotaData.quotas.map((quota) => {
+              const onPace = quota.soldAmount >= quota.expectedAmount;
+              const fillPct = Math.min(100, Math.max(0, quota.attainmentPct));
+              const expectedPct = Math.min(100, Math.max(0, quota.expectedPct));
+              return (
+                <article className="commissions-quota__row" key={quota.ownerKey}>
+                  <div className="commissions-quota__row-heading">
+                    <div>
+                      <div className="commissions-quota__owner">{quota.ownerName}</div>
+                      <div className="commissions-quota__period">{quotaPeriodLabel(quota)}</div>
+                    </div>
+                    <div className="commissions-quota__attainment">
+                      <strong>{quota.attainmentPct.toFixed(1)}%</strong>
+                      <span className={onPace ? "commissions-quota__pace commissions-quota__pace--on" : "commissions-quota__pace"}>
+                        {onPace ? "On pace" : "Behind pace"}
+                      </span>
+                    </div>
+                  </div>
+                  <div
+                    className="commissions-quota__track"
+                    role="img"
+                    aria-label={`${quota.ownerName} has sold ${formatMoney(quota.soldAmount, quotaData.targetCurrency)} of a ${formatMoney(quota.quotaAmount, quotaData.targetCurrency)} quota; expected by today is ${formatMoney(quota.expectedAmount, quotaData.targetCurrency)}`}
+                  >
+                    <div
+                      className={onPace ? "commissions-quota__fill commissions-quota__fill--on" : "commissions-quota__fill"}
+                      style={{ width: `${fillPct}%` }}
+                    />
+                    <div className="commissions-quota__marker" style={{ left: `${expectedPct}%` }} />
+                  </div>
+                  <div className="commissions-quota__details">
+                    <span>Sold <strong>{formatCompactMoney(quota.soldAmount, quotaData.targetCurrency)}</strong></span>
+                    <span>Expected <strong>{formatCompactMoney(quota.expectedAmount, quotaData.targetCurrency)}</strong></span>
+                    <span>Quota <strong>{formatCompactMoney(quota.quotaAmount, quotaData.targetCurrency)}</strong></span>
+                    <span>{quota.dealCount} closed-won deal{quota.dealCount === 1 ? "" : "s"}</span>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {quotaData?.warnings.length ? (
+          <div className="commissions-quota__warnings">
+            {quotaData.warnings.map((warning) => <div key={warning}>{warning}</div>)}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="stripe-ui__panel ui-reveal ui-reveal-2">
         <h2 className="stripe-ui__panel-title">Report month</h2>
         <p className="stripe-ui__panel-subtitle">
           Gross commissions are booked in the deal close month. Clawbacks appear in the Stripe churn or downgrade

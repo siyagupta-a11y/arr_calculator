@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test:access": "node --experimental-strip-types --test tests/accessRoles.test.mjs",
-    "test:commissions": "node --experimental-strip-types --test tests/commissions.test.mjs"
+    "test:commissions": "node --experimental-strip-types --test tests/commissions.test.mjs",
+    "test:quota": "node --experimental-strip-types --test tests/salesQuotaRules.test.mjs"
   },
   "dependencies": {
     "@vercel/blob": "^2.3.1",
