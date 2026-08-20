@@ -160,6 +160,8 @@ export async function generateSalesQuotaReport(options?: {
   const totals = new Map<string, { soldAmount: number; dealCount: number }>(
     SALES_QUOTA_CONFIGS.map((config) => [config.ownerKey, { soldAmount: 0, dealCount: 0 }]),
   );
+  const teamMonthTotal = { soldAmount: 0, dealCount: 0 };
+  const teamMonthPeriod = salesQuotaPeriod(asOfDate, "monthly");
   const warnings = new Set<string>();
   const fxCache = new Map<string, Promise<number>>();
 
@@ -210,6 +212,10 @@ export async function generateSalesQuotaReport(options?: {
     const total = totals.get(ownerKey)!;
     total.soldAmount += amount;
     total.dealCount += 1;
+    if (closeDate >= teamMonthPeriod.periodStart) {
+      teamMonthTotal.soldAmount += amount;
+      teamMonthTotal.dealCount += 1;
+    }
   }
 
   const quotas = SALES_QUOTA_CONFIGS.map((config) => {
@@ -221,10 +227,14 @@ export async function generateSalesQuotaReport(options?: {
     asOfDate,
     targetCurrency,
     generatedAt: new Date().toISOString(),
-    teamQuota: calculateTeamSalesQuotaProgress(quotas),
+    teamQuota: calculateTeamSalesQuotaProgress(
+      asOfDate,
+      teamMonthTotal.soldAmount,
+      teamMonthTotal.dealCount,
+    ),
     quotas,
     warnings: Array.from(warnings),
     methodology:
-      "Closed-won New Business and approved-rep Existing Business HubSpot deal amounts from the Sales and Transactional pipelines, converted to the target currency by close month. Monthly quotas reset on the 1st; quarterly quotas reset on the first day of the calendar quarter.",
+      "Closed-won New Business and approved-rep Existing Business HubSpot deal amounts from the Sales and Transactional pipelines, converted to the target currency by close month. The team bar is monthly and uses one third of quarterly quotas; individual quarterly bars remain quarter-to-date.",
   };
 }

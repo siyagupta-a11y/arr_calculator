@@ -232,7 +232,11 @@ export default function CommissionsPage() {
         {quotaData ? (
           <div className="commissions-quota__list">
             {[
-              { quota: quotaData.teamQuota, periodLabel: "Quota-weighted monthly + quarterly team total", isTeam: true },
+              {
+                quota: quotaData.teamQuota,
+                periodLabel: quotaPeriodLabel(quotaData.teamQuota).replace("Monthly ·", "Monthly team total ·"),
+                isTeam: true,
+              },
               ...quotaData.quotas.map((quota) => ({ quota, periodLabel: quotaPeriodLabel(quota), isTeam: false })),
             ].map(({ quota, periodLabel, isTeam }: { quota: QuotaChartRow; periodLabel: string; isTeam: boolean }) => {
               const fillPct = Math.min(100, Math.max(0, quota.attainmentPct));

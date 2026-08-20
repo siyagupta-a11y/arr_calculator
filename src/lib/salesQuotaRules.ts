@@ -20,16 +20,10 @@ export type SalesQuotaProgress = SalesQuotaConfig & {
   dealCount: number;
 };
 
-export type TeamSalesQuotaProgress = {
+export type TeamSalesQuotaProgress = SalesQuotaProgress & {
   ownerKey: "team";
   ownerName: "Total team";
-  asOfDate: string;
-  quotaAmount: number;
-  soldAmount: number;
-  expectedAmount: number;
-  attainmentPct: number;
-  expectedPct: number;
-  dealCount: number;
+  cadence: "monthly";
 };
 
 export const SALES_QUOTA_CONFIGS: SalesQuotaConfig[] = [
@@ -38,6 +32,11 @@ export const SALES_QUOTA_CONFIGS: SalesQuotaConfig[] = [
   { ownerKey: "felipe", ownerName: "Felipe", quotaAmount: 80_000, cadence: "monthly" },
   { ownerKey: "evan", ownerName: "Evan", quotaAmount: 399_000, cadence: "quarterly" },
 ];
+
+export const TEAM_MONTHLY_QUOTA_AMOUNT = SALES_QUOTA_CONFIGS.reduce(
+  (sum, config) => sum + config.quotaAmount / (config.cadence === "quarterly" ? 3 : 1),
+  0,
+);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -108,26 +107,19 @@ export function calculateSalesQuotaProgress(
 }
 
 export function calculateTeamSalesQuotaProgress(
-  quotas: SalesQuotaProgress[],
+  asOfDate: string,
+  soldAmount: number,
+  dealCount: number,
 ): TeamSalesQuotaProgress {
-  const totals = quotas.reduce(
-    (acc, quota) => ({
-      quotaAmount: acc.quotaAmount + Math.max(0, Number(quota.quotaAmount || 0)),
-      soldAmount: acc.soldAmount + Math.max(0, Number(quota.soldAmount || 0)),
-      expectedAmount: acc.expectedAmount + Math.max(0, Number(quota.expectedAmount || 0)),
-      dealCount: acc.dealCount + Math.max(0, Math.floor(Number(quota.dealCount || 0))),
-    }),
-    { quotaAmount: 0, soldAmount: 0, expectedAmount: 0, dealCount: 0 },
-  );
-  return {
-    ownerKey: "team",
-    ownerName: "Total team",
-    asOfDate: quotas[0]?.asOfDate || "",
-    quotaAmount: round2(totals.quotaAmount),
-    soldAmount: round2(totals.soldAmount),
-    expectedAmount: round2(totals.expectedAmount),
-    attainmentPct: totals.quotaAmount > 0 ? round2((totals.soldAmount / totals.quotaAmount) * 100) : 0,
-    expectedPct: totals.quotaAmount > 0 ? round2((totals.expectedAmount / totals.quotaAmount) * 100) : 0,
-    dealCount: totals.dealCount,
-  };
+  return calculateSalesQuotaProgress(
+    {
+      ownerKey: "team",
+      ownerName: "Total team",
+      quotaAmount: TEAM_MONTHLY_QUOTA_AMOUNT,
+      cadence: "monthly",
+    },
+    asOfDate,
+    soldAmount,
+    dealCount,
+  ) as TeamSalesQuotaProgress;
 }

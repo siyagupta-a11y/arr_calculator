@@ -4,6 +4,7 @@ import {
   calculateSalesQuotaProgress,
   calculateTeamSalesQuotaProgress,
   salesQuotaPeriod,
+  TEAM_MONTHLY_QUOTA_AMOUNT,
 } from "../src/lib/salesQuotaRules.ts";
 
 test("prorates a monthly quota through the current day", () => {
@@ -49,27 +50,18 @@ test("calendar-quarter boundaries reset in October", () => {
   });
 });
 
-test("team attainment is weighted by each rep's active quota period", () => {
-  const luca = calculateSalesQuotaProgress(
-    { ownerKey: "luca", ownerName: "Luca", quotaAmount: 65_000, cadence: "monthly" },
-    "2026-08-20",
-    32_500,
-    2,
-  );
-  const evan = calculateSalesQuotaProgress(
-    { ownerKey: "evan", ownerName: "Evan", quotaAmount: 399_000, cadence: "quarterly" },
-    "2026-08-20",
-    250_000,
-    4,
-  );
-  const team = calculateTeamSalesQuotaProgress([luca, evan]);
+test("team attainment uses the monthly quota including one third of Evan's quarterly quota", () => {
+  const team = calculateTeamSalesQuotaProgress("2026-08-20", 171_500, 6);
 
-  assert.equal(team.quotaAmount, 464_000);
-  assert.equal(team.soldAmount, 282_500);
-  assert.equal(team.expectedAmount, 263_120.26);
-  assert.equal(team.attainmentPct, 60.88);
-  assert.equal(team.expectedPct, 56.71);
+  assert.equal(TEAM_MONTHLY_QUOTA_AMOUNT, 343_000);
+  assert.equal(team.quotaAmount, 343_000);
+  assert.equal(team.soldAmount, 171_500);
+  assert.equal(team.expectedAmount, 221_290.32);
+  assert.equal(team.attainmentPct, 50);
+  assert.equal(team.expectedPct, 64.52);
   assert.equal(team.dealCount, 6);
+  assert.equal(team.periodStart, "2026-08-01");
+  assert.equal(team.periodEnd, "2026-08-31");
 });
 
 test("rejects invalid as-of dates", () => {
