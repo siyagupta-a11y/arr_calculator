@@ -17,7 +17,7 @@ export async function POST(request: Request) {
 
   try {
     const body = (await request.json()) as CommissionReportRequest;
-    const cacheKey = `api:commissions:${stableStringify(body)}`;
+    const cacheKey = `api:commissions:v2:${stableStringify(body)}`;
     const report = await getOrSetCache(cacheKey, CACHE_TTL_MS, () => generateCommissionReport(body));
     return NextResponse.json(report);
   } catch (error: unknown) {

@@ -80,6 +80,15 @@ export type CommissionOwnerGroup = {
   deals: CommissionDealRow[];
 };
 
+export type CommissionWarningDeal = {
+  dealId: string;
+  dealName: string;
+  hubspotUrl: string;
+  ownerName: string;
+  closeDate: string;
+  workspaceId: string;
+};
+
 export type CommissionReportResponse = {
   month: string;
   monthLabel: string;
@@ -95,6 +104,9 @@ export type CommissionReportResponse = {
   };
   owners: CommissionOwnerGroup[];
   warnings: string[];
+  warningDetails: {
+    unmappedStripeCustomerDeals: CommissionWarningDeal[];
+  };
   methodology: {
     includedPipelines: string[];
     dealTypes: string[];
@@ -1004,7 +1016,19 @@ export async function generateCommissionReport(request: CommissionReportRequest)
     { ownerCount: 0, dealCount: 0, dealAmount: 0, grossCommission: 0, clawback: 0, netCommission: 0 },
   );
 
-  if (preparedDeals.some((deal) => deal.workspaceId && !deal.stripeCustomerIds.length)) {
+  const unmappedStripeCustomerDeals = preparedDeals
+    .filter((deal) => deal.workspaceId && !deal.stripeCustomerIds.length)
+    .map((deal) => ({
+      dealId: deal.dealId,
+      dealName: deal.dealName,
+      hubspotUrl: hubspotDealUrl(deal.dealId),
+      ownerName: ownerDisplayName(ownersById.get(deal.ownerId), deal.ownerId),
+      closeDate: deal.closeDate.slice(0, 10),
+      workspaceId: deal.workspaceId,
+    }))
+    .sort((a, b) => b.closeDate.localeCompare(a.closeDate) || a.dealName.localeCompare(b.dealName));
+
+  if (unmappedStripeCustomerDeals.length) {
     warnings.add("Some deals have no Stripe customer match for their primary workspace ID; those deals remain payable but cannot be clawback-checked.");
   }
   if (preparedDeals.some((deal) => !deal.workspaceId)) {
@@ -1019,6 +1043,9 @@ export async function generateCommissionReport(request: CommissionReportRequest)
     totals,
     owners,
     warnings: Array.from(warnings),
+    warningDetails: {
+      unmappedStripeCustomerDeals,
+    },
     methodology: {
       includedPipelines: pipelines.map((pipeline) => pipeline.name),
       dealTypes: ["New Business", "Existing Business for approved reps"],

@@ -410,6 +410,7 @@ textarea:focus-visible {
 
 .commissions-quota__details {
   display: flex;
+  align-items: flex-start;
   flex-wrap: wrap;
   gap: 0.35rem 1rem;
   margin-top: 0.58rem;
@@ -420,6 +421,17 @@ textarea:focus-visible {
 .commissions-quota__details strong {
   color: #dfeaff;
   font-weight: 700;
+}
+
+.commissions-quota__sold-detail {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+
+.commissions-quota__sold-detail small {
+  color: #728bb2;
+  font-size: 0.65rem;
 }
 
 .commissions-quota__error {
@@ -436,6 +448,62 @@ textarea:focus-visible {
   color: #f6d28f;
   padding: 0.65rem 0.72rem;
   font-size: 0.76rem;
+}
+
+.commissions-warning {
+  margin-top: 1rem;
+  border: 1px solid #74572b;
+  background: #2c210e;
+  color: #f6d28f;
+  padding: 0.68rem 0.75rem;
+  font-size: 0.78rem;
+}
+
+.commissions-warning__toggle {
+  min-height: 1.8rem;
+  margin-top: 0.58rem;
+  border: 1px solid #9a7738;
+  background: #3a2a10;
+  color: #ffe2a7;
+  padding: 0.28rem 0.52rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.commissions-warning__toggle:hover:not(:disabled) {
+  border-color: #d1a552;
+}
+
+.commissions-warning__deal-list {
+  max-height: 18rem;
+  margin-top: 0.6rem;
+  overflow-y: auto;
+  border: 1px solid #5f4824;
+  background: #1d160b;
+}
+
+.commissions-warning__deal {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.52rem 0.62rem;
+  border-bottom: 1px solid #49371c;
+}
+
+.commissions-warning__deal:last-child {
+  border-bottom: 0;
+}
+
+.commissions-warning__deal a {
+  color: #ffe0a0;
+  font-weight: 700;
+}
+
+.commissions-warning__deal span {
+  color: #c9a96d;
+  font-size: 0.69rem;
+  text-align: right;
 }
 
 .stripe-ui__control-grid {
@@ -861,5 +929,13 @@ textarea:focus-visible {
   .commissions-quota__attainment {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .commissions-warning__deal {
+    flex-direction: column;
+  }
+
+  .commissions-warning__deal span {
+    text-align: left;
   }
 }

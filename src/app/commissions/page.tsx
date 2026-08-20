@@ -78,6 +78,7 @@ export default function CommissionsPage() {
   const [quotaData, setQuotaData] = useState<SalesQuotaReportResponse | null>(null);
   const [quotaLoading, setQuotaLoading] = useState(true);
   const [quotaError, setQuotaError] = useState("");
+  const [showUnmappedDeals, setShowUnmappedDeals] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -123,6 +124,7 @@ export default function CommissionsPage() {
   const run = useCallback(async () => {
     setLoading(true);
     setError("");
+    setShowUnmappedDeals(false);
     try {
       const response = await fetch("/api/commissions", {
         method: "POST",
@@ -264,10 +266,12 @@ export default function CommissionsPage() {
                     <div className="commissions-quota__marker" style={{ left: `${expectedPct}%` }} />
                   </div>
                   <div className="commissions-quota__details">
-                    <span>Sold <strong>{formatCompactMoney(quota.soldAmount, quotaData.targetCurrency)}</strong></span>
+                    <span className="commissions-quota__sold-detail">
+                      <span>Sold <strong>{formatCompactMoney(quota.soldAmount, quotaData.targetCurrency)}</strong></span>
+                      <small>{quota.dealCount} closed-won deal{quota.dealCount === 1 ? "" : "s"}</small>
+                    </span>
                     <span>Expected <strong>{formatCompactMoney(quota.expectedAmount, quotaData.targetCurrency)}</strong></span>
                     <span>Quota <strong>{formatCompactMoney(quota.quotaAmount, quotaData.targetCurrency)}</strong></span>
-                    <span>{quota.dealCount} closed-won deal{quota.dealCount === 1 ? "" : "s"}</span>
                   </div>
                 </article>
               );
@@ -364,8 +368,33 @@ export default function CommissionsPage() {
               </article>
             </div>
             {data.warnings.length ? (
-              <div style={{ marginTop: 16, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "10px 12px" }}>
+              <div className="commissions-warning">
                 {data.warnings.map((warning) => <div key={warning}>{warning}</div>)}
+                {data.warningDetails.unmappedStripeCustomerDeals.length ? (
+                  <>
+                    <button
+                      className="commissions-warning__toggle"
+                      type="button"
+                      aria-expanded={showUnmappedDeals}
+                      aria-controls="unmapped-stripe-deals"
+                      onClick={() => setShowUnmappedDeals((visible) => !visible)}
+                    >
+                      {showUnmappedDeals ? "Hide list" : "See list"} ({data.warningDetails.unmappedStripeCustomerDeals.length})
+                    </button>
+                    {showUnmappedDeals ? (
+                      <div className="commissions-warning__deal-list" id="unmapped-stripe-deals">
+                        {data.warningDetails.unmappedStripeCustomerDeals.map((deal) => (
+                          <div className="commissions-warning__deal" key={deal.dealId}>
+                            <a href={deal.hubspotUrl} target="_blank" rel="noreferrer">{deal.dealName}</a>
+                            <span>
+                              {deal.ownerName} · Closed {deal.closeDate} · Workspace {deal.workspaceId}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
               </div>
             ) : null}
           </section>
