@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CommissionDealRow, CommissionReportResponse } from "@/lib/commissionsReport";
-import type { SalesQuotaProgress } from "@/lib/salesQuotaRules";
+import type { SalesQuotaProgress, TeamSalesQuotaProgress } from "@/lib/salesQuotaRules";
 import type { SalesQuotaReportResponse } from "@/lib/salesQuotaReport";
 
 function currentMonth() {
@@ -48,6 +48,8 @@ function quotaPeriodLabel(quota: SalesQuotaProgress) {
   const end = formatDate(quota.periodEnd, { month: "short", day: "numeric", year: "numeric" });
   return `${quota.cadence === "quarterly" ? "Quarterly" : "Monthly"} · ${start}–${end}`;
 }
+
+type QuotaChartRow = SalesQuotaProgress | TeamSalesQuotaProgress;
 
 function statusLabel(row: CommissionDealRow) {
   if (row.status === "clawback") {
@@ -227,21 +229,26 @@ export default function CommissionsPage() {
 
         {quotaData ? (
           <div className="commissions-quota__list">
-            {quotaData.quotas.map((quota) => {
-              const onPace = quota.soldAmount >= quota.expectedAmount;
+            {[
+              { quota: quotaData.teamQuota, periodLabel: "Quota-weighted monthly + quarterly team total", isTeam: true },
+              ...quotaData.quotas.map((quota) => ({ quota, periodLabel: quotaPeriodLabel(quota), isTeam: false })),
+            ].map(({ quota, periodLabel, isTeam }: { quota: QuotaChartRow; periodLabel: string; isTeam: boolean }) => {
               const fillPct = Math.min(100, Math.max(0, quota.attainmentPct));
               const expectedPct = Math.min(100, Math.max(0, quota.expectedPct));
               return (
-                <article className="commissions-quota__row" key={quota.ownerKey}>
+                <article
+                  className={isTeam ? "commissions-quota__row commissions-quota__row--team" : "commissions-quota__row"}
+                  key={quota.ownerKey}
+                >
                   <div className="commissions-quota__row-heading">
                     <div>
                       <div className="commissions-quota__owner">{quota.ownerName}</div>
-                      <div className="commissions-quota__period">{quotaPeriodLabel(quota)}</div>
+                      <div className="commissions-quota__period">{periodLabel}</div>
                     </div>
                     <div className="commissions-quota__attainment">
                       <strong>{quota.attainmentPct.toFixed(1)}%</strong>
-                      <span className={onPace ? "commissions-quota__pace commissions-quota__pace--on" : "commissions-quota__pace"}>
-                        {onPace ? "On pace" : "Behind pace"}
+                      <span className="commissions-quota__expected-pct">
+                        Should be {quota.expectedPct.toFixed(1)}%
                       </span>
                     </div>
                   </div>
@@ -251,7 +258,7 @@ export default function CommissionsPage() {
                     aria-label={`${quota.ownerName} has sold ${formatMoney(quota.soldAmount, quotaData.targetCurrency)} of a ${formatMoney(quota.quotaAmount, quotaData.targetCurrency)} quota; expected by today is ${formatMoney(quota.expectedAmount, quotaData.targetCurrency)}`}
                   >
                     <div
-                      className={onPace ? "commissions-quota__fill commissions-quota__fill--on" : "commissions-quota__fill"}
+                      className={isTeam ? "commissions-quota__fill commissions-quota__fill--team" : "commissions-quota__fill"}
                       style={{ width: `${fillPct}%` }}
                     />
                     <div className="commissions-quota__marker" style={{ left: `${expectedPct}%` }} />

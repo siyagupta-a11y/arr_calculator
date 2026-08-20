@@ -7,10 +7,12 @@ import {
 import { parseDate, toNumber } from "@/lib/logic";
 import { shouldIncludeCommissionDeal } from "@/lib/commissionRules";
 import {
+  calculateTeamSalesQuotaProgress,
   calculateSalesQuotaProgress,
   SALES_QUOTA_CONFIGS,
   salesQuotaPeriod,
   type SalesQuotaProgress,
+  type TeamSalesQuotaProgress,
 } from "@/lib/salesQuotaRules";
 import type { HubspotDeal } from "@/lib/types";
 
@@ -18,6 +20,7 @@ export type SalesQuotaReportResponse = {
   asOfDate: string;
   targetCurrency: string;
   generatedAt: string;
+  teamQuota: TeamSalesQuotaProgress;
   quotas: SalesQuotaProgress[];
   warnings: string[];
   methodology: string;
@@ -209,14 +212,17 @@ export async function generateSalesQuotaReport(options?: {
     total.dealCount += 1;
   }
 
+  const quotas = SALES_QUOTA_CONFIGS.map((config) => {
+    const total = totals.get(config.ownerKey)!;
+    return calculateSalesQuotaProgress(config, asOfDate, total.soldAmount, total.dealCount);
+  });
+
   return {
     asOfDate,
     targetCurrency,
     generatedAt: new Date().toISOString(),
-    quotas: SALES_QUOTA_CONFIGS.map((config) => {
-      const total = totals.get(config.ownerKey)!;
-      return calculateSalesQuotaProgress(config, asOfDate, total.soldAmount, total.dealCount);
-    }),
+    teamQuota: calculateTeamSalesQuotaProgress(quotas),
+    quotas,
     warnings: Array.from(warnings),
     methodology:
       "Closed-won New Business and approved-rep Existing Business HubSpot deal amounts from the Sales and Transactional pipelines, converted to the target currency by close month. Monthly quotas reset on the 1st; quarterly quotas reset on the first day of the calendar quarter.",

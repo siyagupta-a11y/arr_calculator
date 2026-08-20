@@ -20,6 +20,18 @@ export type SalesQuotaProgress = SalesQuotaConfig & {
   dealCount: number;
 };
 
+export type TeamSalesQuotaProgress = {
+  ownerKey: "team";
+  ownerName: "Total team";
+  asOfDate: string;
+  quotaAmount: number;
+  soldAmount: number;
+  expectedAmount: number;
+  attainmentPct: number;
+  expectedPct: number;
+  dealCount: number;
+};
+
 export const SALES_QUOTA_CONFIGS: SalesQuotaConfig[] = [
   { ownerKey: "luca", ownerName: "Luca", quotaAmount: 65_000, cadence: "monthly" },
   { ownerKey: "tyler", ownerName: "Tyler", quotaAmount: 65_000, cadence: "monthly" },
@@ -92,5 +104,30 @@ export function calculateSalesQuotaProgress(
     attainmentPct: quotaAmount > 0 ? round2((normalizedSold / quotaAmount) * 100) : 0,
     expectedPct: round2(expectedPct),
     dealCount: Math.max(0, Math.floor(Number(dealCount || 0))),
+  };
+}
+
+export function calculateTeamSalesQuotaProgress(
+  quotas: SalesQuotaProgress[],
+): TeamSalesQuotaProgress {
+  const totals = quotas.reduce(
+    (acc, quota) => ({
+      quotaAmount: acc.quotaAmount + Math.max(0, Number(quota.quotaAmount || 0)),
+      soldAmount: acc.soldAmount + Math.max(0, Number(quota.soldAmount || 0)),
+      expectedAmount: acc.expectedAmount + Math.max(0, Number(quota.expectedAmount || 0)),
+      dealCount: acc.dealCount + Math.max(0, Math.floor(Number(quota.dealCount || 0))),
+    }),
+    { quotaAmount: 0, soldAmount: 0, expectedAmount: 0, dealCount: 0 },
+  );
+  return {
+    ownerKey: "team",
+    ownerName: "Total team",
+    asOfDate: quotas[0]?.asOfDate || "",
+    quotaAmount: round2(totals.quotaAmount),
+    soldAmount: round2(totals.soldAmount),
+    expectedAmount: round2(totals.expectedAmount),
+    attainmentPct: totals.quotaAmount > 0 ? round2((totals.soldAmount / totals.quotaAmount) * 100) : 0,
+    expectedPct: totals.quotaAmount > 0 ? round2((totals.expectedAmount / totals.quotaAmount) * 100) : 0,
+    dealCount: totals.dealCount,
   };
 }

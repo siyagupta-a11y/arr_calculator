@@ -18,7 +18,7 @@ export async function GET() {
   try {
     const targetCurrency = "USD";
     const report = await getOrSetCache(
-      `api:commissions:quota:${targetCurrency}`,
+      `api:commissions:quota:v2:${targetCurrency}`,
       CACHE_TTL_MS,
       () => generateSalesQuotaReport({ targetCurrency }),
     );

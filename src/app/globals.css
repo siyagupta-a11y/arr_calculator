@@ -316,6 +316,13 @@ textarea:focus-visible {
   padding: 0.8rem;
 }
 
+.commissions-quota__row--team {
+  margin-bottom: 0.18rem;
+  border-color: #4c73ab;
+  background: #101f36;
+  box-shadow: inset 3px 0 0 #63a8ff;
+}
+
 .commissions-quota__row-heading {
   display: flex;
   align-items: flex-start;
@@ -348,21 +355,15 @@ textarea:focus-visible {
   font-size: 1rem;
 }
 
-.commissions-quota__pace {
-  border: 1px solid #925c32;
-  background: #38200f;
-  color: #ffc88a;
+.commissions-quota__expected-pct {
+  border: 1px solid #3d6091;
+  background: #11233f;
+  color: #cce0ff;
   padding: 0.2rem 0.38rem;
   font-size: 0.67rem;
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-}
-
-.commissions-quota__pace--on {
-  border-color: #246c68;
-  background: #0b302f;
-  color: #8af1e8;
 }
 
 .commissions-quota__track {
@@ -381,8 +382,8 @@ textarea:focus-visible {
   transition: width 360ms ease;
 }
 
-.commissions-quota__fill--on {
-  background: linear-gradient(90deg, #15706b 0%, #36c8bc 100%);
+.commissions-quota__fill--team {
+  background: linear-gradient(90deg, #2c69b8 0%, #66adff 100%);
 }
 
 .commissions-quota__marker {

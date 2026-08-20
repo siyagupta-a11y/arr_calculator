@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   calculateSalesQuotaProgress,
+  calculateTeamSalesQuotaProgress,
   salesQuotaPeriod,
 } from "../src/lib/salesQuotaRules.ts";
 
@@ -46,6 +47,29 @@ test("calendar-quarter boundaries reset in October", () => {
     elapsedDays: 1,
     totalDays: 92,
   });
+});
+
+test("team attainment is weighted by each rep's active quota period", () => {
+  const luca = calculateSalesQuotaProgress(
+    { ownerKey: "luca", ownerName: "Luca", quotaAmount: 65_000, cadence: "monthly" },
+    "2026-08-20",
+    32_500,
+    2,
+  );
+  const evan = calculateSalesQuotaProgress(
+    { ownerKey: "evan", ownerName: "Evan", quotaAmount: 399_000, cadence: "quarterly" },
+    "2026-08-20",
+    250_000,
+    4,
+  );
+  const team = calculateTeamSalesQuotaProgress([luca, evan]);
+
+  assert.equal(team.quotaAmount, 464_000);
+  assert.equal(team.soldAmount, 282_500);
+  assert.equal(team.expectedAmount, 263_120.26);
+  assert.equal(team.attainmentPct, 60.88);
+  assert.equal(team.expectedPct, 56.71);
+  assert.equal(team.dealCount, 6);
 });
 
 test("rejects invalid as-of dates", () => {
