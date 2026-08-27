@@ -862,6 +862,231 @@ textarea:focus-visible {
   font-size: 0.77rem;
 }
 
+.account-management__team {
+  border-color: #4f8df9;
+  background:
+    radial-gradient(circle at top right, rgba(79, 141, 249, 0.16), transparent 32%),
+    var(--stripe-panel);
+}
+
+.account-management__owner-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.account-management__nrr {
+  min-width: 136px;
+  padding: 0.78rem 0.9rem;
+  border: 1px solid #35537f;
+  background: #0a1529;
+  text-align: right;
+}
+
+.account-management__nrr--team {
+  border-color: #4f8df9;
+  background: rgba(79, 141, 249, 0.12);
+}
+
+.account-management__nrr span {
+  display: block;
+  color: #91acd1;
+  font-size: 0.69rem;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.account-management__nrr strong {
+  display: block;
+  margin-top: 0.12rem;
+  color: #eef6ff;
+  font-size: clamp(1.75rem, 3vw, 2.45rem);
+  line-height: 1;
+}
+
+.account-management__stats {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-bottom: 1rem;
+}
+
+.account-management__deals {
+  display: grid;
+  gap: 0.25rem;
+  max-width: 340px;
+  white-space: normal;
+}
+
+.account-management__deals a,
+.account-management__owner a {
+  color: #8fbcff;
+}
+
+.account-management__muted {
+  margin-top: 0.2rem;
+  color: #7894bc;
+  font-size: 0.72rem;
+}
+
+.account-management__status {
+  display: inline-flex;
+  padding: 0.2rem 0.48rem;
+  border: 1px solid #35537f;
+  color: #c9ddf8;
+  background: #10213c;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.account-management__status--positive {
+  border-color: #2b8060;
+  color: #8be6bb;
+  background: rgba(31, 193, 107, 0.12);
+}
+
+.account-management__status--negative {
+  border-color: #8f3f52;
+  color: #ffabb8;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.account-management__status--neutral {
+  border-color: #7d6730;
+  color: #f0cd73;
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.account-management__methodology {
+  max-width: 1050px;
+  color: #b7cce8;
+  line-height: 1.65;
+}
+
+.account-management__methodology p {
+  margin: 0.45rem 0;
+}
+
+.migration__summary {
+  border-color: #7c5ce5;
+  background:
+    radial-gradient(circle at top right, rgba(124, 92, 229, 0.18), transparent 34%),
+    var(--stripe-panel);
+}
+
+.migration__as-of {
+  color: #9eb8df;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.migration__headline-stats {
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+}
+
+.migration__headline-stat {
+  border-color: #4e3a89;
+  background: rgba(31, 24, 54, 0.7);
+}
+
+.migration__headline-stat--month {
+  border-color: #2b6b70;
+  background: rgba(20, 184, 166, 0.08);
+}
+
+.migration__source-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.migration__source-card {
+  padding: 1rem;
+  border: 1px solid #2a456f;
+  background: #091427;
+}
+
+.migration__source-card h3 {
+  margin: 0 0 0.8rem;
+  color: #e7f0ff;
+  font-size: 1rem;
+}
+
+.migration__source-card div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.42rem 0;
+  border-top: 1px solid #1c3152;
+}
+
+.migration__source-card span {
+  color: #8fa9ce;
+  font-size: 0.76rem;
+}
+
+.migration__source-card strong {
+  color: #e2edff;
+}
+
+.migration__month-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.migration__month-row {
+  display: grid;
+  grid-template-columns: 120px minmax(160px, 1fr) 130px;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.migration__month-label {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.migration__month-label strong {
+  color: #e2edff;
+  font-size: 0.82rem;
+}
+
+.migration__month-label span {
+  color: #819dc5;
+  font-size: 0.7rem;
+}
+
+.migration__month-track {
+  height: 0.72rem;
+  border: 1px solid #2c476f;
+  background: #081222;
+}
+
+.migration__month-track div {
+  height: 100%;
+  min-width: 0;
+  background: linear-gradient(90deg, #6f4fe1, #2fb3d2);
+}
+
+.migration__month-amount {
+  color: #e2edff;
+  font-size: 0.82rem;
+  text-align: right;
+}
+
+.migration__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 @media (max-width: 1200px) {
   .stripe-ui {
     padding: 0.9rem;
@@ -937,5 +1162,33 @@ textarea:focus-visible {
 
   .commissions-warning__deal span {
     text-align: left;
+  }
+
+  .account-management__owner-heading {
+    flex-direction: column;
+  }
+
+  .account-management__nrr {
+    width: 100%;
+    text-align: left;
+  }
+
+  .migration__headline-stats,
+  .migration__source-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .migration__month-row {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
+  }
+
+  .migration__month-amount {
+    text-align: left;
+  }
+
+  .migration__error {
+    flex-direction: column;
+    align-items: stretch;
   }
 }

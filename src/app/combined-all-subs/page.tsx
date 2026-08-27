@@ -458,6 +458,12 @@ export default function CombinedAllSubsPage() {
             <Link href="/metrics-assistant" className="stripe-ui__hero-link">
               Open Metrics Assistant (Under maintenance, do not use)
             </Link>
+            <Link href="/account-management" className="stripe-ui__hero-link">
+              Open Account Management
+            </Link>
+            <Link href="/migration" className="stripe-ui__hero-link">
+              Open Migration
+            </Link>
             <Link href="/access-control" className="stripe-ui__hero-link">
               Open Access Control
             </Link>

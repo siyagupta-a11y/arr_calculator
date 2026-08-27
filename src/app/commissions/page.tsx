@@ -186,6 +186,12 @@ export default function CommissionsPage() {
               <Link href="/hubspot" className="stripe-ui__hero-link">
                 Open HubSpot report
               </Link>
+              <Link href="/account-management" className="stripe-ui__hero-link">
+                Open Account Management
+              </Link>
+              <Link href="/migration" className="stripe-ui__hero-link">
+                Open Migration
+              </Link>
             </div>
           ) : null}
         </div>

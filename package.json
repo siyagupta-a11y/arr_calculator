@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "test:access": "node --experimental-strip-types --test tests/accessRoles.test.mjs",
+    "test:account-management": "node --experimental-strip-types --test tests/accountManagementRules.test.mjs",
     "test:commissions": "node --experimental-strip-types --test tests/commissions.test.mjs",
+    "test:migration": "node --experimental-strip-types --test tests/migrationRules.test.mjs",
     "test:quota": "node --experimental-strip-types --test tests/salesQuotaRules.test.mjs"
   },
   "dependencies": {
