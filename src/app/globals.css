@@ -970,6 +970,38 @@ textarea:focus-visible {
   margin: 0.45rem 0;
 }
 
+.migration__filters-panel {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1.25rem;
+}
+
+.migration__filters-panel > div {
+  max-width: 700px;
+}
+
+.migration__filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.migration__filter-field {
+  display: grid;
+  gap: 0.32rem;
+  min-width: 175px;
+}
+
+.migration__filter-field span {
+  color: #acc2e5;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
 .migration__goal {
   border-color: #2e7e76;
   background:
@@ -1206,6 +1238,11 @@ textarea:focus-visible {
     gap: 0.5rem;
   }
 
+  .migration__filters-panel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .stripe-ui__table {
     min-width: 650px;
   }
@@ -1260,6 +1297,11 @@ textarea:focus-visible {
   .migration__headline-stats,
   .migration__source-grid {
     grid-template-columns: 1fr;
+  }
+
+  .migration__filters,
+  .migration__filter-field {
+    width: 100%;
   }
 
   .migration__month-row {

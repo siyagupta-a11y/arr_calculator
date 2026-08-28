@@ -72,6 +72,11 @@ function errorMessage(raw: string) {
   return value.replaceAll("_", " ");
 }
 
+function roleLabel(role: AppRole) {
+  if (role === "account_management") return "Account Management";
+  return role.charAt(0).toUpperCase() + role.slice(1);
+}
+
 export default async function AccessControlPage(props: { searchParams: AccessControlSearchParams }) {
   const searchParams = await props.searchParams;
   const { email: currentEmail, isAdmin, policy } = await requireAdminUser();
@@ -79,6 +84,7 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
   const error = errorMessage(String(searchParams.error || ""));
   const adminSet = new Set(policy.adminEmails);
   const salesSet = new Set(policy.salesEmails);
+  const accountManagementSet = new Set(policy.accountManagementEmails);
 
   if (!isAdmin) {
     return (
@@ -123,7 +129,7 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Add Access Email</h2>
         <p className="stripe-ui__panel-subtitle">
-          Viewers can access the standard dashboards, Sales users can access only Commissions, and Admins can access everything.
+          Viewers can access the standard dashboards, Sales users can access only Commissions, Account Management users can access only Migration, and Admins can access everything.
         </p>
         {updated ? (
           <p style={{ color: "#166534", background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 8, padding: "10px 12px" }}>
@@ -149,6 +155,7 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
             <select className="stripe-ui__control" name="role" defaultValue="viewer">
               <option value="viewer">Viewer</option>
               <option value="sales">Sales</option>
+              <option value="account_management">Account Management</option>
               <option value="admin">Admin</option>
             </select>
           </label>
@@ -161,7 +168,7 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
       <section className="stripe-ui__panel ui-reveal ui-reveal-2">
         <h2 className="stripe-ui__panel-title">Allowed Emails</h2>
         <p className="stripe-ui__panel-subtitle">
-          Sales users are restricted to the Commissions page and its data. Required admins cannot be changed or removed.
+          Sales users are restricted to Commissions; Account Management users are restricted to Migration. Required admins cannot be changed or removed.
         </p>
         <div className="stripe-ui__table-wrap">
           <table className="stripe-ui__table">
@@ -175,12 +182,18 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
             <tbody>
               {policy.allowedEmails.map((email) => {
                 const isRowAdmin = adminSet.has(email);
-                const role: AppRole = isRowAdmin ? "admin" : salesSet.has(email) ? "sales" : "viewer";
+                const role: AppRole = isRowAdmin
+                  ? "admin"
+                  : salesSet.has(email)
+                    ? "sales"
+                    : accountManagementSet.has(email)
+                      ? "account_management"
+                      : "viewer";
                 const isRequired = REQUIRED_ADMINS.has(email);
                 return (
                   <tr key={email}>
                     <td>{email}</td>
-                    <td style={{ textTransform: "capitalize" }}>{role}</td>
+                    <td>{roleLabel(role)}</td>
                     <td>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         <form action={setEmailRoleAction} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -188,6 +201,7 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
                           <select className="stripe-ui__control" name="role" defaultValue={role} disabled={isRequired}>
                             <option value="viewer">Viewer</option>
                             <option value="sales">Sales</option>
+                            <option value="account_management">Account Management</option>
                             <option value="admin">Admin</option>
                           </select>
                           <button type="submit" className="stripe-ui__btn" disabled={isRequired}>

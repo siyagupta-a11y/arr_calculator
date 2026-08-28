@@ -4,6 +4,19 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MigrationReportResponse } from "@/lib/migrationReport";
 
+const MIN_MIGRATION_DATE = "2026-04-01";
+
+function todayInToronto() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Toronto",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = new Map(parts.map((part) => [part.type, part.value]));
+  return `${values.get("year")}-${values.get("month")}-${values.get("day")}`;
+}
+
 function formatMoney(value: number, currency: string) {
   try {
     return new Intl.NumberFormat("en-US", {
@@ -37,12 +50,19 @@ export default function MigrationPage() {
   const [data, setData] = useState<MigrationReportResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [startDate, setStartDate] = useState(MIN_MIGRATION_DATE);
+  const [endDate, setEndDate] = useState(() => todayInToronto());
+  const [appliedStartDate, setAppliedStartDate] = useState(MIN_MIGRATION_DATE);
+  const [appliedEndDate, setAppliedEndDate] = useState(() => todayInToronto());
+  const [sessionRole, setSessionRole] = useState("");
+  const maximumDate = todayInToronto();
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (nextStartDate: string, nextEndDate: string) => {
     setLoading(true);
     setError("");
     try {
-      const response = await fetch("/api/migration", { cache: "no-store" });
+      const query = new URLSearchParams({ startDate: nextStartDate, endDate: nextEndDate });
+      const response = await fetch(`/api/migration?${query.toString()}`, { cache: "no-store" });
       const text = await response.text();
       const payload = text ? (JSON.parse(text) as MigrationReportResponse & { error?: string }) : null;
       if (!response.ok) throw new Error(payload?.error || text || `HTTP ${response.status}`);
@@ -57,8 +77,43 @@ export default function MigrationPage() {
   }, []);
 
   useEffect(() => {
-    void load();
+    let active = true;
+    const initialEndDate = todayInToronto();
+    void load(MIN_MIGRATION_DATE, initialEndDate);
+    const loadSession = async () => {
+      try {
+        const response = await fetch("/api/auth/session", { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = (await response.json()) as { user?: { role?: string } };
+        if (active) setSessionRole(String(payload.user?.role || "").trim().toLowerCase());
+      } catch {
+        if (active) setSessionRole("");
+      }
+    };
+    void loadSession();
+    return () => {
+      active = false;
+    };
   }, [load]);
+
+  function applyDateRange(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (startDate < MIN_MIGRATION_DATE) {
+      setError(`Start date cannot be before ${MIN_MIGRATION_DATE}.`);
+      return;
+    }
+    if (endDate < startDate) {
+      setError("End date must be on or after the start date.");
+      return;
+    }
+    if (endDate > maximumDate) {
+      setError("End date cannot be after today.");
+      return;
+    }
+    setAppliedStartDate(startDate);
+    setAppliedEndDate(endDate);
+    void load(startDate, endDate);
+  }
 
   const maxMonthlyArr = useMemo(
     () => Math.max(1, ...(data?.months || []).map((month) => month.arrMigrated)),
@@ -76,12 +131,52 @@ export default function MigrationPage() {
               Customers and ARR migrated from V2/V3 to V4 plans since April 2026, combining Stripe BigQuery and closed-won HubSpot Sales Default Pipeline deals.
             </p>
           </div>
-          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <Link href="/account-management" className="stripe-ui__hero-link">Open Account Management</Link>
-            <Link href="/hubspot" className="stripe-ui__hero-link">Open HubSpot report</Link>
-            <Link href="/combined-all-subs" className="stripe-ui__hero-link">Open Combined All Subs</Link>
-          </div>
+          {sessionRole && sessionRole !== "account_management" ? (
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <Link href="/account-management" className="stripe-ui__hero-link">Open Account Management</Link>
+              <Link href="/hubspot" className="stripe-ui__hero-link">Open HubSpot report</Link>
+              <Link href="/combined-all-subs" className="stripe-ui__hero-link">Open Combined All Subs</Link>
+            </div>
+          ) : null}
         </div>
+      </section>
+
+      <section className="stripe-ui__panel migration__filters-panel ui-reveal ui-reveal-1">
+        <div>
+          <h2 className="stripe-ui__panel-title">Reporting range</h2>
+          <p className="stripe-ui__panel-subtitle">
+            Defaults to the fiscal-year start through today. Dates can begin on or after April 1, 2026.
+          </p>
+        </div>
+        <form className="migration__filters" onSubmit={applyDateRange}>
+          <label className="migration__filter-field">
+            <span>Start date</span>
+            <input
+              className="stripe-ui__control"
+              type="date"
+              value={startDate}
+              min={MIN_MIGRATION_DATE}
+              max={endDate || maximumDate}
+              onChange={(event) => setStartDate(event.target.value)}
+              required
+            />
+          </label>
+          <label className="migration__filter-field">
+            <span>End date</span>
+            <input
+              className="stripe-ui__control"
+              type="date"
+              value={endDate}
+              min={startDate || MIN_MIGRATION_DATE}
+              max={maximumDate}
+              onChange={(event) => setEndDate(event.target.value)}
+              required
+            />
+          </label>
+          <button className="stripe-ui__btn stripe-ui__btn--primary" type="submit" disabled={loading}>
+            {loading ? "Loading…" : "Apply range"}
+          </button>
+        </form>
       </section>
 
       {loading ? (
@@ -100,7 +195,7 @@ export default function MigrationPage() {
         <section className="stripe-ui__panel ui-reveal ui-reveal-1">
           <div className="stripe-ui__error migration__error">
             <span>{error}</span>
-            <button className="stripe-ui__btn stripe-ui__btn--secondary" type="button" onClick={() => void load()}>
+            <button className="stripe-ui__btn stripe-ui__btn--secondary" type="button" onClick={() => void load(appliedStartDate, appliedEndDate)}>
               Retry
             </button>
           </div>
@@ -117,12 +212,12 @@ export default function MigrationPage() {
                   Targeting 70% of the V2/V3 customers active at the start of {formatDate(data.fiscalYearStart)}, by {formatDate(data.fiscalYearEnd)}.
                 </p>
               </div>
-              <span className="migration__as-of">As of {formatDate(data.asOfDate)}</span>
+              <span className="migration__as-of">Range ends {formatDate(data.rangeEnd)}</span>
             </div>
 
             <div className="stripe-ui__stats migration__goal-stats">
               <article className="stripe-ui__stat migration__goal-stat migration__goal-stat--current">
-                <p className="stripe-ui__stat-label">Currently on V2/V3</p>
+                <p className="stripe-ui__stat-label">On V2/V3 at range end</p>
                 <p className="stripe-ui__stat-value">{formatNumber(data.goal.currentLegacyCustomers, 0)}</p>
                 <p className="migration__stat-note">{formatMoney(data.goal.currentLegacyArr, data.targetCurrency)} base-plan ARR</p>
               </article>
@@ -172,7 +267,7 @@ export default function MigrationPage() {
               </article>
               <article className="migration__goal-progress migration__goal-progress--month">
                 <div className="migration__goal-progress-head">
-                  <span>This month’s customers</span>
+                  <span>Range-end month customers</span>
                   <strong>{data.currentMonth.logosMigrated} / {formatNumber(data.goal.monthlyCustomerTarget)}</strong>
                 </div>
                 <div className="migration__goal-track"><div style={{ width: progressWidth(data.goal.currentMonthCustomerProgressPct) }} /></div>
@@ -180,7 +275,7 @@ export default function MigrationPage() {
               </article>
               <article className="migration__goal-progress migration__goal-progress--month">
                 <div className="migration__goal-progress-head">
-                  <span>This month’s ARR</span>
+                  <span>Range-end month ARR</span>
                   <strong>{formatMoney(data.currentMonth.arrMigrated, data.targetCurrency)} / {formatMoney(data.goal.monthlyArrTarget, data.targetCurrency)}</strong>
                 </div>
                 <div className="migration__goal-track"><div style={{ width: progressWidth(data.goal.currentMonthArrProgressPct) }} /></div>
@@ -194,26 +289,26 @@ export default function MigrationPage() {
               <div>
                 <h2 className="stripe-ui__panel-title">Migration totals</h2>
                 <p className="stripe-ui__panel-subtitle">
-                  Fiscal year from {formatDate(data.fiscalYearStart)} through {formatDate(data.asOfDate)}.
+                  Selected range from {formatDate(data.rangeStart)} through {formatDate(data.rangeEnd)}.
                 </p>
               </div>
-              <span className="migration__as-of">As of {formatDate(data.asOfDate)}</span>
+              <span className="migration__as-of">{formatDate(data.rangeStart)} – {formatDate(data.rangeEnd)}</span>
             </div>
             <div className="stripe-ui__stats migration__headline-stats">
               <article className="stripe-ui__stat migration__headline-stat">
-                <p className="stripe-ui__stat-label">Fiscal-year ARR migrated</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.fiscalYear.arrMigrated, data.targetCurrency)}</p>
+                <p className="stripe-ui__stat-label">Selected-range ARR migrated</p>
+                <p className="stripe-ui__stat-value">{formatMoney(data.selectedRange.arrMigrated, data.targetCurrency)}</p>
               </article>
               <article className="stripe-ui__stat migration__headline-stat">
-                <p className="stripe-ui__stat-label">Fiscal-year logos migrated</p>
-                <p className="stripe-ui__stat-value">{data.fiscalYear.logosMigrated}</p>
+                <p className="stripe-ui__stat-label">Selected-range logos migrated</p>
+                <p className="stripe-ui__stat-value">{data.selectedRange.logosMigrated}</p>
               </article>
               <article className="stripe-ui__stat migration__headline-stat migration__headline-stat--month">
-                <p className="stripe-ui__stat-label">Current-month ARR migrated</p>
+                <p className="stripe-ui__stat-label">Range-end month ARR migrated</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.currentMonth.arrMigrated, data.targetCurrency)}</p>
               </article>
               <article className="stripe-ui__stat migration__headline-stat migration__headline-stat--month">
-                <p className="stripe-ui__stat-label">Current-month logos migrated</p>
+                <p className="stripe-ui__stat-label">Range-end month logos migrated</p>
                 <p className="stripe-ui__stat-value">{data.currentMonth.logosMigrated}</p>
               </article>
             </div>
@@ -234,11 +329,11 @@ export default function MigrationPage() {
                   <article className="migration__source-card" key={source.source}>
                     <h3>{source.sourceLabel}</h3>
                     <div><span>Opening V2/V3 customers</span><strong>{population?.opening.customers || 0}</strong></div>
-                    <div><span>Current V2/V3 customers</span><strong>{population?.current.customers || 0}</strong></div>
-                    <div><span>Fiscal-year ARR migrated</span><strong>{formatMoney(source.fiscalYear.arrMigrated, data.targetCurrency)}</strong></div>
-                    <div><span>Fiscal-year logos migrated</span><strong>{source.fiscalYear.logosMigrated}</strong></div>
-                    <div><span>Current-month ARR</span><strong>{formatMoney(source.currentMonth.arrMigrated, data.targetCurrency)}</strong></div>
-                    <div><span>Current-month logos</span><strong>{source.currentMonth.logosMigrated}</strong></div>
+                    <div><span>V2/V3 customers at range end</span><strong>{population?.current.customers || 0}</strong></div>
+                    <div><span>Selected-range ARR migrated</span><strong>{formatMoney(source.selectedRange.arrMigrated, data.targetCurrency)}</strong></div>
+                    <div><span>Selected-range logos migrated</span><strong>{source.selectedRange.logosMigrated}</strong></div>
+                    <div><span>Range-end month ARR</span><strong>{formatMoney(source.currentMonth.arrMigrated, data.targetCurrency)}</strong></div>
+                    <div><span>Range-end month logos</span><strong>{source.currentMonth.logosMigrated}</strong></div>
                   </article>
                 );
               })}
@@ -247,7 +342,7 @@ export default function MigrationPage() {
 
           <section className="stripe-ui__panel ui-reveal">
             <h2 className="stripe-ui__panel-title">Monthly migration pace</h2>
-            <p className="stripe-ui__panel-subtitle">ARR and customer logos migrated in each fiscal-year month.</p>
+            <p className="stripe-ui__panel-subtitle">ARR and customer logos migrated in each month of the selected range.</p>
             <div className="migration__month-list">
               {data.months.map((month) => (
                 <article className="migration__month-row" key={month.monthKey}>
@@ -268,7 +363,7 @@ export default function MigrationPage() {
             <div className="stripe-ui__section-head">
               <div>
                 <h2 className="stripe-ui__panel-title">Migrated customers</h2>
-                <p className="stripe-ui__panel-subtitle">Each customer appears once at their first qualifying v4 plan activation.</p>
+                <p className="stripe-ui__panel-subtitle">Each customer appears once at their first qualifying V4 plan activation within the selected range.</p>
               </div>
               <span className="migration__as-of">{data.migrations.length} total</span>
             </div>
@@ -280,8 +375,10 @@ export default function MigrationPage() {
                     <th>Source</th>
                     <th>Migration date</th>
                     <th>Workspace</th>
+                    <th>Previous plan</th>
+                    <th>Plan at range end</th>
                     <th>Prior V2/V3 ARR</th>
-                    <th>v4 ARR migrated</th>
+                    <th>V4 ARR migrated</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -296,11 +393,13 @@ export default function MigrationPage() {
                       <td>{migration.source === "stripe" ? "Stripe / BigQuery" : "HubSpot"}</td>
                       <td>{formatDate(migration.migratedAt)}</td>
                       <td>{migration.workspaceId || "—"}</td>
+                      <td>{migration.previousPlan || "—"}</td>
+                      <td>{migration.currentPlan || "—"}</td>
                       <td>{formatMoney(migration.priorLegacyArr, data.targetCurrency)}</td>
                       <td>{formatMoney(migration.migratedV4Arr, data.targetCurrency)}</td>
                     </tr>
                   )) : (
-                    <tr><td colSpan={6}>No qualifying V2/V3-to-V4 migrations were found.</td></tr>
+                    <tr><td colSpan={8}>No qualifying V2/V3-to-V4 migrations were found in this range.</td></tr>
                   )}
                 </tbody>
               </table>

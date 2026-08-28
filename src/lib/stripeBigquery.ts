@@ -271,6 +271,8 @@ export type StripeLegacyToV4MigrationRow = {
   customerName: string;
   workspaceId: string;
   migratedAt: string;
+  previousPlan: string;
+  currentPlan: string;
   migratedArr: number;
   legacyArrBefore: number;
   v4ArrAfter: number;
@@ -4897,7 +4899,16 @@ classified_events AS (
       WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z0-9])v3([^a-z0-9]|$)') THEN 'v3'
       WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z0-9])v2([^a-z0-9]|$)') THEN 'v2'
       ELSE 'other'
-    END AS plan_version
+    END AS plan_version,
+    CASE
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])enterprise([^a-z]|$)') THEN 'Enterprise'
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])managed([^a-z]|$)') THEN 'Managed'
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])team([^a-z]|$)') THEN 'Team'
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])plus([^a-z]|$)') THEN 'Plus'
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])(pay\\s*as\\s*you\\s*go|payg)([^a-z]|$)') THEN 'Pay As You Go'
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])free([^a-z]|$)') THEN 'Free'
+      ELSE 'Plan'
+    END AS plan_name
   FROM described_events
   WHERE
     REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])(enterprise|managed|team|plus|pay\\s*as\\s*you\\s*go|payg|free)([^a-z]|$)')
@@ -4946,6 +4957,57 @@ migration_candidates AS (
     AND db.v4_after_mrr > 1e-9
   QUALIFY ROW_NUMBER() OVER (PARTITION BY db.customer_id ORDER BY db.event_date ASC) = 1
 ),
+plan_balances_at_migration AS (
+  SELECT
+    mc.customer_id,
+    mc.migrated_at,
+    ce.plan_version,
+    ce.plan_name,
+    SUM(IF(DATE(ce.event_timestamp) < mc.migrated_at, ce.mrr_change_major, 0.0)) AS before_mrr,
+    SUM(ce.mrr_change_major) AS current_mrr
+  FROM migration_candidates mc
+  JOIN classified_events ce
+    ON ce.customer_id = mc.customer_id
+  GROUP BY mc.customer_id, mc.migrated_at, ce.plan_version, ce.plan_name
+),
+migration_plan_labels AS (
+  SELECT
+    customer_id,
+    COALESCE(
+      STRING_AGG(
+        DISTINCT IF(
+          plan_version IN ('v2', 'v3') AND before_mrr > 1e-9,
+          CONCAT(plan_name, ' (', UPPER(plan_version), ')'),
+          NULL
+        ),
+        ' + '
+        ORDER BY IF(
+          plan_version IN ('v2', 'v3') AND before_mrr > 1e-9,
+          CONCAT(plan_name, ' (', UPPER(plan_version), ')'),
+          NULL
+        )
+      ),
+      'V2/V3 plan'
+    ) AS previous_plan,
+    COALESCE(
+      STRING_AGG(
+        DISTINCT IF(
+          plan_version IN ('v2', 'v3', 'v4') AND current_mrr > 1e-9,
+          CONCAT(plan_name, ' (', UPPER(plan_version), ')'),
+          NULL
+        ),
+        ' + '
+        ORDER BY IF(
+          plan_version IN ('v2', 'v3', 'v4') AND current_mrr > 1e-9,
+          CONCAT(plan_name, ' (', UPPER(plan_version), ')'),
+          NULL
+        )
+      ),
+      'No active plan'
+    ) AS current_plan
+  FROM plan_balances_at_migration
+  GROUP BY customer_id
+),
 customers_workspace_lookup AS (
   SELECT customer_id, workspace_id
   FROM (
@@ -4981,6 +5043,8 @@ SELECT
   COALESCE(NULLIF(cl.customer_name, ''), NULLIF(cl.customer_email, ''), mc.customer_id) AS customer_name,
   COALESCE(cwl.workspace_id, '') AS workspace_id,
   FORMAT_DATE('%Y-%m-%d', mc.migrated_at) AS migrated_at,
+  COALESCE(mpl.previous_plan, 'V2/V3 plan') AS previous_plan,
+  COALESCE(mpl.current_plan, 'No active plan') AS current_plan,
   ROUND(mc.v4_after_mrr * 12.0, 2) AS migrated_arr,
   ROUND(mc.legacy_before_mrr * 12.0, 2) AS legacy_arr_before,
   ROUND(mc.v4_after_mrr * 12.0, 2) AS v4_arr_after
@@ -4989,6 +5053,8 @@ LEFT JOIN customers_workspace_lookup cwl
   ON cwl.customer_id = mc.customer_id
 LEFT JOIN customers_lookup cl
   ON cl.customer_id = mc.customer_id
+LEFT JOIN migration_plan_labels mpl
+  ON mpl.customer_id = mc.customer_id
 ORDER BY mc.migrated_at DESC, customer_name ASC
 `;
 
@@ -5007,6 +5073,8 @@ ORDER BY mc.migrated_at DESC, customer_name ASC
       customerName: asString(row.customer_name),
       workspaceId: asString(row.workspace_id),
       migratedAt: asString(row.migrated_at),
+      previousPlan: asString(row.previous_plan),
+      currentPlan: asString(row.current_plan),
       migratedArr: asNumber(row.migrated_arr),
       legacyArrBefore: asNumber(row.legacy_arr_before),
       v4ArrAfter: asNumber(row.v4_arr_after),

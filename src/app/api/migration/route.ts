@@ -7,12 +7,22 @@ export const maxDuration = 300;
 
 const CACHE_TTL_MS = readTtlMs("API_MIGRATION_CACHE_TTL_MS", 5 * 60 * 1000);
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const report = await getOrSetCache("api:migration:v4", CACHE_TTL_MS, () => generateMigrationReport());
+    const url = new URL(request.url);
+    const startDate = String(url.searchParams.get("startDate") || "").trim();
+    const endDate = String(url.searchParams.get("endDate") || "").trim();
+    const cacheKey = `api:migration:v5:${startDate || "default"}:${endDate || "today"}`;
+    const report = await getOrSetCache(cacheKey, CACHE_TTL_MS, () => generateMigrationReport({
+      startDate: startDate || undefined,
+      endDate: endDate || undefined,
+    }));
     return NextResponse.json(report);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = message.startsWith("Invalid ") || message.startsWith("Migration reporting starts")
+      ? 400
+      : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }

@@ -4,6 +4,7 @@ import {
   calculateMigrationGoalMetrics,
   calculateMigrationMetrics,
   isHubspotMigrationUpsellType,
+  migrationPlanDisplayName,
   migrationPlanGeneration,
   migrationPlanVersion,
   migrationReportWindow,
@@ -12,22 +13,42 @@ import {
 test("uses an April fiscal-year start with an April 2026 reporting floor", () => {
   assert.deepEqual(migrationReportWindow("2026-08-27"), {
     asOfDate: "2026-08-27",
+    rangeStart: "2026-04-01",
+    rangeEnd: "2026-08-27",
     fiscalYearStart: "2026-04-01",
     fiscalYearEnd: "2027-03-31",
     currentMonthStart: "2026-08-01",
   });
   assert.deepEqual(migrationReportWindow("2027-02-03"), {
     asOfDate: "2027-02-03",
+    rangeStart: "2026-04-01",
+    rangeEnd: "2027-02-03",
     fiscalYearStart: "2026-04-01",
     fiscalYearEnd: "2027-03-31",
     currentMonthStart: "2027-02-01",
   });
   assert.deepEqual(migrationReportWindow("2027-04-01"), {
     asOfDate: "2027-04-01",
+    rangeStart: "2027-04-01",
+    rangeEnd: "2027-04-01",
     fiscalYearStart: "2027-04-01",
     fiscalYearEnd: "2028-03-31",
     currentMonthStart: "2027-04-01",
   });
+});
+
+test("supports a selected range beginning on or after April 2026", () => {
+  assert.deepEqual(migrationReportWindow("2026-08-27", "2026-06-15"), {
+    asOfDate: "2026-08-27",
+    rangeStart: "2026-06-15",
+    rangeEnd: "2026-08-27",
+    fiscalYearStart: "2026-04-01",
+    fiscalYearEnd: "2027-03-31",
+    currentMonthStart: "2026-08-01",
+  });
+  assert.deepEqual(migrationReportWindow("2026-08-27", "2026-08-20").currentMonthStart, "2026-08-20");
+  assert.throws(() => migrationReportWindow("2026-08-27", "2026-03-31"), /starts on 2026-04-01/);
+  assert.throws(() => migrationReportWindow("2026-08-27", "2026-08-28"), /on or before endDate/);
 });
 
 test("recognizes v4 plan lines and treats unversioned legacy plans as v3", () => {
@@ -40,6 +61,8 @@ test("recognizes v4 plan lines and treats unversioned legacy plans as v3", () =>
   assert.equal(migrationPlanVersion(["Plan - Team monthly (v2)"]), null);
   assert.equal(migrationPlanVersion(["Add-on - Conversation Sessions monthly (v4)"]), null);
   assert.equal(migrationPlanVersion(["AI Tokens (v4)"]), null);
+  assert.equal(migrationPlanDisplayName(["Plan - Team annual (v3)"], "v3"), "Team (V3)");
+  assert.equal(migrationPlanDisplayName(["Plus monthly v4"], "v4"), "Plus (V4)");
 });
 
 test("derives the 70 percent fiscal-year logo and ARR targets", () => {

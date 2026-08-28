@@ -53,7 +53,9 @@ export const authOptions: NextAuthOptions = {
         ? "admin"
         : policy.salesEmails.includes(email)
           ? "sales"
-          : "viewer";
+          : policy.accountManagementEmails.includes(email)
+            ? "account_management"
+            : "viewer";
       return token;
     },
     async session({ session, token }) {

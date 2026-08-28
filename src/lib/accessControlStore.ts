@@ -11,6 +11,7 @@ export type AccessControlPolicy = {
   allowedEmails: string[];
   adminEmails: string[];
   salesEmails: string[];
+  accountManagementEmails: string[];
   updatedAt: number;
 };
 
@@ -56,11 +57,16 @@ function bootstrapSalesEmails() {
   return parseCsvEmailSet(process.env.AUTH_SALES_EMAILS);
 }
 
+function bootstrapAccountManagementEmails() {
+  return parseCsvEmailSet(process.env.AUTH_ACCOUNT_MANAGEMENT_EMAILS);
+}
+
 function normalizePolicy(value: unknown): AccessControlPolicy {
   const parsed = value && typeof value === "object" ? (value as Partial<AccessControlPolicy>) : {};
   const allowedSet = new Set<string>();
   const adminSet = new Set<string>();
   const salesSet = new Set<string>();
+  const accountManagementSet = new Set<string>();
 
   for (const email of parsed.allowedEmails || []) {
     const normalized = normalizeEmail(email);
@@ -74,6 +80,10 @@ function normalizePolicy(value: unknown): AccessControlPolicy {
     const normalized = normalizeEmail(email);
     if (isValidEmail(normalized)) salesSet.add(normalized);
   }
+  for (const email of parsed.accountManagementEmails || []) {
+    const normalized = normalizeEmail(email);
+    if (isValidEmail(normalized)) accountManagementSet.add(normalized);
+  }
 
   for (const email of bootstrapAdminEmails()) {
     adminSet.add(email);
@@ -86,18 +96,28 @@ function normalizePolicy(value: unknown): AccessControlPolicy {
     salesSet.add(email);
     allowedSet.add(email);
   }
+  for (const email of bootstrapAccountManagementEmails()) {
+    accountManagementSet.add(email);
+    allowedSet.add(email);
+  }
 
   for (const email of adminSet) {
     salesSet.delete(email);
+    accountManagementSet.delete(email);
     allowedSet.add(email);
   }
-  for (const email of salesSet) allowedSet.add(email);
+  for (const email of salesSet) {
+    accountManagementSet.delete(email);
+    allowedSet.add(email);
+  }
+  for (const email of accountManagementSet) allowedSet.add(email);
 
   return {
     version: 1,
     allowedEmails: Array.from(allowedSet).sort((a, b) => a.localeCompare(b)),
     adminEmails: Array.from(adminSet).sort((a, b) => a.localeCompare(b)),
     salesEmails: Array.from(salesSet).sort((a, b) => a.localeCompare(b)),
+    accountManagementEmails: Array.from(accountManagementSet).sort((a, b) => a.localeCompare(b)),
     updatedAt: Number(parsed.updatedAt || Date.now()),
   };
 }
@@ -217,17 +237,21 @@ export async function upsertAccessEmail(email: string, role: AppRole) {
   const allowed = new Set(loaded.policy.allowedEmails);
   const admins = new Set(loaded.policy.adminEmails);
   const sales = new Set(loaded.policy.salesEmails);
+  const accountManagement = new Set(loaded.policy.accountManagementEmails);
   const normalizedRole = normalizeAppRole(role);
   allowed.add(normalized);
   admins.delete(normalized);
   sales.delete(normalized);
+  accountManagement.delete(normalized);
   if (normalizedRole === "admin") admins.add(normalized);
   if (normalizedRole === "sales") sales.add(normalized);
+  if (normalizedRole === "account_management") accountManagement.add(normalized);
   return saveAccessControlPolicy({
     version: 1,
     allowedEmails: Array.from(allowed),
     adminEmails: Array.from(admins),
     salesEmails: Array.from(sales),
+    accountManagementEmails: Array.from(accountManagement),
     updatedAt: Date.now(),
   });
 }
@@ -245,11 +269,14 @@ export async function setEmailRole(email: string, role: AppRole) {
   const allowed = new Set(loaded.policy.allowedEmails);
   const admins = new Set(loaded.policy.adminEmails);
   const sales = new Set(loaded.policy.salesEmails);
+  const accountManagement = new Set(loaded.policy.accountManagementEmails);
   allowed.add(normalized);
   admins.delete(normalized);
   sales.delete(normalized);
+  accountManagement.delete(normalized);
   if (normalizedRole === "admin") admins.add(normalized);
   if (normalizedRole === "sales") sales.add(normalized);
+  if (normalizedRole === "account_management") accountManagement.add(normalized);
   for (const required of bootstrapAdminEmails()) admins.add(required);
   if (!admins.size) {
     throw new Error("Cannot remove the last admin");
@@ -259,6 +286,7 @@ export async function setEmailRole(email: string, role: AppRole) {
     allowedEmails: Array.from(allowed),
     adminEmails: Array.from(admins),
     salesEmails: Array.from(sales),
+    accountManagementEmails: Array.from(accountManagement),
     updatedAt: Date.now(),
   });
 }
@@ -276,9 +304,11 @@ export async function removeAccessEmail(email: string) {
   const allowed = new Set(loaded.policy.allowedEmails);
   const admins = new Set(loaded.policy.adminEmails);
   const sales = new Set(loaded.policy.salesEmails);
+  const accountManagement = new Set(loaded.policy.accountManagementEmails);
   allowed.delete(normalized);
   admins.delete(normalized);
   sales.delete(normalized);
+  accountManagement.delete(normalized);
   for (const required of requiredAdmins) {
     allowed.add(required);
     admins.add(required);
@@ -288,6 +318,7 @@ export async function removeAccessEmail(email: string) {
     allowedEmails: Array.from(allowed),
     adminEmails: Array.from(admins),
     salesEmails: Array.from(sales),
+    accountManagementEmails: Array.from(accountManagement),
     updatedAt: Date.now(),
   });
 }

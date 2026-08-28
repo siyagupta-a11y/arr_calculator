@@ -3,6 +3,8 @@ import type { NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
 import {
   canViewCommissions,
+  isAccountManagementAllowedApplicationPath,
+  isAccountManagementOnlyRole,
   isSalesAllowedApplicationPath,
   isSalesOnlyRole,
   normalizeAppRole,
@@ -65,6 +67,12 @@ export async function middleware(request: NextRequest) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
     return NextResponse.redirect(new URL("/commissions", request.nextUrl.origin));
+  }
+  if (isAccountManagementOnlyRole(role) && !isAccountManagementAllowedApplicationPath(pathname)) {
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    return NextResponse.redirect(new URL("/migration", request.nextUrl.origin));
   }
 
   const requiresAdminPage = matchesAnyPrefix(pathname, ADMIN_PAGE_PATH_PREFIXES);

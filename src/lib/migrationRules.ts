@@ -46,7 +46,7 @@ function isoDate(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
-export function migrationReportWindow(asOfDate: string) {
+export function migrationReportWindow(asOfDate: string, requestedStartDate?: string) {
   const asOf = parseIsoDate(asOfDate);
   if (!asOf) throw new Error("Invalid asOfDate; expected YYYY-MM-DD");
   const minimumStart = new Date(Date.UTC(2026, 3, 1));
@@ -58,10 +58,23 @@ export function migrationReportWindow(asOfDate: string) {
   const calculatedFiscalStart = new Date(Date.UTC(fiscalYearStartYear, 3, 1));
   const fiscalYearStart = calculatedFiscalStart < minimumStart ? minimumStart : calculatedFiscalStart;
   const fiscalYearEnd = new Date(Date.UTC(fiscalYearStart.getUTCFullYear() + 1, 2, 31));
-  const currentMonthStart = new Date(Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), 1));
+  const requestedStart = String(requestedStartDate || "").trim()
+    ? parseIsoDate(String(requestedStartDate || "").trim())
+    : fiscalYearStart;
+  if (!requestedStart) throw new Error("Invalid startDate; expected YYYY-MM-DD");
+  if (requestedStart.getTime() < minimumStart.getTime()) {
+    throw new Error("Migration reporting starts on 2026-04-01");
+  }
+  if (requestedStart.getTime() > asOf.getTime()) {
+    throw new Error("Migration startDate must be on or before endDate");
+  }
+  const calendarMonthStart = new Date(Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), 1));
+  const currentMonthStart = requestedStart > calendarMonthStart ? requestedStart : calendarMonthStart;
 
   return {
     asOfDate: isoDate(asOf),
+    rangeStart: isoDate(requestedStart),
+    rangeEnd: isoDate(asOf),
     fiscalYearStart: isoDate(fiscalYearStart),
     fiscalYearEnd: isoDate(fiscalYearEnd),
     currentMonthStart: isoDate(currentMonthStart),
@@ -99,6 +112,18 @@ export function migrationPlanGeneration(
   if (/(^|[^a-z0-9])v2([^a-z0-9]|$)/.test(normalized)) return "v2";
   if (/(^|[^a-z0-9])v1([^a-z0-9]|$)/.test(normalized)) return null;
   return unversionedPlanVersion;
+}
+
+export function migrationPlanDisplayName(values: string[], generation: MigrationPlanGeneration) {
+  const normalized = normalizedWords(values);
+  let planName = "Plan";
+  if (/\benterprise\b/.test(normalized)) planName = "Enterprise";
+  else if (/\bmanaged\b/.test(normalized)) planName = "Managed";
+  else if (/\bteam\b/.test(normalized)) planName = "Team";
+  else if (/\bplus\b/.test(normalized)) planName = "Plus";
+  else if (/\b(pay\s+as\s+you\s+go|payg)\b/.test(normalized)) planName = "Pay As You Go";
+  else if (/\bfree\b/.test(normalized)) planName = "Free";
+  return `${planName} (${generation.toUpperCase()})`;
 }
 
 export function migrationPlanVersion(
