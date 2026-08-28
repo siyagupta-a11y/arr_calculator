@@ -6,16 +6,29 @@ import {
   fetchDealsInStage,
   fetchLineItemIdsForDeals,
 } from "@/lib/hubspot";
-import { computeCalculatedArrForLineItem, FX_TARGET_CURRENCY, LI_PROPS, parseDate, round2 } from "@/lib/logic";
 import {
+  computeCalculatedArrForLineItem,
+  computeWindowForLineItem,
+  FX_TARGET_CURRENCY,
+  LI_PROPS,
+  parseDate,
+  round2,
+} from "@/lib/logic";
+import {
+  calculateMigrationGoalMetrics,
   calculateMigrationMetrics,
   isHubspotMigrationUpsellType,
-  migrationPlanVersion,
+  migrationPlanGeneration,
   migrationReportWindow,
+  type LegacyPopulationSummary,
+  type MigrationGoalMetrics,
+  type MigrationPlanGeneration,
 } from "@/lib/migrationRules";
 import {
-  queryStripeV3ToV4MigrationsFromBigQuery,
-  type StripeV3ToV4MigrationRow,
+  queryStripeLegacyPlanPopulationFromBigQuery,
+  queryStripeLegacyToV4MigrationsFromBigQuery,
+  type StripeLegacyPlanPopulationResult,
+  type StripeLegacyToV4MigrationRow,
 } from "@/lib/stripeBigquery";
 import type { HubspotLineItem } from "@/lib/types";
 
@@ -29,7 +42,7 @@ export type MigrationDetailRow = {
   workspaceId: string;
   migratedAt: string;
   migratedArr: number;
-  priorV3Arr: number;
+  priorLegacyArr: number;
   migratedV4Arr: number;
   recordUrl: string;
 };
@@ -42,11 +55,20 @@ export type MigrationSummary = {
 export type MigrationReportResponse = {
   asOfDate: string;
   fiscalYearStart: string;
+  fiscalYearEnd: string;
   currentMonthStart: string;
   targetCurrency: string;
   generatedAt: string;
   fiscalYear: MigrationSummary;
   currentMonth: MigrationSummary;
+  goal: MigrationGoalMetrics & {
+    sourcePopulations: Array<{
+      source: MigrationSource;
+      sourceLabel: string;
+      opening: LegacyPopulationSummary;
+      current: LegacyPopulationSummary;
+    }>;
+  };
   sourceBreakdown: Array<{
     source: MigrationSource;
     sourceLabel: string;
@@ -78,8 +100,24 @@ type HubspotDealPlanRecord = {
   companyName: string;
   companyWorkspaceId: string;
   migrationUpsell: boolean;
+  v2Arr: number;
   v3Arr: number;
   v4Arr: number;
+};
+
+type HubspotPlanActivity = {
+  customerKey: string;
+  generation: MigrationPlanGeneration;
+  arr: number;
+  closeDate: string;
+  startDate: string;
+  endDate: string;
+};
+
+type HubspotMigrationResult = {
+  migrations: MigrationDetailRow[];
+  opening: LegacyPopulationSummary;
+  current: LegacyPopulationSummary;
 };
 
 function envValue(name: string, fallback: string) {
@@ -99,6 +137,36 @@ function todayInToronto() {
 
 function normalizedWorkspaceId(value: unknown) {
   return String(value || "").trim().toLowerCase();
+}
+
+function localDateKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function hubspotLegacyPopulation(activities: HubspotPlanActivity[], snapshotDate: string): LegacyPopulationSummary {
+  const balances = new Map<string, { legacyArr: number; v4Arr: number }>();
+  for (const activity of activities) {
+    if (
+      activity.closeDate > snapshotDate ||
+      activity.startDate > snapshotDate ||
+      activity.endDate < snapshotDate
+    ) {
+      continue;
+    }
+    const balance = balances.get(activity.customerKey) || { legacyArr: 0, v4Arr: 0 };
+    if (activity.generation === "v4") balance.v4Arr += activity.arr;
+    else balance.legacyArr += activity.arr;
+    balances.set(activity.customerKey, balance);
+  }
+
+  let customers = 0;
+  let arr = 0;
+  for (const balance of balances.values()) {
+    if (balance.legacyArr <= 0 || balance.v4Arr > 0) continue;
+    customers += 1;
+    arr += balance.legacyArr;
+  }
+  return { customers, arr: round2(arr) };
 }
 
 function lineItemDescriptions(lineItem: HubspotLineItem | undefined) {
@@ -157,7 +225,7 @@ async function generateHubspotMigrations(options: {
   targetCurrency: string;
   portalId: string;
   warnings: Set<string>;
-}): Promise<MigrationDetailRow[]> {
+}): Promise<HubspotMigrationResult> {
   const salesPipelineId = envValue("HUBSPOT_COMMISSION_SALES_PIPELINE_ID", DEFAULT_SALES_PIPELINE_ID);
   const closedWonStageId = envValue(
     "HUBSPOT_COMMISSION_SALES_CLOSED_WON_STAGE_ID",
@@ -169,7 +237,13 @@ async function generateHubspotMigrations(options: {
       closedWonStageId,
     )
   ).filter((deal) => String(deal.properties?.pipeline || "").trim() === salesPipelineId);
-  if (!deals.length) return [];
+  if (!deals.length) {
+    return {
+      migrations: [],
+      opening: { customers: 0, arr: 0 },
+      current: { customers: 0, arr: 0 },
+    };
+  }
 
   const dealIds = deals.map((deal) => String(deal.id || "").trim()).filter(Boolean);
   const [lineItemPairs, companyPairs] = await Promise.all([
@@ -191,6 +265,7 @@ async function generateHubspotMigrations(options: {
   }
 
   const dealPlanRecords: HubspotDealPlanRecord[] = [];
+  const planActivities: HubspotPlanActivity[] = [];
   const fxCache = new Map<string, Promise<number>>();
   async function fxRate(currency: string, closeDate: string) {
     if (currency === options.targetCurrency) return 1;
@@ -231,20 +306,37 @@ async function generateHubspotMigrations(options: {
 
     const dealName = String(deal.properties?.dealname || "").trim() || `Deal ${dealId}`;
     const migrationUpsell = isHubspotMigrationUpsellType(deal.properties?.upsell_type);
+    let v2Arr = 0;
     let v3Arr = 0;
     let v4Arr = 0;
     for (const lineItemId of lineItemIdsByDeal.get(dealId) || []) {
       const lineItem = lineItemsById.get(lineItemId);
-      const version = migrationPlanVersion(
-        lineItemDescriptions(lineItem),
+      const descriptions = lineItemDescriptions(lineItem);
+      const generation = migrationPlanGeneration(
+        descriptions,
         migrationUpsell ? "v4" : "v3",
       );
-      if (!version) continue;
+      if (!generation) continue;
       const arr = computeCalculatedArrForLineItem(lineItem?.properties || {});
-      if (version === "v4") v4Arr += arr * rate;
-      else v3Arr += arr * rate;
+      const convertedArr = round2(arr * rate);
+      if (convertedArr <= 0) continue;
+      if (generation === "v4") v4Arr += convertedArr;
+      else if (generation === "v3") v3Arr += convertedArr;
+      else v2Arr += convertedArr;
+
+      const activityWindow = computeWindowForLineItem(lineItem?.properties || {});
+      if (activityWindow) {
+        planActivities.push({
+          customerKey,
+          generation,
+          arr: convertedArr,
+          closeDate,
+          startDate: localDateKey(activityWindow.start),
+          endDate: localDateKey(activityWindow.end),
+        });
+      }
     }
-    if (v3Arr <= 0 && v4Arr <= 0) continue;
+    if (v2Arr <= 0 && v3Arr <= 0 && v4Arr <= 0) continue;
     dealPlanRecords.push({
       dealId,
       dealName,
@@ -256,6 +348,7 @@ async function generateHubspotMigrations(options: {
       companyName,
       companyWorkspaceId,
       migrationUpsell,
+      v2Arr: round2(v2Arr),
       v3Arr: round2(v3Arr),
       v4Arr: round2(v4Arr),
     });
@@ -270,7 +363,7 @@ async function generateHubspotMigrations(options: {
   const migrations: MigrationDetailRow[] = [];
   for (const records of recordsByCustomer.values()) {
     const sorted = records.slice().sort((a, b) => a.closeDate.localeCompare(b.closeDate) || a.dealId.localeCompare(b.dealId));
-    let historicalV3Arr = 0;
+    let historicalLegacyArr = 0;
     let migrationSeen = false;
     for (const record of sorted) {
       if (!migrationSeen && record.migrationUpsell && record.v4Arr > 0) {
@@ -285,20 +378,24 @@ async function generateHubspotMigrations(options: {
             workspaceId,
             migratedAt: record.closeDate,
             migratedArr: record.v4Arr,
-            priorV3Arr: round2(historicalV3Arr || record.v3Arr),
+            priorLegacyArr: round2(historicalLegacyArr || record.v2Arr + record.v3Arr),
             migratedV4Arr: record.v4Arr,
             recordUrl: hubspotRecordUrl(options.portalId, record.dealId),
           });
         }
       }
-      if (record.v3Arr > 0) historicalV3Arr = record.v3Arr;
+      if (record.v2Arr + record.v3Arr > 0) historicalLegacyArr = record.v2Arr + record.v3Arr;
     }
   }
 
-  return migrations;
+  return {
+    migrations,
+    opening: hubspotLegacyPopulation(planActivities, options.startDate),
+    current: hubspotLegacyPopulation(planActivities, options.endDate),
+  };
 }
 
-function stripeMigrationRow(row: StripeV3ToV4MigrationRow): MigrationDetailRow {
+function stripeMigrationRow(row: StripeLegacyToV4MigrationRow): MigrationDetailRow {
   return {
     migrationKey: `stripe:${row.customerId}`,
     source: "stripe",
@@ -307,7 +404,7 @@ function stripeMigrationRow(row: StripeV3ToV4MigrationRow): MigrationDetailRow {
     workspaceId: normalizedWorkspaceId(row.workspaceId),
     migratedAt: row.migratedAt,
     migratedArr: round2(row.migratedArr),
-    priorV3Arr: round2(row.v3ArrBefore),
+    priorLegacyArr: round2(row.legacyArrBefore),
     migratedV4Arr: round2(row.v4ArrAfter),
     recordUrl: stripeRecordUrl(row.customerId),
   };
@@ -319,11 +416,19 @@ export async function generateMigrationReport(options?: { asOfDate?: string }): 
   const portalId = String(process.env.HUBSPOT_PORTAL_ID || "20692578").trim() || "20692578";
   const warnings = new Set<string>();
 
-  const [stripeResult, hubspotResult] = await Promise.allSettled([
-    queryStripeV3ToV4MigrationsFromBigQuery(
+  const [stripeResult, stripePopulationResult, hubspotResult] = await Promise.allSettled([
+    queryStripeLegacyToV4MigrationsFromBigQuery(
       {
         startDate: window.fiscalYearStart,
         endDate: window.asOfDate,
+        targetCurrency,
+      },
+      { profile: "stripe_arr_correct" },
+    ),
+    queryStripeLegacyPlanPopulationFromBigQuery(
+      {
+        fiscalYearStart: window.fiscalYearStart,
+        asOfDate: window.asOfDate,
         targetCurrency,
       },
       { profile: "stripe_arr_correct" },
@@ -349,6 +454,15 @@ export async function generateMigrationReport(options?: { asOfDate?: string }): 
       }`,
     );
   }
+  if (stripePopulationResult.status === "rejected") {
+    warnings.add(
+      `Stripe / BigQuery V2/V3 population is temporarily unavailable: ${
+        stripePopulationResult.reason instanceof Error
+          ? stripePopulationResult.reason.message
+          : String(stripePopulationResult.reason)
+      }`,
+    );
+  }
   if (hubspotResult.status === "rejected") {
     warnings.add(
       `HubSpot migrations are temporarily unavailable: ${
@@ -358,7 +472,23 @@ export async function generateMigrationReport(options?: { asOfDate?: string }): 
   }
 
   const stripeRows = stripeResult.status === "fulfilled" ? stripeResult.value.rows : [];
-  const hubspotMigrations = hubspotResult.status === "fulfilled" ? hubspotResult.value : [];
+  const hubspotData: HubspotMigrationResult = hubspotResult.status === "fulfilled"
+    ? hubspotResult.value
+    : {
+        migrations: [],
+        opening: { customers: 0, arr: 0 },
+        current: { customers: 0, arr: 0 },
+      };
+  const stripePopulation: StripeLegacyPlanPopulationResult = stripePopulationResult.status === "fulfilled"
+    ? stripePopulationResult.value
+    : {
+        fiscalYearStart: window.fiscalYearStart,
+        asOfDate: window.asOfDate,
+        targetCurrency,
+        opening: { customers: 0, arr: 0 },
+        current: { customers: 0, arr: 0 },
+      };
+  const hubspotMigrations = hubspotData.migrations;
 
   const stripeMigrations = stripeRows.map(stripeMigrationRow);
 
@@ -367,6 +497,44 @@ export async function generateMigrationReport(options?: { asOfDate?: string }): 
   );
   const fiscalYear = calculateMigrationMetrics(migrations, window.fiscalYearStart, window.asOfDate);
   const currentMonth = calculateMigrationMetrics(migrations, window.currentMonthStart, window.asOfDate);
+  const sourcePopulations = [
+    {
+      source: "stripe" as const,
+      sourceLabel: "Stripe / BigQuery",
+      opening: stripePopulation.opening,
+      current: stripePopulation.current,
+    },
+    {
+      source: "hubspot" as const,
+      sourceLabel: "HubSpot Sales Default Pipeline",
+      opening: hubspotData.opening,
+      current: hubspotData.current,
+    },
+  ];
+  const openingPopulation = sourcePopulations.reduce<LegacyPopulationSummary>(
+    (total, source) => ({
+      customers: total.customers + source.opening.customers,
+      arr: round2(total.arr + source.opening.arr),
+    }),
+    { customers: 0, arr: 0 },
+  );
+  const currentPopulation = sourcePopulations.reduce<LegacyPopulationSummary>(
+    (total, source) => ({
+      customers: total.customers + source.current.customers,
+      arr: round2(total.arr + source.current.arr),
+    }),
+    { customers: 0, arr: 0 },
+  );
+  const goal = {
+    ...calculateMigrationGoalMetrics({
+      opening: openingPopulation,
+      current: currentPopulation,
+      fiscalYearMigrated: { customers: fiscalYear.logosMigrated, arr: fiscalYear.arrMigrated },
+      currentMonthMigrated: { customers: currentMonth.logosMigrated, arr: currentMonth.arrMigrated },
+      targetRatePct: 70,
+    }),
+    sourcePopulations,
+  };
   const sourceBreakdown = (["stripe", "hubspot"] as MigrationSource[]).map((source) => {
     const sourceRows = migrations.filter((row) => row.source === source);
     return {
@@ -393,20 +561,24 @@ export async function generateMigrationReport(options?: { asOfDate?: string }): 
   return {
     asOfDate: window.asOfDate,
     fiscalYearStart: window.fiscalYearStart,
+    fiscalYearEnd: window.fiscalYearEnd,
     currentMonthStart: window.currentMonthStart,
     targetCurrency,
     generatedAt: new Date().toISOString(),
     fiscalYear,
     currentMonth,
+    goal,
     sourceBreakdown,
     months,
     migrations,
     warnings: Array.from(warnings),
     methodology: [
-      "A customer is counted once, on the first day a v4 plan has positive ARR while that customer had positive v3 plan ARR immediately beforehand.",
+      "A Stripe customer is counted once, on the first day a V4 plan has positive ARR while that customer had positive V2 or V3 plan ARR immediately beforehand.",
       "Stripe results come from the Stripe data-pipeline subscription-item change events in BigQuery. Add-ons, AI tokens, conversation sessions, and web-search/crawl charges are excluded.",
       "HubSpot results independently use closed-won Sales Default Pipeline deals whose Upsell Type property is Migration. They do not require a matching Stripe customer; v4 ARR is annualized and converted using the HubSpot CARR report conventions.",
       "Stripe / BigQuery and HubSpot Sales Default Pipeline customers are counted as independent migration populations; neither source requires a matching record in the other.",
+      "The fiscal-year goal is 70% of customers on V2/V3 at the start of April 1. The logo target is rounded up to a whole customer and divided evenly across 12 months.",
+      "The ARR goal uses the opening V2/V3 customers' average base-plan ARR multiplied by the logo goal. Add-ons, AI tokens, conversation sessions, and web-search/crawl charges are excluded from the baseline and target.",
     ],
   };
 }

@@ -260,27 +260,47 @@ export type StripeThroughMrrCustomerPlanResult = {
   rows: StripeThroughMrrCustomerPlanRow[];
 };
 
-export type StripeV3ToV4MigrationRequest = {
+export type StripeLegacyToV4MigrationRequest = {
   startDate: string;
   endDate: string;
   targetCurrency: string;
 };
 
-export type StripeV3ToV4MigrationRow = {
+export type StripeLegacyToV4MigrationRow = {
   customerId: string;
   customerName: string;
   workspaceId: string;
   migratedAt: string;
   migratedArr: number;
-  v3ArrBefore: number;
+  legacyArrBefore: number;
   v4ArrAfter: number;
 };
 
-export type StripeV3ToV4MigrationResult = {
+export type StripeLegacyToV4MigrationResult = {
   startDate: string;
   endDate: string;
   targetCurrency: string;
-  rows: StripeV3ToV4MigrationRow[];
+  rows: StripeLegacyToV4MigrationRow[];
+};
+
+export type StripeLegacyPlanPopulationRequest = {
+  fiscalYearStart: string;
+  asOfDate: string;
+  targetCurrency: string;
+};
+
+export type StripeLegacyPlanPopulationResult = {
+  fiscalYearStart: string;
+  asOfDate: string;
+  targetCurrency: string;
+  opening: {
+    customers: number;
+    arr: number;
+  };
+  current: {
+    customers: number;
+    arr: number;
+  };
 };
 
 export type StripeBillingOverviewGrain = "daily" | "weekly" | "monthly" | "quarterly";
@@ -4759,10 +4779,10 @@ ORDER BY cbs.customer_key ASC, b.bucket_start ASC
   };
 }
 
-export async function queryStripeV3ToV4MigrationsFromBigQuery(
-  request: StripeV3ToV4MigrationRequest,
+export async function queryStripeLegacyToV4MigrationsFromBigQuery(
+  request: StripeLegacyToV4MigrationRequest,
   options?: StripeBigQueryOptions,
-): Promise<StripeV3ToV4MigrationResult> {
+): Promise<StripeLegacyToV4MigrationResult> {
   const startDate = parseIsoDateUtc(request.startDate);
   const endDate = parseIsoDateUtc(request.endDate);
   if (!startDate || !endDate || endDate.getTime() < startDate.getTime()) {
@@ -4875,6 +4895,7 @@ classified_events AS (
     CASE
       WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z0-9])v4([^a-z0-9]|$)') THEN 'v4'
       WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z0-9])v3([^a-z0-9]|$)') THEN 'v3'
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z0-9])v2([^a-z0-9]|$)') THEN 'v2'
       ELSE 'other'
     END AS plan_version
   FROM described_events
@@ -4886,7 +4907,7 @@ daily_plan_changes AS (
   SELECT
     customer_id,
     DATE(event_timestamp) AS event_date,
-    COALESCE(SUM(IF(plan_version = 'v3', mrr_change_major, 0.0)), 0.0) AS v3_delta_mrr,
+    COALESCE(SUM(IF(plan_version IN ('v2', 'v3'), mrr_change_major, 0.0)), 0.0) AS legacy_delta_mrr,
     COALESCE(SUM(IF(plan_version = 'v4', mrr_change_major, 0.0)), 0.0) AS v4_delta_mrr
   FROM classified_events
   GROUP BY customer_id, event_date
@@ -4895,13 +4916,13 @@ daily_balances AS (
   SELECT
     customer_id,
     event_date,
-    v3_delta_mrr,
+    legacy_delta_mrr,
     v4_delta_mrr,
-    SUM(v3_delta_mrr) OVER (
+    SUM(legacy_delta_mrr) OVER (
       PARTITION BY customer_id
       ORDER BY event_date
       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS v3_after_mrr,
+    ) AS legacy_after_mrr,
     SUM(v4_delta_mrr) OVER (
       PARTITION BY customer_id
       ORDER BY event_date
@@ -4913,14 +4934,14 @@ migration_candidates AS (
   SELECT
     db.customer_id,
     db.event_date AS migrated_at,
-    db.v3_after_mrr - db.v3_delta_mrr AS v3_before_mrr,
+    db.legacy_after_mrr - db.legacy_delta_mrr AS legacy_before_mrr,
     db.v4_after_mrr AS v4_after_mrr
   FROM daily_balances db
   CROSS JOIN bounds b
   WHERE
     db.event_date >= b.migration_start_date
     AND db.event_date <= b.migration_end_date
-    AND db.v3_after_mrr - db.v3_delta_mrr > 1e-9
+    AND db.legacy_after_mrr - db.legacy_delta_mrr > 1e-9
     AND db.v4_after_mrr - db.v4_delta_mrr <= 1e-9
     AND db.v4_after_mrr > 1e-9
   QUALIFY ROW_NUMBER() OVER (PARTITION BY db.customer_id ORDER BY db.event_date ASC) = 1
@@ -4961,7 +4982,7 @@ SELECT
   COALESCE(cwl.workspace_id, '') AS workspace_id,
   FORMAT_DATE('%Y-%m-%d', mc.migrated_at) AS migrated_at,
   ROUND(mc.v4_after_mrr * 12.0, 2) AS migrated_arr,
-  ROUND(mc.v3_before_mrr * 12.0, 2) AS v3_arr_before,
+  ROUND(mc.legacy_before_mrr * 12.0, 2) AS legacy_arr_before,
   ROUND(mc.v4_after_mrr * 12.0, 2) AS v4_arr_after
 FROM migration_candidates mc
 LEFT JOIN customers_workspace_lookup cwl
@@ -4987,9 +5008,215 @@ ORDER BY mc.migrated_at DESC, customer_name ASC
       workspaceId: asString(row.workspace_id),
       migratedAt: asString(row.migrated_at),
       migratedArr: asNumber(row.migrated_arr),
-      v3ArrBefore: asNumber(row.v3_arr_before),
+      legacyArrBefore: asNumber(row.legacy_arr_before),
       v4ArrAfter: asNumber(row.v4_arr_after),
     })),
+  };
+}
+
+export async function queryStripeLegacyPlanPopulationFromBigQuery(
+  request: StripeLegacyPlanPopulationRequest,
+  options?: StripeBigQueryOptions,
+): Promise<StripeLegacyPlanPopulationResult> {
+  const fiscalYearStart = parseIsoDateUtc(request.fiscalYearStart);
+  const asOfDate = parseIsoDateUtc(request.asOfDate);
+  if (!fiscalYearStart || !asOfDate || asOfDate.getTime() < fiscalYearStart.getTime()) {
+    throw new Error("Invalid fiscalYearStart/asOfDate");
+  }
+
+  const fiscalYearStartIso = fiscalYearStart.toISOString().slice(0, 10);
+  const asOfDateIso = asOfDate.toISOString().slice(0, 10);
+  const targetCurrency = String(request.targetCurrency || "usd").trim().toLowerCase() || "usd";
+  const profile = normalizeProfile(options?.profile || "stripe_arr_correct");
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const table = getStripeArrCorrectMrrChangeTable();
+  const productsTable = getStripeProductsTable(profile);
+  const pricesTable = getStripePricesTable(profile);
+  const customersMetadataTable = getStripeCustomersMetadataTable(profile);
+
+  const query = `
+WITH bounds AS (
+  SELECT
+    DATE(@fiscal_year_start) AS fiscal_year_start,
+    DATE_ADD(DATE(@as_of_date), INTERVAL 1 DAY) AS current_end_exclusive
+),
+products_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(id AS STRING)), ''), '(blank)') AS product_id,
+    MAX(COALESCE(NULLIF(TRIM(CAST(name AS STRING)), ''), '')) AS product_name,
+    MAX(COALESCE(NULLIF(TRIM(CAST(description AS STRING)), ''), '')) AS product_description
+  FROM \`${productsTable}\`
+  GROUP BY product_id
+),
+prices_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.id')), ''), '(blank)') AS price_id,
+    MAX(COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.nickname')), ''), '')) AS price_nickname,
+    MAX(COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.lookup_key')), ''), '')) AS price_lookup_key,
+    MAX(COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.metadata.version')), ''), '')) AS metadata_version,
+    MAX(COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.metadata.plan_version')), ''), '')) AS metadata_plan_version
+  FROM (
+    SELECT TO_JSON_STRING(p) AS raw_json
+    FROM \`${pricesTable}\` p
+  )
+  GROUP BY price_id
+),
+events_source AS (
+  SELECT
+    t.event_timestamp,
+    COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+    COALESCE(NULLIF(TRIM(CAST(t.product_id AS STRING)), ''), '(blank)') AS product_id,
+    CAST(COALESCE(t.mrr_change, 0) AS FLOAT64) / 100.0 AS mrr_change_major,
+    TO_JSON_STRING(t) AS raw_json
+  FROM \`${table}\` t
+  CROSS JOIN bounds b
+  WHERE
+    LOWER(COALESCE(CAST(t.currency AS STRING), '')) = @target_currency
+    AND t.event_timestamp < TIMESTAMP(b.current_end_exclusive)
+    AND COALESCE(NULLIF(TRIM(CAST(t.customer_id AS STRING)), ''), '(blank)') <> '(blank)'
+),
+described_events AS (
+  SELECT
+    es.event_timestamp,
+    es.customer_id,
+    es.mrr_change_major,
+    LOWER(
+      CONCAT(
+        ' ',
+        COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price_nickname')), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price_description')), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price_name')), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(pr.price_nickname), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(pr.price_lookup_key), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(pr.metadata_version), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(pr.metadata_plan_version), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product_name')), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(pl.product_name), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(pl.product_description), ''), ''),
+        ' '
+      )
+    ) AS plan_hints
+  FROM events_source es
+  LEFT JOIN products_lookup pl
+    ON pl.product_id = es.product_id
+  LEFT JOIN prices_lookup pr
+    ON pr.price_id = COALESCE(
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price')), ''),
+      '(blank)'
+    )
+),
+classified_events AS (
+  SELECT
+    event_timestamp,
+    customer_id,
+    mrr_change_major,
+    CASE
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z0-9])v4([^a-z0-9]|$)') THEN 'v4'
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z0-9])v3([^a-z0-9]|$)') THEN 'v3'
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z0-9])v2([^a-z0-9]|$)') THEN 'v2'
+      ELSE 'other'
+    END AS plan_version
+  FROM described_events
+  WHERE
+    REGEXP_CONTAINS(plan_hints, r'(^|[^a-z])(enterprise|managed|team|plus|pay\\s*as\\s*you\\s*go|payg|free)([^a-z]|$)')
+    AND NOT REGEXP_CONTAINS(plan_hints, r'add\\s*ons?|ai\\s+tokens?|conversation\\s+sessions?|web\\s+search\\s+and\\s+crawl')
+),
+customer_ids AS (
+  SELECT DISTINCT customer_id FROM classified_events
+),
+workspace_lookup AS (
+  SELECT customer_id, workspace_id
+  FROM (
+    SELECT
+      COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') AS customer_id,
+      LOWER(COALESCE(NULLIF(TRIM(CAST(m.value AS STRING)), ''), '')) AS workspace_id,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)')
+        ORDER BY COALESCE(NULLIF(TRIM(CAST(m.batch_timestamp AS STRING)), ''), '') DESC
+      ) AS rn
+    FROM \`${customersMetadataTable}\` m
+    WHERE
+      LOWER(COALESCE(NULLIF(TRIM(CAST(m.\`key\` AS STRING)), ''), '')) = 'workspace_id'
+      AND COALESCE(NULLIF(TRIM(CAST(m.customer_id AS STRING)), ''), '(blank)') IN (
+        SELECT customer_id FROM customer_ids
+      )
+  )
+  WHERE rn = 1
+),
+customer_balances AS (
+  SELECT
+    ce.customer_id,
+    COALESCE(NULLIF(wl.workspace_id, ''), CONCAT('customer:', ce.customer_id)) AS customer_key,
+    SUM(IF(
+      ce.event_timestamp < TIMESTAMP(b.fiscal_year_start) AND ce.plan_version IN ('v2', 'v3'),
+      ce.mrr_change_major,
+      0.0
+    )) AS opening_legacy_mrr,
+    SUM(IF(
+      ce.event_timestamp < TIMESTAMP(b.fiscal_year_start) AND ce.plan_version = 'v4',
+      ce.mrr_change_major,
+      0.0
+    )) AS opening_v4_mrr,
+    SUM(IF(ce.plan_version IN ('v2', 'v3'), ce.mrr_change_major, 0.0)) AS current_legacy_mrr,
+    SUM(IF(ce.plan_version = 'v4', ce.mrr_change_major, 0.0)) AS current_v4_mrr
+  FROM classified_events ce
+  CROSS JOIN bounds b
+  LEFT JOIN workspace_lookup wl
+    ON wl.customer_id = ce.customer_id
+  GROUP BY ce.customer_id, customer_key
+),
+workspace_balances AS (
+  SELECT
+    customer_key,
+    SUM(opening_legacy_mrr) AS opening_legacy_mrr,
+    SUM(opening_v4_mrr) AS opening_v4_mrr,
+    SUM(current_legacy_mrr) AS current_legacy_mrr,
+    SUM(current_v4_mrr) AS current_v4_mrr
+  FROM customer_balances
+  GROUP BY customer_key
+)
+SELECT
+  COUNTIF(opening_legacy_mrr > 1e-9 AND opening_v4_mrr <= 1e-9) AS opening_customers,
+  ROUND(SUM(IF(opening_legacy_mrr > 1e-9 AND opening_v4_mrr <= 1e-9, opening_legacy_mrr, 0.0)) * 12.0, 2) AS opening_arr,
+  COUNTIF(current_legacy_mrr > 1e-9 AND current_v4_mrr <= 1e-9) AS current_customers,
+  ROUND(SUM(IF(current_legacy_mrr > 1e-9 AND current_v4_mrr <= 1e-9, current_legacy_mrr, 0.0)) * 12.0, 2) AS current_arr
+FROM workspace_balances
+`;
+
+  const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, [
+    { name: "fiscal_year_start", type: "STRING", value: fiscalYearStartIso },
+    { name: "as_of_date", type: "STRING", value: asOfDateIso },
+    { name: "target_currency", type: "STRING", value: targetCurrency },
+  ]);
+  const row = rows[0] || {};
+
+  return {
+    fiscalYearStart: fiscalYearStartIso,
+    asOfDate: asOfDateIso,
+    targetCurrency: targetCurrency.toUpperCase(),
+    opening: {
+      customers: asInt(row.opening_customers),
+      arr: asNumber(row.opening_arr),
+    },
+    current: {
+      customers: asInt(row.current_customers),
+      arr: asNumber(row.current_arr),
+    },
   };
 }
 

@@ -970,6 +970,88 @@ textarea:focus-visible {
   margin: 0.45rem 0;
 }
 
+.migration__goal {
+  border-color: #2e7e76;
+  background:
+    radial-gradient(circle at top right, rgba(20, 184, 166, 0.16), transparent 36%),
+    var(--stripe-panel);
+}
+
+.migration__goal-stats {
+  grid-template-columns: repeat(3, minmax(170px, 1fr));
+}
+
+.migration__goal-stat {
+  border-color: #2c5067;
+  background: rgba(9, 24, 39, 0.82);
+}
+
+.migration__goal-stat--current {
+  border-color: #2b8f83;
+  background: rgba(20, 184, 166, 0.1);
+}
+
+.migration__goal-stat--monthly {
+  border-color: #6151a0;
+  background: rgba(124, 92, 229, 0.09);
+}
+
+.migration__stat-note {
+  margin: 0.35rem 0 0;
+  color: #839fc5;
+  font-size: 0.7rem;
+}
+
+.migration__goal-progress-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+
+.migration__goal-progress {
+  padding: 0.9rem;
+  border: 1px solid #2a456f;
+  background: #091427;
+}
+
+.migration__goal-progress--month {
+  border-color: #2d6868;
+}
+
+.migration__goal-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  color: #9cb6da;
+  font-size: 0.76rem;
+}
+
+.migration__goal-progress-head strong {
+  color: #edf4ff;
+  font-size: 0.82rem;
+  text-align: right;
+}
+
+.migration__goal-track {
+  height: 0.82rem;
+  margin-top: 0.65rem;
+  border: 1px solid #315178;
+  background: #06101e;
+}
+
+.migration__goal-track div {
+  height: 100%;
+  background: linear-gradient(90deg, #14b8a6, #6f4fe1);
+}
+
+.migration__goal-progress p {
+  margin: 0.42rem 0 0;
+  color: #819dc5;
+  font-size: 0.7rem;
+}
+
 .migration__summary {
   border-color: #7c5ce5;
   background:
@@ -1173,6 +1255,8 @@ textarea:focus-visible {
     text-align: left;
   }
 
+  .migration__goal-stats,
+  .migration__goal-progress-grid,
   .migration__headline-stats,
   .migration__source-grid {
     grid-template-columns: 1fr;

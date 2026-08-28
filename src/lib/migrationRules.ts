@@ -1,8 +1,31 @@
-export type MigrationPlanVersion = "v3" | "v4";
+export type MigrationPlanGeneration = "v2" | "v3" | "v4";
+export type MigrationPlanVersion = Exclude<MigrationPlanGeneration, "v2">;
 
 export type MigrationMetricInput = {
   migratedAt: string;
   migratedArr: number;
+};
+
+export type LegacyPopulationSummary = {
+  customers: number;
+  arr: number;
+};
+
+export type MigrationGoalMetrics = {
+  targetRatePct: number;
+  openingLegacyCustomers: number;
+  openingLegacyArr: number;
+  openingAverageArr: number;
+  currentLegacyCustomers: number;
+  currentLegacyArr: number;
+  fiscalYearCustomerTarget: number;
+  fiscalYearArrTarget: number;
+  monthlyCustomerTarget: number;
+  monthlyArrTarget: number;
+  fiscalYearCustomerProgressPct: number;
+  fiscalYearArrProgressPct: number;
+  currentMonthCustomerProgressPct: number;
+  currentMonthArrProgressPct: number;
 };
 
 function parseIsoDate(value: string) {
@@ -34,11 +57,13 @@ export function migrationReportWindow(asOfDate: string) {
   const fiscalYearStartYear = asOf.getUTCMonth() >= 3 ? asOf.getUTCFullYear() : asOf.getUTCFullYear() - 1;
   const calculatedFiscalStart = new Date(Date.UTC(fiscalYearStartYear, 3, 1));
   const fiscalYearStart = calculatedFiscalStart < minimumStart ? minimumStart : calculatedFiscalStart;
+  const fiscalYearEnd = new Date(Date.UTC(fiscalYearStart.getUTCFullYear() + 1, 2, 31));
   const currentMonthStart = new Date(Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), 1));
 
   return {
     asOfDate: isoDate(asOf),
     fiscalYearStart: isoDate(fiscalYearStart),
+    fiscalYearEnd: isoDate(fiscalYearEnd),
     currentMonthStart: isoDate(currentMonthStart),
   };
 }
@@ -56,10 +81,10 @@ export function isHubspotMigrationUpsellType(value: unknown) {
   return String(value || "").trim().toLowerCase() === "migration";
 }
 
-export function migrationPlanVersion(
+export function migrationPlanGeneration(
   values: string[],
-  unversionedPlanVersion: MigrationPlanVersion = "v3",
-): MigrationPlanVersion | null {
+  unversionedPlanVersion: MigrationPlanGeneration = "v3",
+): MigrationPlanGeneration | null {
   const normalized = normalizedWords(values);
   if (!normalized || normalized === "refund" || normalized === "discount") return null;
   if (/\badd\s*ons?\b/.test(normalized)) return null;
@@ -71,8 +96,69 @@ export function migrationPlanVersion(
   if (!recognizedPlan) return null;
   if (/(^|[^a-z0-9])v4([^a-z0-9]|$)/.test(normalized)) return "v4";
   if (/(^|[^a-z0-9])v3([^a-z0-9]|$)/.test(normalized)) return "v3";
-  if (/(^|[^a-z0-9])v[12]([^a-z0-9]|$)/.test(normalized)) return null;
+  if (/(^|[^a-z0-9])v2([^a-z0-9]|$)/.test(normalized)) return "v2";
+  if (/(^|[^a-z0-9])v1([^a-z0-9]|$)/.test(normalized)) return null;
   return unversionedPlanVersion;
+}
+
+export function migrationPlanVersion(
+  values: string[],
+  unversionedPlanVersion: MigrationPlanVersion = "v3",
+): MigrationPlanVersion | null {
+  const generation = migrationPlanGeneration(values, unversionedPlanVersion);
+  return generation === "v3" || generation === "v4" ? generation : null;
+}
+
+function roundTo(value: number, digits: number) {
+  const multiplier = 10 ** digits;
+  return Math.round((Number(value) || 0) * multiplier) / multiplier;
+}
+
+function progressPct(actual: number, target: number) {
+  if (target <= 0) return 0;
+  return roundTo((Math.max(0, actual) / target) * 100, 1);
+}
+
+export function calculateMigrationGoalMetrics(input: {
+  opening: LegacyPopulationSummary;
+  current: LegacyPopulationSummary;
+  fiscalYearMigrated: { customers: number; arr: number };
+  currentMonthMigrated: { customers: number; arr: number };
+  targetRatePct?: number;
+}): MigrationGoalMetrics {
+  const targetRatePct = Math.max(0, Math.min(100, Number(input.targetRatePct ?? 70)));
+  const openingLegacyCustomers = Math.max(0, Math.floor(Number(input.opening.customers || 0)));
+  const openingLegacyArr = roundTo(Math.max(0, Number(input.opening.arr || 0)), 2);
+  const currentLegacyCustomers = Math.max(0, Math.floor(Number(input.current.customers || 0)));
+  const currentLegacyArr = roundTo(Math.max(0, Number(input.current.arr || 0)), 2);
+  const openingAverageArr = openingLegacyCustomers > 0
+    ? roundTo(openingLegacyArr / openingLegacyCustomers, 2)
+    : 0;
+  const fiscalYearCustomerTarget = Math.ceil(openingLegacyCustomers * (targetRatePct / 100));
+  const fiscalYearArrTarget = roundTo(openingAverageArr * fiscalYearCustomerTarget, 2);
+  const monthlyCustomerTarget = roundTo(fiscalYearCustomerTarget / 12, 2);
+  const monthlyArrTarget = roundTo(fiscalYearArrTarget / 12, 2);
+  const fiscalYearMigratedCustomers = Math.max(0, Number(input.fiscalYearMigrated.customers || 0));
+  const fiscalYearMigratedArr = Math.max(0, Number(input.fiscalYearMigrated.arr || 0));
+  const currentMonthMigratedCustomers = Math.max(0, Number(input.currentMonthMigrated.customers || 0));
+  const currentMonthMigratedArr = Math.max(0, Number(input.currentMonthMigrated.arr || 0));
+
+  return {
+    targetRatePct,
+    openingLegacyCustomers,
+    openingLegacyArr,
+    openingAverageArr,
+    currentLegacyCustomers,
+    currentLegacyArr,
+    fiscalYearCustomerTarget,
+    fiscalYearArrTarget,
+    monthlyCustomerTarget,
+    monthlyArrTarget,
+    fiscalYearCustomerProgressPct: progressPct(fiscalYearMigratedCustomers, fiscalYearCustomerTarget),
+    fiscalYearArrProgressPct: progressPct(fiscalYearMigratedArr, fiscalYearArrTarget),
+    currentMonthCustomerProgressPct: progressPct(currentMonthMigratedCustomers, monthlyCustomerTarget),
+    currentMonthArrProgressPct: progressPct(currentMonthMigratedArr, monthlyArrTarget),
+  };
 }
 
 export function calculateMigrationMetrics(
