@@ -50,6 +50,7 @@ export type MigrationDetailRow = {
   migratedArr: number;
   priorLegacyArr: number;
   migratedV4Arr: number;
+  resultingExpansion: number;
   recordUrl: string;
 };
 
@@ -60,6 +61,8 @@ export type MigrationCustomerExportRow = {
   customerEmail: string;
   workspaceId: string;
   arr: number;
+  arrAfterMigration: number | null;
+  resultingExpansion: number | null;
   migratedAt: string;
   previousPlan: string;
   currentPlan: string;
@@ -69,6 +72,7 @@ export type MigrationCustomerExportRow = {
 export type MigrationSummary = {
   arrMigrated: number;
   logosMigrated: number;
+  resultingExpansion: number;
 };
 
 export type MigrationReportResponse = {
@@ -103,6 +107,7 @@ export type MigrationReportResponse = {
     monthLabel: string;
     arrMigrated: number;
     logosMigrated: number;
+    resultingExpansion: number;
   }>;
   migrations: MigrationDetailRow[];
   customerLists: {
@@ -229,6 +234,8 @@ function hubspotLegacyPopulation(activities: HubspotPlanActivity[], snapshotDate
       customerEmail: balance.customerEmail,
       workspaceId: balance.workspaceId,
       arr: round2(balance.legacyArr),
+      arrAfterMigration: null,
+      resultingExpansion: null,
       migratedAt: "",
       previousPlan: "",
       currentPlan: "",
@@ -258,6 +265,28 @@ function hubspotPlanLabelsAtSnapshot(activities: HubspotPlanActivity[], snapshot
       Array.from(values).sort((a, b) => a.localeCompare(b)),
     ]),
   );
+}
+
+function hubspotLegacyArrImmediatelyBefore(
+  activities: HubspotPlanActivity[],
+  customerKey: string,
+  migrationDate: string,
+) {
+  const snapshot = new Date(`${migrationDate}T00:00:00.000Z`);
+  snapshot.setUTCDate(snapshot.getUTCDate() - 1);
+  const snapshotDate = snapshot.toISOString().slice(0, 10);
+  return round2(activities.reduce((sum, activity) => {
+    if (
+      activity.customerKey !== customerKey ||
+      activity.generation === "v4" ||
+      activity.closeDate > snapshotDate ||
+      activity.startDate > snapshotDate ||
+      activity.endDate < snapshotDate
+    ) {
+      return sum;
+    }
+    return sum + activity.arr;
+  }, 0));
 }
 
 function lineItemDescriptions(lineItem: HubspotLineItem | undefined) {
@@ -515,6 +544,12 @@ async function generateHubspotMigrations(options: {
         migrationSeen = true;
         if (record.closeDate >= options.startDate && record.closeDate <= options.endDate) {
           const workspaceId = record.workspaceId || record.companyWorkspaceId;
+          const priorLegacyArr = round2(
+            hubspotLegacyArrImmediatelyBefore(planActivities, record.customerKey, record.closeDate)
+            || historicalLegacyArr
+            || record.v2Arr + record.v3Arr,
+          );
+          const resultingExpansion = round2(record.v4Arr - priorLegacyArr);
           migrations.push({
             migrationKey: `hubspot:${record.customerKey}`,
             source: "hubspot",
@@ -530,9 +565,10 @@ async function generateHubspotMigrations(options: {
             currentPlan: currentPlansByCustomer.get(record.customerKey)?.join(" + ")
               || record.v4Plans.join(" + ")
               || "No active plan",
-            migratedArr: record.v4Arr,
-            priorLegacyArr: round2(historicalLegacyArr || record.v2Arr + record.v3Arr),
+            migratedArr: priorLegacyArr,
+            priorLegacyArr,
             migratedV4Arr: record.v4Arr,
+            resultingExpansion,
             recordUrl: hubspotRecordUrl(options.portalId, record.dealId),
           });
         }
@@ -569,6 +605,7 @@ function stripeMigrationRow(row: StripeLegacyToV4MigrationRow): MigrationDetailR
     migratedArr: round2(row.migratedArr),
     priorLegacyArr: round2(row.legacyArrBefore),
     migratedV4Arr: round2(row.v4ArrAfter),
+    resultingExpansion: round2(row.v4ArrAfter - row.legacyArrBefore),
     recordUrl: stripeRecordUrl(row.customerId),
   };
 }
@@ -581,6 +618,8 @@ function migrationExportRow(row: MigrationDetailRow): MigrationCustomerExportRow
     customerEmail: row.customerEmail,
     workspaceId: row.workspaceId,
     arr: row.migratedArr,
+    arrAfterMigration: row.migratedV4Arr,
+    resultingExpansion: row.resultingExpansion,
     migratedAt: row.migratedAt,
     previousPlan: row.previousPlan,
     currentPlan: row.currentPlan,
@@ -598,6 +637,8 @@ function stripePopulationExportRow(
     customerEmail: row.customerEmail,
     workspaceId: row.workspaceId,
     arr: row.arr,
+    arrAfterMigration: null,
+    resultingExpansion: null,
     migratedAt: "",
     previousPlan: "",
     currentPlan: "",
@@ -807,6 +848,7 @@ export async function generateMigrationReport(options?: {
       "Stripe / BigQuery and HubSpot Sales Default Pipeline customers are counted as independent migration populations; neither source requires a matching record in the other.",
       "Downloadable CSVs use the same customer rows as the clicked totals. Stripe customers sharing one workspace remain one counted row, with multiple customer IDs or emails pipe-separated in that row.",
       "The selected date range controls the migration totals, source totals, monthly chart, and migrated-customer list. The range-end month card covers only the selected portion of that month.",
+      "ARR migrated is the qualifying V2/V3 ARR immediately before migration. Resulting expansion is signed V4 ARR immediately after migration minus that pre-migration ARR; a negative value represents contraction.",
       "Previous plan is the customer's active V2/V3 base plan immediately before migration. Plan at range end reflects active base-plan subscription items on the selected end date, when available.",
       "The fiscal-year goal is 70% of customers on V2/V3 at the start of April 1. The logo target is rounded up to a whole customer and divided evenly across 12 months.",
       "The ARR goal uses the opening V2/V3 customers' average base-plan ARR multiplied by the logo goal. Add-ons, AI tokens, conversation sessions, and web-search/crawl charges are excluded from the baseline and target.",

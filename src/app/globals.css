@@ -1143,7 +1143,7 @@ textarea:focus-visible {
 }
 
 .migration__headline-stats {
-  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  grid-template-columns: repeat(3, minmax(170px, 1fr));
 }
 
 .migration__headline-stat {
@@ -1154,6 +1154,11 @@ textarea:focus-visible {
 .migration__headline-stat--month {
   border-color: #2b6b70;
   background: rgba(20, 184, 166, 0.08);
+}
+
+.migration__headline-stat--expansion {
+  border-color: #956f2d;
+  background: rgba(183, 123, 31, 0.1);
 }
 
 .migration__source-grid {
@@ -1216,7 +1221,7 @@ textarea:focus-visible {
 
 .migration__month-row {
   display: grid;
-  grid-template-columns: 120px minmax(160px, 1fr) 130px;
+  grid-template-columns: 120px minmax(160px, 1fr) 175px;
   align-items: center;
   gap: 0.8rem;
 }
@@ -1268,9 +1273,17 @@ textarea:focus-visible {
 }
 
 .migration__month-amount {
+  display: grid;
+  gap: 0.12rem;
   color: #e2edff;
   font-size: 0.82rem;
   text-align: right;
+}
+
+.migration__month-amount span {
+  color: #8fa9ce;
+  font-size: 0.7rem;
+  font-weight: 600;
 }
 
 .migration__error {

@@ -4,6 +4,7 @@ export type MigrationPlanVersion = Exclude<MigrationPlanGeneration, "v2">;
 export type MigrationMetricInput = {
   migratedAt: string;
   migratedArr: number;
+  resultingExpansion?: number;
 };
 
 export type LegacyPopulationSummary = {
@@ -204,5 +205,6 @@ export function calculateMigrationMetrics(
   return {
     logosMigrated: included.length,
     arrMigrated: Math.round(included.reduce((sum, row) => sum + Math.max(0, Number(row.migratedArr || 0)), 0) * 100) / 100,
+    resultingExpansion: Math.round(included.reduce((sum, row) => sum + Number(row.resultingExpansion || 0), 0) * 100) / 100,
   };
 }

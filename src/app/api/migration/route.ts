@@ -12,7 +12,7 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const startDate = String(url.searchParams.get("startDate") || "").trim();
     const endDate = String(url.searchParams.get("endDate") || "").trim();
-    const cacheKey = `api:migration:v6:${startDate || "default"}:${endDate || "today"}`;
+    const cacheKey = `api:migration:v7:${startDate || "default"}:${endDate || "today"}`;
     const report = await getOrSetCache(cacheKey, CACHE_TTL_MS, () => generateMigrationReport({
       startDate: startDate || undefined,
       endDate: endDate || undefined,

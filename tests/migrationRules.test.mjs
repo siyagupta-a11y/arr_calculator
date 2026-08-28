@@ -101,12 +101,13 @@ test("requires the HubSpot Upsell Type property to be Migration", () => {
 
 test("calculates ARR and logo totals for an inclusive date range", () => {
   const rows = [
-    { migratedAt: "2026-04-01", migratedArr: 12000 },
-    { migratedAt: "2026-08-14", migratedArr: 30000 },
-    { migratedAt: "2026-09-01", migratedArr: 50000 },
+    { migratedAt: "2026-04-01", migratedArr: 12000, resultingExpansion: 2000 },
+    { migratedAt: "2026-08-14", migratedArr: 30000, resultingExpansion: -1000 },
+    { migratedAt: "2026-09-01", migratedArr: 50000, resultingExpansion: 5000 },
   ];
   assert.deepEqual(calculateMigrationMetrics(rows, "2026-04-01", "2026-08-31"), {
     logosMigrated: 2,
     arrMigrated: 42000,
+    resultingExpansion: 1000,
   });
 });

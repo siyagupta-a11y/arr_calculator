@@ -5057,7 +5057,7 @@ SELECT
   FORMAT_DATE('%Y-%m-%d', mc.migrated_at) AS migrated_at,
   COALESCE(mpl.previous_plan, 'V2/V3 plan') AS previous_plan,
   COALESCE(mpl.current_plan, 'No active plan') AS current_plan,
-  ROUND(mc.v4_after_mrr * 12.0, 2) AS migrated_arr,
+  ROUND(mc.legacy_before_mrr * 12.0, 2) AS migrated_arr,
   ROUND(mc.legacy_before_mrr * 12.0, 2) AS legacy_arr_before,
   ROUND(mc.v4_after_mrr * 12.0, 2) AS v4_arr_after
 FROM migration_candidates mc
