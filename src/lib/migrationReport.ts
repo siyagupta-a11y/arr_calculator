@@ -7,7 +7,12 @@ import {
   fetchLineItemIdsForDeals,
 } from "@/lib/hubspot";
 import { computeCalculatedArrForLineItem, FX_TARGET_CURRENCY, LI_PROPS, parseDate, round2 } from "@/lib/logic";
-import { calculateMigrationMetrics, migrationPlanVersion, migrationReportWindow } from "@/lib/migrationRules";
+import {
+  calculateMigrationMetrics,
+  isExplicitV3ToV4Migration,
+  migrationPlanVersion,
+  migrationReportWindow,
+} from "@/lib/migrationRules";
 import {
   queryStripeV3ToV4MigrationsFromBigQuery,
   type StripeV3ToV4MigrationRow,
@@ -72,6 +77,7 @@ type HubspotDealPlanRecord = {
   companyId: string;
   companyName: string;
   companyWorkspaceId: string;
+  explicitMigration: boolean;
   v3Arr: number;
   v4Arr: number;
 };
@@ -178,7 +184,7 @@ async function generateHubspotMigrations(options: {
 
   let companiesById = new Map<string, { id: string; properties?: Record<string, unknown> }>();
   try {
-    companiesById = await batchReadCompanies(allCompanyIds, ["name", "workspace_id"]);
+    companiesById = await batchReadCompanies(allCompanyIds, ["name", "workspaceid"]);
   } catch (error) {
     if (!unknownPropertyError(error)) throw error;
     companiesById = await batchReadCompanies(allCompanyIds, ["name"]);
@@ -213,7 +219,7 @@ async function generateHubspotMigrations(options: {
     const company = companiesById.get(companyId);
     const companyName = String(company?.properties?.name || "").trim();
     const dealWorkspaceId = normalizedWorkspaceId(deal.properties?.workspace_id);
-    const companyWorkspaceId = normalizedWorkspaceId(company?.properties?.workspace_id);
+    const companyWorkspaceId = normalizedWorkspaceId(company?.properties?.workspaceid);
     const workspaceId = dealWorkspaceId || companyWorkspaceId;
     const customerKey = companyId ? `company:${companyId}` : workspaceId ? `workspace:${workspaceId}` : `deal:${dealId}`;
     const currency = String(deal.properties?.deal_currency_code || options.targetCurrency).trim().toUpperCase();
@@ -223,11 +229,16 @@ async function generateHubspotMigrations(options: {
       continue;
     }
 
+    const dealName = String(deal.properties?.dealname || "").trim() || `Deal ${dealId}`;
+    const explicitMigration = isExplicitV3ToV4Migration([dealName]);
     let v3Arr = 0;
     let v4Arr = 0;
     for (const lineItemId of lineItemIdsByDeal.get(dealId) || []) {
       const lineItem = lineItemsById.get(lineItemId);
-      const version = migrationPlanVersion(lineItemDescriptions(lineItem));
+      const version = migrationPlanVersion(
+        lineItemDescriptions(lineItem),
+        explicitMigration ? "v4" : "v3",
+      );
       if (!version) continue;
       const arr = computeCalculatedArrForLineItem(lineItem?.properties || {});
       if (version === "v4") v4Arr += arr * rate;
@@ -236,7 +247,7 @@ async function generateHubspotMigrations(options: {
     if (v3Arr <= 0 && v4Arr <= 0) continue;
     dealPlanRecords.push({
       dealId,
-      dealName: String(deal.properties?.dealname || "").trim() || `Deal ${dealId}`,
+      dealName,
       closeDate,
       currency,
       workspaceId,
@@ -244,6 +255,7 @@ async function generateHubspotMigrations(options: {
       companyId,
       companyName,
       companyWorkspaceId,
+      explicitMigration,
       v3Arr: round2(v3Arr),
       v4Arr: round2(v4Arr),
     });
@@ -261,7 +273,7 @@ async function generateHubspotMigrations(options: {
     let historicalV3Arr = 0;
     let v4Seen = false;
     for (const record of sorted) {
-      const hasV3Before = historicalV3Arr > 0 || record.v3Arr > 0;
+      const hasV3Before = historicalV3Arr > 0 || record.v3Arr > 0 || record.explicitMigration;
       if (!v4Seen && record.v4Arr > 0) {
         v4Seen = true;
         if (hasV3Before && record.closeDate >= options.startDate && record.closeDate <= options.endDate) {
@@ -349,21 +361,7 @@ export async function generateMigrationReport(options?: { asOfDate?: string }): 
   const stripeRows = stripeResult.status === "fulfilled" ? stripeResult.value.rows : [];
   const hubspotMigrations = hubspotResult.status === "fulfilled" ? hubspotResult.value : [];
 
-  const hubspotWorkspaceIds = new Set(
-    hubspotMigrations.map((row) => normalizedWorkspaceId(row.workspaceId)).filter(Boolean),
-  );
-  let dedupedStripeCount = 0;
-  const stripeMigrations = stripeRows.map(stripeMigrationRow).filter((row) => {
-    const workspaceId = normalizedWorkspaceId(row.workspaceId);
-    if (!workspaceId || !hubspotWorkspaceIds.has(workspaceId)) return true;
-    dedupedStripeCount += 1;
-    return false;
-  });
-  if (dedupedStripeCount) {
-    warnings.add(
-      `${dedupedStripeCount} Stripe migration${dedupedStripeCount === 1 ? " was" : "s were"} deduplicated because the same workspace was included through a HubSpot Sales Default Pipeline deal.`,
-    );
-  }
+  const stripeMigrations = stripeRows.map(stripeMigrationRow);
 
   const migrations = [...hubspotMigrations, ...stripeMigrations].sort(
     (a, b) => b.migratedAt.localeCompare(a.migratedAt) || a.customerName.localeCompare(b.customerName),
@@ -408,8 +406,8 @@ export async function generateMigrationReport(options?: { asOfDate?: string }): 
     methodology: [
       "A customer is counted once, on the first day a v4 plan has positive ARR while that customer had positive v3 plan ARR immediately beforehand.",
       "Stripe results come from the Stripe data-pipeline subscription-item change events in BigQuery. Add-ons, AI tokens, conversation sessions, and web-search/crawl charges are excluded.",
-      "HubSpot results use closed-won deals in the Sales Default Pipeline. A company must have a prior v3 plan line item and a first v4 plan line item; v4 ARR is annualized and converted using the HubSpot CARR report conventions.",
-      "Stripe and HubSpot migrations sharing the same workspace ID are counted once, with HubSpot treated as the canonical sales-led record.",
+      "HubSpot results independently use closed-won migration deals in the Sales Default Pipeline. Explicit migration deals do not require a matching Stripe customer; v4 ARR is annualized and converted using the HubSpot CARR report conventions.",
+      "Stripe / BigQuery and HubSpot Sales Default Pipeline customers are counted as independent migration populations; neither source requires a matching record in the other.",
     ],
   };
 }

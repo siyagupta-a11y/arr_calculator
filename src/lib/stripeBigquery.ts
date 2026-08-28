@@ -735,6 +735,7 @@ const STRIPE_ARR_CORRECT_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.i
 const STRIPE_ARR_CORRECT_MRR_CHANGE_DEFAULT_TABLE =
   "botpress-stripe-data-pipeline.stripe.subscription_item_change_events_v2_beta";
 const STRIPE_PRODUCTS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.products";
+const STRIPE_PRICES_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.prices";
 const STRIPE_CUSTOMERS_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.customers";
 const STRIPE_CUSTOMERS_METADATA_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.customers_metadata";
 const STRIPE_CHARGES_DEFAULT_TABLE = "botpress-stripe-data-pipeline.stripe.charges";
@@ -1220,6 +1221,15 @@ function getStripeProductsTable(profile: StripeBigQueryProfile = "default") {
       : "BIGQUERY_STRIPE_PRODUCTS_TABLE";
   const configured = String(process.env[envName] || "").trim();
   return configured || STRIPE_PRODUCTS_DEFAULT_TABLE;
+}
+
+function getStripePricesTable(profile: StripeBigQueryProfile = "default") {
+  const envName =
+    profile === "stripe_arr_correct"
+      ? "BIGQUERY_STRIPE_ARR_CORRECT_PRICES_TABLE"
+      : "BIGQUERY_STRIPE_PRICES_TABLE";
+  const configured = String(process.env[envName] || "").trim();
+  return configured || STRIPE_PRICES_DEFAULT_TABLE;
 }
 
 function getStripeUpcomingSnapshotsTable(profile: StripeBigQueryProfile = "default") {
@@ -4770,6 +4780,7 @@ export async function queryStripeV3ToV4MigrationsFromBigQuery(
   const accessToken = await getAccessToken(sa);
   const table = getStripeArrCorrectMrrChangeTable();
   const productsTable = getStripeProductsTable(profile);
+  const pricesTable = getStripePricesTable(profile);
   const customersTable = getStripeCustomersTable();
   const customersMetadataTable = getStripeCustomersMetadataTable(profile);
 
@@ -4787,6 +4798,19 @@ products_lookup AS (
     MAX(COALESCE(NULLIF(TRIM(CAST(description AS STRING)), ''), '')) AS product_description
   FROM \`${productsTable}\`
   GROUP BY product_id
+),
+prices_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.id')), ''), '(blank)') AS price_id,
+    MAX(COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.nickname')), ''), '')) AS price_nickname,
+    MAX(COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.lookup_key')), ''), '')) AS price_lookup_key,
+    MAX(COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.metadata.version')), ''), '')) AS metadata_version,
+    MAX(COALESCE(NULLIF(TRIM(JSON_VALUE(raw_json, '$.metadata.plan_version')), ''), '')) AS metadata_plan_version
+  FROM (
+    SELECT TO_JSON_STRING(p) AS raw_json
+    FROM \`${pricesTable}\` p
+  )
+  GROUP BY price_id
 ),
 events_source AS (
   SELECT
@@ -4816,6 +4840,14 @@ described_events AS (
         ' ',
         COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price_name')), ''), ''),
         ' ',
+        COALESCE(NULLIF(TRIM(pr.price_nickname), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(pr.price_lookup_key), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(pr.metadata_version), ''), ''),
+        ' ',
+        COALESCE(NULLIF(TRIM(pr.metadata_plan_version), ''), ''),
+        ' ',
         COALESCE(NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.product_name')), ''), ''),
         ' ',
         COALESCE(NULLIF(TRIM(pl.product_name), ''), ''),
@@ -4827,6 +4859,13 @@ described_events AS (
   FROM events_source es
   LEFT JOIN products_lookup pl
     ON pl.product_id = es.product_id
+  LEFT JOIN prices_lookup pr
+    ON pr.price_id = COALESCE(
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price_id')), ''),
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price.id')), ''),
+      NULLIF(TRIM(JSON_VALUE(es.raw_json, '$.price')), ''),
+      '(blank)'
+    )
 ),
 classified_events AS (
   SELECT
@@ -4835,7 +4874,8 @@ classified_events AS (
     mrr_change_major,
     CASE
       WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z0-9])v4([^a-z0-9]|$)') THEN 'v4'
-      ELSE 'v3'
+      WHEN REGEXP_CONTAINS(plan_hints, r'(^|[^a-z0-9])v3([^a-z0-9]|$)') THEN 'v3'
+      ELSE 'other'
     END AS plan_version
   FROM described_events
   WHERE

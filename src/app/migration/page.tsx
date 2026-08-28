@@ -138,7 +138,7 @@ export default function MigrationPage() {
 
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
             <h2 className="stripe-ui__panel-title">By source</h2>
-            <p className="stripe-ui__panel-subtitle">HubSpot takes precedence when the same workspace appears in both sources.</p>
+            <p className="stripe-ui__panel-subtitle">Stripe / BigQuery and HubSpot Sales Default Pipeline customers are counted independently.</p>
             <div className="migration__source-grid">
               {data.sourceBreakdown.map((source) => (
                 <article className="migration__source-card" key={source.source}>

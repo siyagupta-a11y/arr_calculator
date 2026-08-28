@@ -52,7 +52,20 @@ function normalizedWords(values: string[]) {
     .replace(/\s+/g, " ");
 }
 
-export function migrationPlanVersion(values: string[]): MigrationPlanVersion | null {
+export function isExplicitV3ToV4Migration(values: string[]) {
+  const normalized = normalizedWords(values);
+  if (!normalized) return false;
+  return (
+    /\bv3\s*(?:to|into|→|->)\s*v4\b/.test(normalized) ||
+    /\bv3\b.*\bv4\b/.test(normalized) ||
+    /\bmigrat(?:e|ed|ing|ion)\b/.test(normalized)
+  );
+}
+
+export function migrationPlanVersion(
+  values: string[],
+  unversionedPlanVersion: MigrationPlanVersion = "v3",
+): MigrationPlanVersion | null {
   const normalized = normalizedWords(values);
   if (!normalized || normalized === "refund" || normalized === "discount") return null;
   if (/\badd\s*ons?\b/.test(normalized)) return null;
@@ -63,7 +76,9 @@ export function migrationPlanVersion(values: string[]): MigrationPlanVersion | n
   const recognizedPlan = /\b(enterprise|managed|team|plus|pay\s+as\s+you\s+go|payg|free)\b/.test(normalized);
   if (!recognizedPlan) return null;
   if (/(^|[^a-z0-9])v4([^a-z0-9]|$)/.test(normalized)) return "v4";
-  return "v3";
+  if (/(^|[^a-z0-9])v3([^a-z0-9]|$)/.test(normalized)) return "v3";
+  if (/(^|[^a-z0-9])v[12]([^a-z0-9]|$)/.test(normalized)) return null;
+  return unversionedPlanVersion;
 }
 
 export function calculateMigrationMetrics(
