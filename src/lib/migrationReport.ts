@@ -1,8 +1,10 @@
 import { getMonthlyAverageFxRateForCloseMonth } from "@/lib/fx";
 import {
   batchReadCompanies,
+  batchReadContacts,
   batchReadLineItems,
   fetchCompanyIdsForDeals,
+  fetchContactIdsForCompanies,
   fetchDealsInStage,
   fetchLineItemIdsForDeals,
 } from "@/lib/hubspot";
@@ -40,6 +42,7 @@ export type MigrationDetailRow = {
   source: MigrationSource;
   customerId: string;
   customerName: string;
+  customerEmail: string;
   workspaceId: string;
   migratedAt: string;
   previousPlan: string;
@@ -47,6 +50,19 @@ export type MigrationDetailRow = {
   migratedArr: number;
   priorLegacyArr: number;
   migratedV4Arr: number;
+  recordUrl: string;
+};
+
+export type MigrationCustomerExportRow = {
+  source: MigrationSource;
+  customerId: string;
+  customerName: string;
+  customerEmail: string;
+  workspaceId: string;
+  arr: number;
+  migratedAt: string;
+  previousPlan: string;
+  currentPlan: string;
   recordUrl: string;
 };
 
@@ -89,6 +105,11 @@ export type MigrationReportResponse = {
     logosMigrated: number;
   }>;
   migrations: MigrationDetailRow[];
+  customerLists: {
+    openingLegacy: MigrationCustomerExportRow[];
+    currentLegacy: MigrationCustomerExportRow[];
+    migrations: MigrationCustomerExportRow[];
+  };
   warnings: string[];
   methodology: string[];
 };
@@ -106,6 +127,7 @@ type HubspotDealPlanRecord = {
   companyId: string;
   companyName: string;
   companyWorkspaceId: string;
+  customerEmail: string;
   migrationUpsell: boolean;
   v2Arr: number;
   v3Arr: number;
@@ -123,12 +145,19 @@ type HubspotPlanActivity = {
   closeDate: string;
   startDate: string;
   endDate: string;
+  customerId: string;
+  customerName: string;
+  customerEmail: string;
+  workspaceId: string;
+  recordUrl: string;
 };
 
 type HubspotMigrationResult = {
   migrations: MigrationDetailRow[];
   opening: LegacyPopulationSummary;
   current: LegacyPopulationSummary;
+  openingCustomers: MigrationCustomerExportRow[];
+  currentCustomers: MigrationCustomerExportRow[];
 };
 
 function envValue(name: string, fallback: string) {
@@ -154,8 +183,16 @@ function localDateKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-function hubspotLegacyPopulation(activities: HubspotPlanActivity[], snapshotDate: string): LegacyPopulationSummary {
-  const balances = new Map<string, { legacyArr: number; v4Arr: number }>();
+function hubspotLegacyPopulation(activities: HubspotPlanActivity[], snapshotDate: string) {
+  const balances = new Map<string, {
+    legacyArr: number;
+    v4Arr: number;
+    customerId: string;
+    customerName: string;
+    customerEmail: string;
+    workspaceId: string;
+    recordUrl: string;
+  }>();
   for (const activity of activities) {
     if (
       activity.closeDate > snapshotDate ||
@@ -164,7 +201,15 @@ function hubspotLegacyPopulation(activities: HubspotPlanActivity[], snapshotDate
     ) {
       continue;
     }
-    const balance = balances.get(activity.customerKey) || { legacyArr: 0, v4Arr: 0 };
+    const balance = balances.get(activity.customerKey) || {
+      legacyArr: 0,
+      v4Arr: 0,
+      customerId: activity.customerId,
+      customerName: activity.customerName,
+      customerEmail: activity.customerEmail,
+      workspaceId: activity.workspaceId,
+      recordUrl: activity.recordUrl,
+    };
     if (activity.generation === "v4") balance.v4Arr += activity.arr;
     else balance.legacyArr += activity.arr;
     balances.set(activity.customerKey, balance);
@@ -172,12 +217,26 @@ function hubspotLegacyPopulation(activities: HubspotPlanActivity[], snapshotDate
 
   let customers = 0;
   let arr = 0;
+  const rows: MigrationCustomerExportRow[] = [];
   for (const balance of balances.values()) {
     if (balance.legacyArr <= 0 || balance.v4Arr > 0) continue;
     customers += 1;
     arr += balance.legacyArr;
+    rows.push({
+      source: "hubspot",
+      customerId: balance.customerId,
+      customerName: balance.customerName || balance.customerId,
+      customerEmail: balance.customerEmail,
+      workspaceId: balance.workspaceId,
+      arr: round2(balance.legacyArr),
+      migratedAt: "",
+      previousPlan: "",
+      currentPlan: "",
+      recordUrl: balance.recordUrl,
+    });
   }
-  return { customers, arr: round2(arr) };
+  rows.sort((a, b) => a.customerName.localeCompare(b.customerName) || a.customerId.localeCompare(b.customerId));
+  return { summary: { customers, arr: round2(arr) }, rows };
 }
 
 function hubspotPlanLabelsAtSnapshot(activities: HubspotPlanActivity[], snapshotDate: string) {
@@ -210,6 +269,12 @@ function lineItemDescriptions(lineItem: HubspotLineItem | undefined) {
 
 function hubspotRecordUrl(portalId: string, dealId: string) {
   return `https://app.hubspot.com/contacts/${portalId}/record/0-3/${dealId}?utm_source=arr_dashboard&utm_medium=internal&utm_campaign=migration`;
+}
+
+function hubspotCompanyUrl(portalId: string, companyId: string) {
+  return companyId
+    ? `https://app.hubspot.com/contacts/${portalId}/record/0-2/${companyId}?utm_source=arr_dashboard&utm_medium=internal&utm_campaign=migration`
+    : "";
 }
 
 function stripeRecordUrl(customerId: string) {
@@ -275,6 +340,8 @@ async function generateHubspotMigrations(options: {
       migrations: [],
       opening: { customers: 0, arr: 0 },
       current: { customers: 0, arr: 0 },
+      openingCustomers: [],
+      currentCustomers: [],
     };
   }
 
@@ -295,6 +362,27 @@ async function generateHubspotMigrations(options: {
   } catch (error) {
     if (!unknownPropertyError(error)) throw error;
     companiesById = await batchReadCompanies(allCompanyIds, ["name"]);
+  }
+
+  const customerEmailsByCompany = new Map<string, string>();
+  try {
+    const contactPairs = await fetchContactIdsForCompanies(allCompanyIds);
+    const allContactIds = Array.from(new Set(contactPairs.flatMap((pair) => pair.ids)));
+    const contactsById = await batchReadContacts(allContactIds, ["email"]);
+    for (const pair of contactPairs) {
+      const emails = Array.from(
+        new Set(
+          pair.ids
+            .map((contactId) => String(contactsById.get(contactId)?.properties?.email || "").trim().toLowerCase())
+            .filter((email) => email.includes("@")),
+        ),
+      ).sort((a, b) => a.localeCompare(b));
+      customerEmailsByCompany.set(pair.companyId, emails.join(" | "));
+    }
+  } catch (error) {
+    options.warnings.add(
+      `HubSpot contact emails are temporarily unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
   const dealPlanRecords: HubspotDealPlanRecord[] = [];
@@ -328,6 +416,7 @@ async function generateHubspotMigrations(options: {
     const companyName = String(company?.properties?.name || "").trim();
     const dealWorkspaceId = normalizedWorkspaceId(deal.properties?.workspace_id);
     const companyWorkspaceId = normalizedWorkspaceId(company?.properties?.workspaceid);
+    const customerEmail = customerEmailsByCompany.get(companyId) || "";
     const workspaceId = dealWorkspaceId || companyWorkspaceId;
     const customerKey = companyId ? `company:${companyId}` : workspaceId ? `workspace:${workspaceId}` : `deal:${dealId}`;
     const currency = String(deal.properties?.deal_currency_code || options.targetCurrency).trim().toUpperCase();
@@ -378,6 +467,11 @@ async function generateHubspotMigrations(options: {
           closeDate,
           startDate: localDateKey(activityWindow.start),
           endDate: localDateKey(activityWindow.end),
+          customerId: companyId || dealId,
+          customerName: companyName || dealName,
+          customerEmail,
+          workspaceId,
+          recordUrl: hubspotCompanyUrl(options.portalId, companyId) || hubspotRecordUrl(options.portalId, dealId),
         });
       }
     }
@@ -392,6 +486,7 @@ async function generateHubspotMigrations(options: {
       companyId,
       companyName,
       companyWorkspaceId,
+      customerEmail,
       migrationUpsell,
       v2Arr: round2(v2Arr),
       v3Arr: round2(v3Arr),
@@ -425,6 +520,7 @@ async function generateHubspotMigrations(options: {
             source: "hubspot",
             customerId: record.companyId || record.dealId,
             customerName: record.companyName || record.dealName,
+            customerEmail: record.customerEmail,
             workspaceId,
             migratedAt: record.closeDate,
             previousPlan: (historicalLegacyPlans.length
@@ -448,10 +544,14 @@ async function generateHubspotMigrations(options: {
     }
   }
 
+  const openingPopulation = hubspotLegacyPopulation(planActivities, options.populationStartDate);
+  const currentPopulation = hubspotLegacyPopulation(planActivities, options.endDate);
   return {
     migrations,
-    opening: hubspotLegacyPopulation(planActivities, options.populationStartDate),
-    current: hubspotLegacyPopulation(planActivities, options.endDate),
+    opening: openingPopulation.summary,
+    current: currentPopulation.summary,
+    openingCustomers: openingPopulation.rows,
+    currentCustomers: currentPopulation.rows,
   };
 }
 
@@ -461,6 +561,7 @@ function stripeMigrationRow(row: StripeLegacyToV4MigrationRow): MigrationDetailR
     source: "stripe",
     customerId: row.customerId,
     customerName: row.customerName || row.customerId,
+    customerEmail: row.customerEmail,
     workspaceId: normalizedWorkspaceId(row.workspaceId),
     migratedAt: row.migratedAt,
     previousPlan: row.previousPlan || "V2/V3 plan",
@@ -469,6 +570,38 @@ function stripeMigrationRow(row: StripeLegacyToV4MigrationRow): MigrationDetailR
     priorLegacyArr: round2(row.legacyArrBefore),
     migratedV4Arr: round2(row.v4ArrAfter),
     recordUrl: stripeRecordUrl(row.customerId),
+  };
+}
+
+function migrationExportRow(row: MigrationDetailRow): MigrationCustomerExportRow {
+  return {
+    source: row.source,
+    customerId: row.customerId,
+    customerName: row.customerName,
+    customerEmail: row.customerEmail,
+    workspaceId: row.workspaceId,
+    arr: row.migratedArr,
+    migratedAt: row.migratedAt,
+    previousPlan: row.previousPlan,
+    currentPlan: row.currentPlan,
+    recordUrl: row.recordUrl,
+  };
+}
+
+function stripePopulationExportRow(
+  row: StripeLegacyPlanPopulationResult["openingCustomers"][number],
+): MigrationCustomerExportRow {
+  return {
+    source: "stripe",
+    customerId: row.customerId,
+    customerName: row.customerName,
+    customerEmail: row.customerEmail,
+    workspaceId: row.workspaceId,
+    arr: row.arr,
+    migratedAt: "",
+    previousPlan: "",
+    currentPlan: "",
+    recordUrl: row.customerId.includes(" | ") ? "" : stripeRecordUrl(row.customerId),
   };
 }
 
@@ -545,10 +678,12 @@ export async function generateMigrationReport(options?: {
   const stripeRows = stripeResult.status === "fulfilled" ? stripeResult.value.rows : [];
   const hubspotData: HubspotMigrationResult = hubspotResult.status === "fulfilled"
     ? hubspotResult.value
-    : {
+      : {
         migrations: [],
         opening: { customers: 0, arr: 0 },
         current: { customers: 0, arr: 0 },
+        openingCustomers: [],
+        currentCustomers: [],
       };
   const stripePopulation: StripeLegacyPlanPopulationResult = stripePopulationResult.status === "fulfilled"
     ? stripePopulationResult.value
@@ -558,6 +693,8 @@ export async function generateMigrationReport(options?: {
         targetCurrency,
         opening: { customers: 0, arr: 0 },
         current: { customers: 0, arr: 0 },
+        openingCustomers: [],
+        currentCustomers: [],
       };
   const hubspotMigrations = hubspotData.migrations;
 
@@ -572,6 +709,17 @@ export async function generateMigrationReport(options?: {
   const fiscalYear = calculateMigrationMetrics(allMigrations, window.fiscalYearStart, window.rangeEnd);
   const selectedRange = calculateMigrationMetrics(allMigrations, window.rangeStart, window.rangeEnd);
   const currentMonth = calculateMigrationMetrics(allMigrations, window.currentMonthStart, window.rangeEnd);
+  const customerLists = {
+    openingLegacy: [
+      ...stripePopulation.openingCustomers.map(stripePopulationExportRow),
+      ...hubspotData.openingCustomers,
+    ],
+    currentLegacy: [
+      ...stripePopulation.currentCustomers.map(stripePopulationExportRow),
+      ...hubspotData.currentCustomers,
+    ],
+    migrations: allMigrations.map(migrationExportRow),
+  };
   const sourcePopulations = [
     {
       source: "stripe" as const,
@@ -650,12 +798,14 @@ export async function generateMigrationReport(options?: {
     sourceBreakdown,
     months,
     migrations,
+    customerLists,
     warnings: Array.from(warnings),
     methodology: [
       "A Stripe customer is counted once, on the first day a V4 plan has positive ARR while that customer had positive V2 or V3 plan ARR immediately beforehand.",
       "Stripe results come from the Stripe data-pipeline subscription-item change events in BigQuery. Add-ons, AI tokens, conversation sessions, and web-search/crawl charges are excluded.",
       "HubSpot results independently use closed-won Sales Default Pipeline deals whose Upsell Type property is Migration. They do not require a matching Stripe customer; v4 ARR is annualized and converted using the HubSpot CARR report conventions.",
       "Stripe / BigQuery and HubSpot Sales Default Pipeline customers are counted as independent migration populations; neither source requires a matching record in the other.",
+      "Downloadable CSVs use the same customer rows as the clicked totals. Stripe customers sharing one workspace remain one counted row, with multiple customer IDs or emails pipe-separated in that row.",
       "The selected date range controls the migration totals, source totals, monthly chart, and migrated-customer list. The range-end month card covers only the selected portion of that month.",
       "Previous plan is the customer's active V2/V3 base plan immediately before migration. Plan at range end reflects active base-plan subscription items on the selected end date, when available.",
       "The fiscal-year goal is 70% of customers on V2/V3 at the start of April 1. The logo target is rounded up to a whole customer and divided evenly across 12 months.",

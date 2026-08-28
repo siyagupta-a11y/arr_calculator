@@ -269,6 +269,7 @@ export type StripeLegacyToV4MigrationRequest = {
 export type StripeLegacyToV4MigrationRow = {
   customerId: string;
   customerName: string;
+  customerEmail: string;
   workspaceId: string;
   migratedAt: string;
   previousPlan: string;
@@ -303,6 +304,16 @@ export type StripeLegacyPlanPopulationResult = {
     customers: number;
     arr: number;
   };
+  openingCustomers: StripeLegacyPlanPopulationCustomerRow[];
+  currentCustomers: StripeLegacyPlanPopulationCustomerRow[];
+};
+
+export type StripeLegacyPlanPopulationCustomerRow = {
+  customerId: string;
+  customerName: string;
+  customerEmail: string;
+  workspaceId: string;
+  arr: number;
 };
 
 export type StripeBillingOverviewGrain = "daily" | "weekly" | "monthly" | "quarterly";
@@ -5041,6 +5052,7 @@ customers_lookup AS (
 SELECT
   mc.customer_id,
   COALESCE(NULLIF(cl.customer_name, ''), NULLIF(cl.customer_email, ''), mc.customer_id) AS customer_name,
+  COALESCE(cl.customer_email, '') AS customer_email,
   COALESCE(cwl.workspace_id, '') AS workspace_id,
   FORMAT_DATE('%Y-%m-%d', mc.migrated_at) AS migrated_at,
   COALESCE(mpl.previous_plan, 'V2/V3 plan') AS previous_plan,
@@ -5071,6 +5083,7 @@ ORDER BY mc.migrated_at DESC, customer_name ASC
     rows: rows.map((row) => ({
       customerId: asString(row.customer_id),
       customerName: asString(row.customer_name),
+      customerEmail: asString(row.customer_email),
       workspaceId: asString(row.workspace_id),
       migratedAt: asString(row.migrated_at),
       previousPlan: asString(row.previous_plan),
@@ -5104,6 +5117,7 @@ export async function queryStripeLegacyPlanPopulationFromBigQuery(
   const table = getStripeArrCorrectMrrChangeTable();
   const productsTable = getStripeProductsTable(profile);
   const pricesTable = getStripePricesTable(profile);
+  const customersTable = getStripeCustomersTable();
   const customersMetadataTable = getStripeCustomersMetadataTable(profile);
 
   const query = `
@@ -5226,10 +5240,24 @@ workspace_lookup AS (
   )
   WHERE rn = 1
 ),
+customers_lookup AS (
+  SELECT
+    COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') AS customer_id,
+    MAX(COALESCE(NULLIF(TRIM(JSON_VALUE(TO_JSON_STRING(c), '$.name')), ''), '')) AS customer_name,
+    MAX(LOWER(COALESCE(NULLIF(TRIM(CAST(c.email AS STRING)), ''), ''))) AS customer_email
+  FROM \`${customersTable}\` c
+  WHERE COALESCE(NULLIF(TRIM(CAST(c.id AS STRING)), ''), '(blank)') IN (
+    SELECT customer_id FROM customer_ids
+  )
+  GROUP BY customer_id
+),
 customer_balances AS (
   SELECT
     ce.customer_id,
     COALESCE(NULLIF(wl.workspace_id, ''), CONCAT('customer:', ce.customer_id)) AS customer_key,
+    COALESCE(wl.workspace_id, '') AS workspace_id,
+    COALESCE(cl.customer_name, '') AS customer_name,
+    COALESCE(cl.customer_email, '') AS customer_email,
     SUM(IF(
       ce.event_timestamp < TIMESTAMP(b.fiscal_year_start) AND ce.plan_version IN ('v2', 'v3'),
       ce.mrr_change_major,
@@ -5246,11 +5274,17 @@ customer_balances AS (
   CROSS JOIN bounds b
   LEFT JOIN workspace_lookup wl
     ON wl.customer_id = ce.customer_id
-  GROUP BY ce.customer_id, customer_key
+  LEFT JOIN customers_lookup cl
+    ON cl.customer_id = ce.customer_id
+  GROUP BY ce.customer_id, customer_key, workspace_id, customer_name, customer_email
 ),
 workspace_balances AS (
   SELECT
     customer_key,
+    STRING_AGG(DISTINCT customer_id, ' | ' ORDER BY customer_id) AS customer_ids,
+    COALESCE(NULLIF(MAX(workspace_id), ''), '') AS workspace_id,
+    COALESCE(STRING_AGG(DISTINCT NULLIF(customer_name, ''), ' | ' ORDER BY NULLIF(customer_name, '')), '') AS customer_name,
+    COALESCE(STRING_AGG(DISTINCT NULLIF(customer_email, ''), ' | ' ORDER BY NULLIF(customer_email, '')), '') AS customer_email,
     SUM(opening_legacy_mrr) AS opening_legacy_mrr,
     SUM(opening_v4_mrr) AS opening_v4_mrr,
     SUM(current_legacy_mrr) AS current_legacy_mrr,
@@ -5259,11 +5293,20 @@ workspace_balances AS (
   GROUP BY customer_key
 )
 SELECT
-  COUNTIF(opening_legacy_mrr > 1e-9 AND opening_v4_mrr <= 1e-9) AS opening_customers,
-  ROUND(SUM(IF(opening_legacy_mrr > 1e-9 AND opening_v4_mrr <= 1e-9, opening_legacy_mrr, 0.0)) * 12.0, 2) AS opening_arr,
-  COUNTIF(current_legacy_mrr > 1e-9 AND current_v4_mrr <= 1e-9) AS current_customers,
-  ROUND(SUM(IF(current_legacy_mrr > 1e-9 AND current_v4_mrr <= 1e-9, current_legacy_mrr, 0.0)) * 12.0, 2) AS current_arr
+  customer_key,
+  customer_ids,
+  customer_name,
+  customer_email,
+  workspace_id,
+  opening_legacy_mrr > 1e-9 AND opening_v4_mrr <= 1e-9 AS is_opening,
+  ROUND(IF(opening_legacy_mrr > 1e-9 AND opening_v4_mrr <= 1e-9, opening_legacy_mrr, 0.0) * 12.0, 2) AS opening_arr,
+  current_legacy_mrr > 1e-9 AND current_v4_mrr <= 1e-9 AS is_current,
+  ROUND(IF(current_legacy_mrr > 1e-9 AND current_v4_mrr <= 1e-9, current_legacy_mrr, 0.0) * 12.0, 2) AS current_arr
 FROM workspace_balances
+WHERE
+  (opening_legacy_mrr > 1e-9 AND opening_v4_mrr <= 1e-9)
+  OR (current_legacy_mrr > 1e-9 AND current_v4_mrr <= 1e-9)
+ORDER BY customer_name, customer_ids
 `;
 
   const rows = await runBigQueryQueryRows(accessToken, projectId, location, query, [
@@ -5271,20 +5314,39 @@ FROM workspace_balances
     { name: "as_of_date", type: "STRING", value: asOfDateIso },
     { name: "target_currency", type: "STRING", value: targetCurrency },
   ]);
-  const row = rows[0] || {};
+  const openingCustomers = rows
+    .filter((row) => asString(row.is_opening).toLowerCase() === "true")
+    .map((row) => ({
+      customerId: asString(row.customer_ids),
+      customerName: asString(row.customer_name) || asString(row.customer_ids),
+      customerEmail: asString(row.customer_email),
+      workspaceId: asString(row.workspace_id),
+      arr: asNumber(row.opening_arr),
+    }));
+  const currentCustomers = rows
+    .filter((row) => asString(row.is_current).toLowerCase() === "true")
+    .map((row) => ({
+      customerId: asString(row.customer_ids),
+      customerName: asString(row.customer_name) || asString(row.customer_ids),
+      customerEmail: asString(row.customer_email),
+      workspaceId: asString(row.workspace_id),
+      arr: asNumber(row.current_arr),
+    }));
 
   return {
     fiscalYearStart: fiscalYearStartIso,
     asOfDate: asOfDateIso,
     targetCurrency: targetCurrency.toUpperCase(),
     opening: {
-      customers: asInt(row.opening_customers),
-      arr: asNumber(row.opening_arr),
+      customers: openingCustomers.length,
+      arr: round2(openingCustomers.reduce((sum, row) => sum + row.arr, 0)),
     },
     current: {
-      customers: asInt(row.current_customers),
-      arr: asNumber(row.current_arr),
+      customers: currentCustomers.length,
+      arr: round2(currentCustomers.reduce((sum, row) => sum + row.arr, 0)),
     },
+    openingCustomers,
+    currentCustomers,
   };
 }
 

@@ -1028,6 +1028,48 @@ textarea:focus-visible {
   background: rgba(124, 92, 229, 0.09);
 }
 
+.migration__download-card {
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: border-color 130ms ease, transform 130ms ease, background 130ms ease;
+}
+
+.migration__download-card:hover:not(:disabled),
+.migration__download-card:focus-visible {
+  border-color: #68a7de;
+  transform: translateY(-1px);
+}
+
+.migration__download-card:disabled,
+.migration__download-inline:disabled,
+.migration__source-download:disabled,
+.migration__download-row:disabled {
+  cursor: default;
+}
+
+.migration__download-inline {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: right;
+  text-decoration: underline;
+  text-decoration-color: rgba(126, 184, 232, 0.55);
+  text-decoration-style: dotted;
+  text-underline-offset: 0.2em;
+}
+
+.migration__download-inline:hover:not(:disabled),
+.migration__download-inline:focus-visible {
+  color: #a9d7ff;
+  text-decoration-style: solid;
+}
+
 .migration__stat-note {
   margin: 0.35rem 0 0;
   color: #839fc5;
@@ -1060,7 +1102,8 @@ textarea:focus-visible {
   font-size: 0.76rem;
 }
 
-.migration__goal-progress-head strong {
+.migration__goal-progress-head strong,
+.migration__goal-progress-head .migration__download-inline {
   color: #edf4ff;
   font-size: 0.82rem;
   text-align: right;
@@ -1131,13 +1174,30 @@ textarea:focus-visible {
   font-size: 1rem;
 }
 
-.migration__source-card div {
+.migration__source-card div,
+.migration__source-download {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 1rem;
   padding: 0.42rem 0;
   border-top: 1px solid #1c3152;
+}
+
+.migration__source-download {
+  width: 100%;
+  background: transparent;
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.migration__source-download:hover:not(:disabled),
+.migration__source-download:focus-visible {
+  background: rgba(74, 141, 206, 0.08);
 }
 
 .migration__source-card span {
@@ -1159,6 +1219,25 @@ textarea:focus-visible {
   grid-template-columns: 120px minmax(160px, 1fr) 130px;
   align-items: center;
   gap: 0.8rem;
+}
+
+.migration__download-row {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.migration__download-row:hover:not(:disabled) .migration__month-label strong,
+.migration__download-row:focus-visible .migration__month-label strong {
+  color: #9dd9ff;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 0.2em;
 }
 
 .migration__month-label {

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { MigrationReportResponse } from "@/lib/migrationReport";
+import type { MigrationCustomerExportRow, MigrationReportResponse, MigrationSource } from "@/lib/migrationReport";
 
 const MIN_MIGRATION_DATE = "2026-04-01";
 
@@ -44,6 +44,68 @@ function formatNumber(value: number, maximumFractionDigits = 2) {
 
 function progressWidth(percent: number) {
   return `${Math.max(0, Math.min(100, Number(percent || 0)))}%`;
+}
+
+function csvValue(value: unknown) {
+  let text = String(value ?? "");
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+function downloadCustomerCsv(filename: string, rows: MigrationCustomerExportRow[], currency: string) {
+  if (!rows.length) return;
+  const headers = [
+    "Customer name",
+    "Email",
+    "Customer ID",
+    "Workspace ID",
+    "Source",
+    `ARR (${currency})`,
+    "Migration date",
+    "Previous plan",
+    "Plan at range end",
+    "Record URL",
+  ];
+  const orderedRows = rows.slice().sort(
+    (a, b) => a.customerName.localeCompare(b.customerName) || a.customerId.localeCompare(b.customerId),
+  );
+  const lines = [
+    headers.map(csvValue).join(","),
+    ...orderedRows.map((row) => [
+      row.customerName,
+      row.customerEmail,
+      row.customerId,
+      row.workspaceId,
+      row.source === "stripe" ? "Stripe / BigQuery" : "HubSpot",
+      row.arr,
+      row.migratedAt,
+      row.previousPlan,
+      row.currentPlan,
+      row.recordUrl,
+    ].map(csvValue).join(",")),
+  ];
+  const blob = new Blob([`\ufeff${lines.join("\r\n")}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename.replace(/[^a-z0-9._-]+/gi, "-").replace(/-+/g, "-").toLowerCase();
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+function migrationRowsBetween(
+  data: MigrationReportResponse,
+  startDate: string,
+  endDate: string,
+  source?: MigrationSource,
+) {
+  return data.customerLists.migrations.filter((row) => (
+    row.migratedAt >= startDate &&
+    row.migratedAt <= endDate &&
+    (!source || row.source === source)
+  ));
 }
 
 export default function MigrationPage() {
@@ -119,6 +181,25 @@ export default function MigrationPage() {
     () => Math.max(1, ...(data?.months || []).map((month) => month.arrMigrated)),
     [data],
   );
+  const customerGroups = useMemo(() => {
+    if (!data) return null;
+    return {
+      openingLegacy: data.customerLists.openingLegacy,
+      currentLegacy: data.customerLists.currentLegacy,
+      fiscalYearMigrations: migrationRowsBetween(data, data.fiscalYearStart, data.rangeEnd),
+      selectedRangeMigrations: migrationRowsBetween(data, data.rangeStart, data.rangeEnd),
+      currentMonthMigrations: migrationRowsBetween(data, data.currentMonthStart, data.rangeEnd),
+    };
+  }, [data]);
+
+  function downloadCustomers(slug: string, rows: MigrationCustomerExportRow[]) {
+    if (!data) return;
+    downloadCustomerCsv(
+      `migration-${slug}-${data.rangeStart}-to-${data.rangeEnd}.csv`,
+      rows,
+      data.targetCurrency,
+    );
+  }
 
   return (
     <div className="stripe-ui">
@@ -145,7 +226,7 @@ export default function MigrationPage() {
         <div>
           <h2 className="stripe-ui__panel-title">Reporting range</h2>
           <p className="stripe-ui__panel-subtitle">
-            Defaults to the fiscal-year start through today. Dates can begin on or after April 1, 2026.
+            Defaults to the fiscal-year start through today. Dates can begin on or after April 1, 2026. Click any customer-backed total to download its CSV.
           </p>
         </div>
         <form className="migration__filters" onSubmit={applyDateRange}>
@@ -216,16 +297,28 @@ export default function MigrationPage() {
             </div>
 
             <div className="stripe-ui__stats migration__goal-stats">
-              <article className="stripe-ui__stat migration__goal-stat migration__goal-stat--current">
+              <button
+                className="stripe-ui__stat migration__goal-stat migration__goal-stat--current migration__download-card"
+                type="button"
+                disabled={!customerGroups?.currentLegacy.length}
+                onClick={() => downloadCustomers("v2-v3-at-range-end", customerGroups?.currentLegacy || [])}
+                title="Download the customers behind this total"
+              >
                 <p className="stripe-ui__stat-label">On V2/V3 at range end</p>
                 <p className="stripe-ui__stat-value">{formatNumber(data.goal.currentLegacyCustomers, 0)}</p>
                 <p className="migration__stat-note">{formatMoney(data.goal.currentLegacyArr, data.targetCurrency)} base-plan ARR</p>
-              </article>
-              <article className="stripe-ui__stat migration__goal-stat">
+              </button>
+              <button
+                className="stripe-ui__stat migration__goal-stat migration__download-card"
+                type="button"
+                disabled={!customerGroups?.openingLegacy.length}
+                onClick={() => downloadCustomers("opening-v2-v3-customers", customerGroups?.openingLegacy || [])}
+                title="Download the customers behind this total"
+              >
                 <p className="stripe-ui__stat-label">Opening V2/V3 customers</p>
                 <p className="stripe-ui__stat-value">{formatNumber(data.goal.openingLegacyCustomers, 0)}</p>
                 <p className="migration__stat-note">Baseline at fiscal-year start</p>
-              </article>
+              </button>
               <article className="stripe-ui__stat migration__goal-stat">
                 <p className="stripe-ui__stat-label">70% customer goal</p>
                 <p className="stripe-ui__stat-value">{formatNumber(data.goal.fiscalYearCustomerTarget, 0)}</p>
@@ -252,7 +345,15 @@ export default function MigrationPage() {
               <article className="migration__goal-progress">
                 <div className="migration__goal-progress-head">
                   <span>Fiscal-year customers</span>
-                  <strong>{data.fiscalYear.logosMigrated} / {data.goal.fiscalYearCustomerTarget}</strong>
+                  <button
+                    className="migration__download-inline"
+                    type="button"
+                    disabled={!customerGroups?.fiscalYearMigrations.length}
+                    onClick={() => downloadCustomers("fiscal-year-migrated-customers", customerGroups?.fiscalYearMigrations || [])}
+                    title="Download the migrated customers in the numerator"
+                  >
+                    {data.fiscalYear.logosMigrated} / {data.goal.fiscalYearCustomerTarget}
+                  </button>
                 </div>
                 <div className="migration__goal-track"><div style={{ width: progressWidth(data.goal.fiscalYearCustomerProgressPct) }} /></div>
                 <p>{formatNumber(data.goal.fiscalYearCustomerProgressPct, 1)}% of the 70% goal</p>
@@ -260,7 +361,15 @@ export default function MigrationPage() {
               <article className="migration__goal-progress">
                 <div className="migration__goal-progress-head">
                   <span>Fiscal-year ARR</span>
-                  <strong>{formatMoney(data.fiscalYear.arrMigrated, data.targetCurrency)} / {formatMoney(data.goal.fiscalYearArrTarget, data.targetCurrency)}</strong>
+                  <button
+                    className="migration__download-inline"
+                    type="button"
+                    disabled={!customerGroups?.fiscalYearMigrations.length}
+                    onClick={() => downloadCustomers("fiscal-year-migrated-arr-customers", customerGroups?.fiscalYearMigrations || [])}
+                    title="Download the customers behind the migrated ARR"
+                  >
+                    {formatMoney(data.fiscalYear.arrMigrated, data.targetCurrency)} / {formatMoney(data.goal.fiscalYearArrTarget, data.targetCurrency)}
+                  </button>
                 </div>
                 <div className="migration__goal-track"><div style={{ width: progressWidth(data.goal.fiscalYearArrProgressPct) }} /></div>
                 <p>{formatNumber(data.goal.fiscalYearArrProgressPct, 1)}% of ARR goal</p>
@@ -268,7 +377,15 @@ export default function MigrationPage() {
               <article className="migration__goal-progress migration__goal-progress--month">
                 <div className="migration__goal-progress-head">
                   <span>Range-end month customers</span>
-                  <strong>{data.currentMonth.logosMigrated} / {formatNumber(data.goal.monthlyCustomerTarget)}</strong>
+                  <button
+                    className="migration__download-inline"
+                    type="button"
+                    disabled={!customerGroups?.currentMonthMigrations.length}
+                    onClick={() => downloadCustomers("range-end-month-migrated-customers", customerGroups?.currentMonthMigrations || [])}
+                    title="Download the migrated customers in the numerator"
+                  >
+                    {data.currentMonth.logosMigrated} / {formatNumber(data.goal.monthlyCustomerTarget)}
+                  </button>
                 </div>
                 <div className="migration__goal-track"><div style={{ width: progressWidth(data.goal.currentMonthCustomerProgressPct) }} /></div>
                 <p>{formatNumber(data.goal.currentMonthCustomerProgressPct, 1)}% of monthly target</p>
@@ -276,7 +393,15 @@ export default function MigrationPage() {
               <article className="migration__goal-progress migration__goal-progress--month">
                 <div className="migration__goal-progress-head">
                   <span>Range-end month ARR</span>
-                  <strong>{formatMoney(data.currentMonth.arrMigrated, data.targetCurrency)} / {formatMoney(data.goal.monthlyArrTarget, data.targetCurrency)}</strong>
+                  <button
+                    className="migration__download-inline"
+                    type="button"
+                    disabled={!customerGroups?.currentMonthMigrations.length}
+                    onClick={() => downloadCustomers("range-end-month-migrated-arr-customers", customerGroups?.currentMonthMigrations || [])}
+                    title="Download the customers behind the migrated ARR"
+                  >
+                    {formatMoney(data.currentMonth.arrMigrated, data.targetCurrency)} / {formatMoney(data.goal.monthlyArrTarget, data.targetCurrency)}
+                  </button>
                 </div>
                 <div className="migration__goal-track"><div style={{ width: progressWidth(data.goal.currentMonthArrProgressPct) }} /></div>
                 <p>{formatNumber(data.goal.currentMonthArrProgressPct, 1)}% of monthly target</p>
@@ -295,22 +420,46 @@ export default function MigrationPage() {
               <span className="migration__as-of">{formatDate(data.rangeStart)} – {formatDate(data.rangeEnd)}</span>
             </div>
             <div className="stripe-ui__stats migration__headline-stats">
-              <article className="stripe-ui__stat migration__headline-stat">
+              <button
+                className="stripe-ui__stat migration__headline-stat migration__download-card"
+                type="button"
+                disabled={!customerGroups?.selectedRangeMigrations.length}
+                onClick={() => downloadCustomers("selected-range-migrated-arr-customers", customerGroups?.selectedRangeMigrations || [])}
+                title="Download the customers behind this ARR"
+              >
                 <p className="stripe-ui__stat-label">Selected-range ARR migrated</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.selectedRange.arrMigrated, data.targetCurrency)}</p>
-              </article>
-              <article className="stripe-ui__stat migration__headline-stat">
+              </button>
+              <button
+                className="stripe-ui__stat migration__headline-stat migration__download-card"
+                type="button"
+                disabled={!customerGroups?.selectedRangeMigrations.length}
+                onClick={() => downloadCustomers("selected-range-migrated-customers", customerGroups?.selectedRangeMigrations || [])}
+                title="Download the customers behind this total"
+              >
                 <p className="stripe-ui__stat-label">Selected-range logos migrated</p>
                 <p className="stripe-ui__stat-value">{data.selectedRange.logosMigrated}</p>
-              </article>
-              <article className="stripe-ui__stat migration__headline-stat migration__headline-stat--month">
+              </button>
+              <button
+                className="stripe-ui__stat migration__headline-stat migration__headline-stat--month migration__download-card"
+                type="button"
+                disabled={!customerGroups?.currentMonthMigrations.length}
+                onClick={() => downloadCustomers("range-end-month-migrated-arr-customers", customerGroups?.currentMonthMigrations || [])}
+                title="Download the customers behind this ARR"
+              >
                 <p className="stripe-ui__stat-label">Range-end month ARR migrated</p>
                 <p className="stripe-ui__stat-value">{formatMoney(data.currentMonth.arrMigrated, data.targetCurrency)}</p>
-              </article>
-              <article className="stripe-ui__stat migration__headline-stat migration__headline-stat--month">
+              </button>
+              <button
+                className="stripe-ui__stat migration__headline-stat migration__headline-stat--month migration__download-card"
+                type="button"
+                disabled={!customerGroups?.currentMonthMigrations.length}
+                onClick={() => downloadCustomers("range-end-month-migrated-customers", customerGroups?.currentMonthMigrations || [])}
+                title="Download the customers behind this total"
+              >
                 <p className="stripe-ui__stat-label">Range-end month logos migrated</p>
                 <p className="stripe-ui__stat-value">{data.currentMonth.logosMigrated}</p>
-              </article>
+              </button>
             </div>
             {data.warnings.length ? (
               <div className="commissions-warning">
@@ -325,15 +474,31 @@ export default function MigrationPage() {
             <div className="migration__source-grid">
               {data.sourceBreakdown.map((source) => {
                 const population = data.goal.sourcePopulations.find((item) => item.source === source.source);
+                const sourceOpeningRows = (customerGroups?.openingLegacy || []).filter((row) => row.source === source.source);
+                const sourceCurrentRows = (customerGroups?.currentLegacy || []).filter((row) => row.source === source.source);
+                const sourceSelectedRows = (customerGroups?.selectedRangeMigrations || []).filter((row) => row.source === source.source);
+                const sourceMonthRows = (customerGroups?.currentMonthMigrations || []).filter((row) => row.source === source.source);
                 return (
                   <article className="migration__source-card" key={source.source}>
                     <h3>{source.sourceLabel}</h3>
-                    <div><span>Opening V2/V3 customers</span><strong>{population?.opening.customers || 0}</strong></div>
-                    <div><span>V2/V3 customers at range end</span><strong>{population?.current.customers || 0}</strong></div>
-                    <div><span>Selected-range ARR migrated</span><strong>{formatMoney(source.selectedRange.arrMigrated, data.targetCurrency)}</strong></div>
-                    <div><span>Selected-range logos migrated</span><strong>{source.selectedRange.logosMigrated}</strong></div>
-                    <div><span>Range-end month ARR</span><strong>{formatMoney(source.currentMonth.arrMigrated, data.targetCurrency)}</strong></div>
-                    <div><span>Range-end month logos</span><strong>{source.currentMonth.logosMigrated}</strong></div>
+                    <button className="migration__source-download" type="button" disabled={!sourceOpeningRows.length} onClick={() => downloadCustomers(`${source.source}-opening-v2-v3-customers`, sourceOpeningRows)}>
+                      <span>Opening V2/V3 customers</span><strong>{population?.opening.customers || 0}</strong>
+                    </button>
+                    <button className="migration__source-download" type="button" disabled={!sourceCurrentRows.length} onClick={() => downloadCustomers(`${source.source}-v2-v3-at-range-end`, sourceCurrentRows)}>
+                      <span>V2/V3 customers at range end</span><strong>{population?.current.customers || 0}</strong>
+                    </button>
+                    <button className="migration__source-download" type="button" disabled={!sourceSelectedRows.length} onClick={() => downloadCustomers(`${source.source}-selected-range-migrated-arr-customers`, sourceSelectedRows)}>
+                      <span>Selected-range ARR migrated</span><strong>{formatMoney(source.selectedRange.arrMigrated, data.targetCurrency)}</strong>
+                    </button>
+                    <button className="migration__source-download" type="button" disabled={!sourceSelectedRows.length} onClick={() => downloadCustomers(`${source.source}-selected-range-migrated-customers`, sourceSelectedRows)}>
+                      <span>Selected-range logos migrated</span><strong>{source.selectedRange.logosMigrated}</strong>
+                    </button>
+                    <button className="migration__source-download" type="button" disabled={!sourceMonthRows.length} onClick={() => downloadCustomers(`${source.source}-range-end-month-migrated-arr-customers`, sourceMonthRows)}>
+                      <span>Range-end month ARR</span><strong>{formatMoney(source.currentMonth.arrMigrated, data.targetCurrency)}</strong>
+                    </button>
+                    <button className="migration__source-download" type="button" disabled={!sourceMonthRows.length} onClick={() => downloadCustomers(`${source.source}-range-end-month-migrated-customers`, sourceMonthRows)}>
+                      <span>Range-end month logos</span><strong>{source.currentMonth.logosMigrated}</strong>
+                    </button>
                   </article>
                 );
               })}
@@ -345,7 +510,17 @@ export default function MigrationPage() {
             <p className="stripe-ui__panel-subtitle">ARR and customer logos migrated in each month of the selected range.</p>
             <div className="migration__month-list">
               {data.months.map((month) => (
-                <article className="migration__month-row" key={month.monthKey}>
+                <button
+                  className="migration__month-row migration__download-row"
+                  type="button"
+                  key={month.monthKey}
+                  disabled={!customerGroups?.selectedRangeMigrations.some((row) => row.migratedAt.slice(0, 7) === month.monthKey)}
+                  onClick={() => downloadCustomers(
+                    `${month.monthKey}-migrated-customers`,
+                    (customerGroups?.selectedRangeMigrations || []).filter((row) => row.migratedAt.slice(0, 7) === month.monthKey),
+                  )}
+                  title="Download the customers behind this month"
+                >
                   <div className="migration__month-label">
                     <strong>{month.monthLabel}</strong>
                     <span>{month.logosMigrated} logo{month.logosMigrated === 1 ? "" : "s"}</span>
@@ -354,7 +529,7 @@ export default function MigrationPage() {
                     <div style={{ width: `${Math.max(0, (month.arrMigrated / maxMonthlyArr) * 100)}%` }} />
                   </div>
                   <strong className="migration__month-amount">{formatMoney(month.arrMigrated, data.targetCurrency)}</strong>
-                </article>
+                </button>
               ))}
             </div>
           </section>
@@ -365,7 +540,14 @@ export default function MigrationPage() {
                 <h2 className="stripe-ui__panel-title">Migrated customers</h2>
                 <p className="stripe-ui__panel-subtitle">Each customer appears once at their first qualifying V4 plan activation within the selected range.</p>
               </div>
-              <span className="migration__as-of">{data.migrations.length} total</span>
+              <button
+                className="migration__as-of migration__download-inline"
+                type="button"
+                disabled={!customerGroups?.selectedRangeMigrations.length}
+                onClick={() => downloadCustomers("selected-range-migrated-customers", customerGroups?.selectedRangeMigrations || [])}
+              >
+                {data.migrations.length} total
+              </button>
             </div>
             <div className="stripe-ui__table-wrap">
               <table className="stripe-ui__table">
