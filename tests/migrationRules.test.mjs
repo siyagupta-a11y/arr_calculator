@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   calculateMigrationMetrics,
-  isExplicitV3ToV4Migration,
+  isHubspotMigrationUpsellType,
   migrationPlanVersion,
   migrationReportWindow,
 } from "../src/lib/migrationRules.ts";
@@ -36,10 +36,11 @@ test("recognizes v4 plan lines and treats unversioned legacy plans as v3", () =>
   assert.equal(migrationPlanVersion(["AI Tokens (v4)"]), null);
 });
 
-test("recognizes explicit HubSpot migration deal names", () => {
-  assert.equal(isExplicitV3ToV4Migration(["Circuit Board Medics - v3 to v4 upsell"]), true);
-  assert.equal(isExplicitV3ToV4Migration(["Corel - Migration"]), true);
-  assert.equal(isExplicitV3ToV4Migration(["Opswat Renewal 2026"]), false);
+test("requires the HubSpot Upsell Type property to be Migration", () => {
+  assert.equal(isHubspotMigrationUpsellType("Migration"), true);
+  assert.equal(isHubspotMigrationUpsellType(" migration "), true);
+  assert.equal(isHubspotMigrationUpsellType("Account growth"), false);
+  assert.equal(isHubspotMigrationUpsellType("Corel - Migration"), false);
 });
 
 test("calculates ARR and logo totals for an inclusive date range", () => {

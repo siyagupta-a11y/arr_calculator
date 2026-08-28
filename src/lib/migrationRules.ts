@@ -52,14 +52,8 @@ function normalizedWords(values: string[]) {
     .replace(/\s+/g, " ");
 }
 
-export function isExplicitV3ToV4Migration(values: string[]) {
-  const normalized = normalizedWords(values);
-  if (!normalized) return false;
-  return (
-    /\bv3\s*(?:to|into|→|->)\s*v4\b/.test(normalized) ||
-    /\bv3\b.*\bv4\b/.test(normalized) ||
-    /\bmigrat(?:e|ed|ing|ion)\b/.test(normalized)
-  );
+export function isHubspotMigrationUpsellType(value: unknown) {
+  return String(value || "").trim().toLowerCase() === "migration";
 }
 
 export function migrationPlanVersion(

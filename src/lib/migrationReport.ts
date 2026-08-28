@@ -9,7 +9,7 @@ import {
 import { computeCalculatedArrForLineItem, FX_TARGET_CURRENCY, LI_PROPS, parseDate, round2 } from "@/lib/logic";
 import {
   calculateMigrationMetrics,
-  isExplicitV3ToV4Migration,
+  isHubspotMigrationUpsellType,
   migrationPlanVersion,
   migrationReportWindow,
 } from "@/lib/migrationRules";
@@ -77,7 +77,7 @@ type HubspotDealPlanRecord = {
   companyId: string;
   companyName: string;
   companyWorkspaceId: string;
-  explicitMigration: boolean;
+  migrationUpsell: boolean;
   v3Arr: number;
   v4Arr: number;
 };
@@ -165,7 +165,7 @@ async function generateHubspotMigrations(options: {
   );
   const deals = (
     await fetchHubspotSalesDeals(
-      ["dealname", "dealtype", "pipeline", "closedate", "deal_currency_code", "workspace_id"],
+      ["dealname", "dealtype", "pipeline", "closedate", "deal_currency_code", "workspace_id", "upsell_type"],
       closedWonStageId,
     )
   ).filter((deal) => String(deal.properties?.pipeline || "").trim() === salesPipelineId);
@@ -230,14 +230,14 @@ async function generateHubspotMigrations(options: {
     }
 
     const dealName = String(deal.properties?.dealname || "").trim() || `Deal ${dealId}`;
-    const explicitMigration = isExplicitV3ToV4Migration([dealName]);
+    const migrationUpsell = isHubspotMigrationUpsellType(deal.properties?.upsell_type);
     let v3Arr = 0;
     let v4Arr = 0;
     for (const lineItemId of lineItemIdsByDeal.get(dealId) || []) {
       const lineItem = lineItemsById.get(lineItemId);
       const version = migrationPlanVersion(
         lineItemDescriptions(lineItem),
-        explicitMigration ? "v4" : "v3",
+        migrationUpsell ? "v4" : "v3",
       );
       if (!version) continue;
       const arr = computeCalculatedArrForLineItem(lineItem?.properties || {});
@@ -255,7 +255,7 @@ async function generateHubspotMigrations(options: {
       companyId,
       companyName,
       companyWorkspaceId,
-      explicitMigration,
+      migrationUpsell,
       v3Arr: round2(v3Arr),
       v4Arr: round2(v4Arr),
     });
@@ -271,12 +271,11 @@ async function generateHubspotMigrations(options: {
   for (const records of recordsByCustomer.values()) {
     const sorted = records.slice().sort((a, b) => a.closeDate.localeCompare(b.closeDate) || a.dealId.localeCompare(b.dealId));
     let historicalV3Arr = 0;
-    let v4Seen = false;
+    let migrationSeen = false;
     for (const record of sorted) {
-      const hasV3Before = historicalV3Arr > 0 || record.v3Arr > 0 || record.explicitMigration;
-      if (!v4Seen && record.v4Arr > 0) {
-        v4Seen = true;
-        if (hasV3Before && record.closeDate >= options.startDate && record.closeDate <= options.endDate) {
+      if (!migrationSeen && record.migrationUpsell && record.v4Arr > 0) {
+        migrationSeen = true;
+        if (record.closeDate >= options.startDate && record.closeDate <= options.endDate) {
           const workspaceId = record.workspaceId || record.companyWorkspaceId;
           migrations.push({
             migrationKey: `hubspot:${record.customerKey}`,
@@ -406,7 +405,7 @@ export async function generateMigrationReport(options?: { asOfDate?: string }): 
     methodology: [
       "A customer is counted once, on the first day a v4 plan has positive ARR while that customer had positive v3 plan ARR immediately beforehand.",
       "Stripe results come from the Stripe data-pipeline subscription-item change events in BigQuery. Add-ons, AI tokens, conversation sessions, and web-search/crawl charges are excluded.",
-      "HubSpot results independently use closed-won migration deals in the Sales Default Pipeline. Explicit migration deals do not require a matching Stripe customer; v4 ARR is annualized and converted using the HubSpot CARR report conventions.",
+      "HubSpot results independently use closed-won Sales Default Pipeline deals whose Upsell Type property is Migration. They do not require a matching Stripe customer; v4 ARR is annualized and converted using the HubSpot CARR report conventions.",
       "Stripe / BigQuery and HubSpot Sales Default Pipeline customers are counted as independent migration populations; neither source requires a matching record in the other.",
     ],
   };

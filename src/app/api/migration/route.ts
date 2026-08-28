@@ -9,7 +9,7 @@ const CACHE_TTL_MS = readTtlMs("API_MIGRATION_CACHE_TTL_MS", 5 * 60 * 1000);
 
 export async function GET() {
   try {
-    const report = await getOrSetCache("api:migration:v2", CACHE_TTL_MS, () => generateMigrationReport());
+    const report = await getOrSetCache("api:migration:v3", CACHE_TTL_MS, () => generateMigrationReport());
     return NextResponse.json(report);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
