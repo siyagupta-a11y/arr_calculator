@@ -869,6 +869,13 @@ textarea:focus-visible {
     var(--stripe-panel);
 }
 
+.account-management__all {
+  border-color: #20a997;
+  background:
+    radial-gradient(circle at top right, rgba(32, 169, 151, 0.16), transparent 32%),
+    var(--stripe-panel);
+}
+
 .account-management__owner-heading {
   display: flex;
   align-items: flex-start;
@@ -888,6 +895,11 @@ textarea:focus-visible {
 .account-management__nrr--team {
   border-color: #4f8df9;
   background: rgba(79, 141, 249, 0.12);
+}
+
+.account-management__nrr--all {
+  border-color: #20a997;
+  background: rgba(32, 169, 151, 0.12);
 }
 
 .account-management__nrr span {

@@ -53,11 +53,13 @@ export type AccountManagementReportResponse = {
   ownerSnapshotDate: string;
   targetCurrency: string;
   generatedAt: string;
+  allHubspot: RetentionMetrics;
   team: RetentionMetrics;
   owners: AccountManagementOwnerRow[];
   warnings: string[];
   methodology: {
     portfolioDealType: string;
+    allHubspotCohort: string;
     ownerCohort: string;
     carrCalculation: string;
     nrrFormula: string;
@@ -265,6 +267,8 @@ export async function generateAccountManagementReport(
     );
   }
 
+  const allHubspot = calculateRetentionMetrics(Array.from(carrByCompany.values()));
+
   const portfolioCompanyIds = Array.from(winningCandidatesByCompany.keys());
   const companiesById = portfolioCompanyIds.length
     ? await batchReadCompanies(portfolioCompanyIds, ["name"])
@@ -327,11 +331,14 @@ export async function generateAccountManagementReport(
     ownerSnapshotDate: window.previousMonthEnd,
     targetCurrency: FX_TARGET_CURRENCY,
     generatedAt: new Date().toISOString(),
+    allHubspot,
     team: calculateRetentionMetrics(allAccounts),
     owners,
     warnings: Array.from(warnings),
     methodology: {
       portfolioDealType: "All HubSpot deals whose Deal Type is Existing Business, regardless of deal stage.",
+      allHubspotCohort:
+        "Company-wide NRR includes every company with prior-month CARR across all deals in the HubSpot CARR report, regardless of deal owner. It is separate from the three-person Account Management team cohort.",
       ownerCohort: `Each company is assigned to Chloé, Sam, or Kieran using Existing Business deal-owner history as of ${window.previousMonthEnd}. If a company has conflicting managers, the most recently assigned deal wins.`,
       carrCalculation:
         "Previous and current ARR use the HubSpot CARR report's contracted-ARR engine: recurring line items are annualized, converted using close-month FX, and included when their contract window covers the month end.",

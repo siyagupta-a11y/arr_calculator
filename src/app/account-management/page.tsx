@@ -57,6 +57,48 @@ function signedMoney(value: number, currency: string) {
   return amount;
 }
 
+function RetentionSummaryStats({
+  metrics,
+  currency,
+}: {
+  metrics: AccountManagementReportResponse["team"];
+  currency: string;
+}) {
+  return (
+    <div className="stripe-ui__stats account-management__stats">
+      <article className="stripe-ui__stat">
+        <p className="stripe-ui__stat-label">Starting CARR</p>
+        <p className="stripe-ui__stat-value">{formatMoney(metrics.previousArr, currency)}</p>
+      </article>
+      <article className="stripe-ui__stat">
+        <p className="stripe-ui__stat-label">Ending CARR</p>
+        <p className="stripe-ui__stat-value">{formatMoney(metrics.currentArr, currency)}</p>
+      </article>
+      <article className="stripe-ui__stat">
+        <p className="stripe-ui__stat-label">Net change</p>
+        <p
+          className="stripe-ui__stat-value"
+          style={{ color: metrics.netChange < 0 ? "#b91c1c" : metrics.netChange > 0 ? "#166534" : undefined }}
+        >
+          {signedMoney(metrics.netChange, currency)}
+        </p>
+      </article>
+      <article className="stripe-ui__stat">
+        <p className="stripe-ui__stat-label">Expansion</p>
+        <p className="stripe-ui__stat-value">{formatMoney(metrics.expansionArr, currency)}</p>
+      </article>
+      <article className="stripe-ui__stat">
+        <p className="stripe-ui__stat-label">Contraction</p>
+        <p className="stripe-ui__stat-value">{formatMoney(metrics.contractionArr, currency)}</p>
+      </article>
+      <article className="stripe-ui__stat">
+        <p className="stripe-ui__stat-label">Churn</p>
+        <p className="stripe-ui__stat-value">{formatMoney(metrics.churnArr, currency)}</p>
+      </article>
+    </div>
+  );
+}
+
 function OwnerSection({
   owner,
   data,
@@ -287,11 +329,28 @@ export default function AccountManagementPage() {
 
       {!loading && data ? (
         <>
+          <section className="stripe-ui__panel account-management__all ui-reveal ui-reveal-2">
+            <div className="account-management__owner-heading">
+              <div>
+                <div className="stripe-ui__eyebrow">Company-wide retention</div>
+                <h2 className="stripe-ui__panel-title">{data.monthLabel} · All HubSpot deals</h2>
+                <p className="stripe-ui__panel-subtitle">
+                  Every owner and company in the HubSpot CARR report · {data.allHubspot.baselineAccountCount} starting compan{data.allHubspot.baselineAccountCount === 1 ? "y" : "ies"}
+                </p>
+              </div>
+              <div className="account-management__nrr account-management__nrr--all">
+                <span>All HubSpot NRR</span>
+                <strong>{formatPct(data.allHubspot.nrrPct)}</strong>
+              </div>
+            </div>
+            <RetentionSummaryStats metrics={data.allHubspot} currency={data.targetCurrency} />
+          </section>
+
           <section className="stripe-ui__panel account-management__team ui-reveal ui-reveal-2">
             <div className="account-management__owner-heading">
               <div>
-                <div className="stripe-ui__eyebrow">Team retention</div>
-                <h2 className="stripe-ui__panel-title">{data.monthLabel} NRR</h2>
+                <div className="stripe-ui__eyebrow">Account Management team retention</div>
+                <h2 className="stripe-ui__panel-title">{data.monthLabel} · Chloé, Sam &amp; Kieran</h2>
                 <p className="stripe-ui__panel-subtitle">
                   Owner snapshot: {data.ownerSnapshotDate} · {data.team.baselineAccountCount} starting account{data.team.baselineAccountCount === 1 ? "" : "s"}
                 </p>
@@ -301,32 +360,7 @@ export default function AccountManagementPage() {
                 <strong>{formatPct(data.team.nrrPct)}</strong>
               </div>
             </div>
-            <div className="stripe-ui__stats account-management__stats">
-              <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Starting CARR</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.team.previousArr, data.targetCurrency)}</p>
-              </article>
-              <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Ending CARR</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.team.currentArr, data.targetCurrency)}</p>
-              </article>
-              <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Net change</p>
-                <p className="stripe-ui__stat-value">{signedMoney(data.team.netChange, data.targetCurrency)}</p>
-              </article>
-              <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Expansion</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.team.expansionArr, data.targetCurrency)}</p>
-              </article>
-              <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Contraction</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.team.contractionArr, data.targetCurrency)}</p>
-              </article>
-              <article className="stripe-ui__stat">
-                <p className="stripe-ui__stat-label">Churn</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.team.churnArr, data.targetCurrency)}</p>
-              </article>
-            </div>
+            <RetentionSummaryStats metrics={data.team} currency={data.targetCurrency} />
             {data.warnings.length ? (
               <div className="commissions-warning">
                 {data.warnings.map((warning) => <div key={warning}>{warning}</div>)}
@@ -340,6 +374,7 @@ export default function AccountManagementPage() {
             <h2 className="stripe-ui__panel-title">Methodology</h2>
             <div className="account-management__methodology">
               <p><strong>Portfolio:</strong> {data.methodology.portfolioDealType}</p>
+              <p><strong>Company-wide cohort:</strong> {data.methodology.allHubspotCohort}</p>
               <p><strong>Ownership:</strong> {data.methodology.ownerCohort}</p>
               <p><strong>CARR:</strong> {data.methodology.carrCalculation}</p>
               <p><strong>NRR:</strong> {data.methodology.nrrFormula}</p>
