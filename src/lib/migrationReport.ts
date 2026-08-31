@@ -847,7 +847,7 @@ export async function generateMigrationReport(options?: {
       "HubSpot results independently use closed-won Sales Default Pipeline deals whose Upsell Type property is Migration. They do not require a matching Stripe customer; v4 ARR is annualized and converted using the HubSpot CARR report conventions.",
       "Stripe / BigQuery and HubSpot Sales Default Pipeline customers are counted as independent migration populations; neither source requires a matching record in the other.",
       "Downloadable CSVs use the same customer rows as the clicked totals. Stripe customers sharing one workspace remain one counted row, with multiple customer IDs or emails pipe-separated in that row.",
-      "The selected date range controls the migration totals, source totals, monthly chart, and migrated-customer list. The range-end month card covers only the selected portion of that month.",
+      "The selected date range controls the migration totals, source totals, monthly chart, and migrated-customer list. Each chart point groups migrations in that calendar month within the selected range.",
       "ARR migrated is the qualifying V2/V3 ARR immediately before migration. Resulting expansion is signed V4 ARR immediately after migration minus that pre-migration ARR; a negative value represents contraction.",
       "Previous plan is the customer's active V2/V3 base plan immediately before migration. Plan at range end reflects active base-plan subscription items on the selected end date, when available.",
       "The fiscal-year goal is 70% of customers on V2/V3 at the start of April 1. The logo target is rounded up to a whole customer and divided evenly across 12 months.",

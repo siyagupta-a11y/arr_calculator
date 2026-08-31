@@ -47,6 +47,19 @@ function formatSignedMoney(value: number, currency: string) {
   return numeric > 0 ? `+${formatMoney(numeric, currency)}` : formatMoney(numeric, currency);
 }
 
+function formatCompactMoney(value: number, currency: string) {
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: String(currency || "USD").toUpperCase(),
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }).format(Number(value || 0));
+  } catch {
+    return formatNumber(value, 0);
+  }
+}
+
 function progressWidth(percent: number) {
   return `${Math.max(0, Math.min(100, Number(percent || 0)))}%`;
 }
@@ -187,10 +200,45 @@ export default function MigrationPage() {
     void load(startDate, endDate);
   }
 
-  const maxMonthlyArr = useMemo(
-    () => Math.max(1, ...(data?.months || []).map((month) => month.arrMigrated)),
-    [data],
-  );
+  const monthlyChart = useMemo(() => {
+    const months = data?.months || [];
+    const width = 1_000;
+    const height = 360;
+    const left = 88;
+    const right = 28;
+    const top = 28;
+    const bottom = 58;
+    const plotWidth = width - left - right;
+    const plotHeight = height - top - bottom;
+    const values = months.flatMap((month) => [
+      Math.max(0, month.arrMigrated),
+      Math.max(0, month.arrMigrated + month.resultingExpansion),
+    ]);
+    const maximumValue = Math.max(1, ...values);
+    const axisMaximum = maximumValue * 1.1;
+    const pointFor = (value: number, index: number) => ({
+      x: months.length === 1
+        ? left + plotWidth / 2
+        : left + (index / Math.max(1, months.length - 1)) * plotWidth,
+      y: top + plotHeight - (Math.max(0, value) / axisMaximum) * plotHeight,
+    });
+    const basePoints = months.map((month, index) => pointFor(month.arrMigrated, index));
+    const postMigrationPoints = months.map((month, index) => pointFor(
+      month.arrMigrated + month.resultingExpansion,
+      index,
+    ));
+    return {
+      width,
+      height,
+      left,
+      right,
+      top,
+      plotHeight,
+      axisMaximum,
+      basePoints,
+      postMigrationPoints,
+    };
+  }, [data]);
   const customerGroups = useMemo(() => {
     if (!data) return null;
     return {
@@ -198,7 +246,6 @@ export default function MigrationPage() {
       currentLegacy: data.customerLists.currentLegacy,
       fiscalYearMigrations: migrationRowsBetween(data, data.fiscalYearStart, data.rangeEnd),
       selectedRangeMigrations: migrationRowsBetween(data, data.rangeStart, data.rangeEnd),
-      currentMonthMigrations: migrationRowsBetween(data, data.currentMonthStart, data.rangeEnd),
     };
   }, [data]);
 
@@ -354,7 +401,7 @@ export default function MigrationPage() {
             <div className="migration__goal-progress-grid">
               <article className="migration__goal-progress">
                 <div className="migration__goal-progress-head">
-                  <span>Fiscal-year customers</span>
+                  <span>Progress toward customer goal</span>
                   <button
                     className="migration__download-inline"
                     type="button"
@@ -370,7 +417,7 @@ export default function MigrationPage() {
               </article>
               <article className="migration__goal-progress">
                 <div className="migration__goal-progress-head">
-                  <span>Fiscal-year legacy ARR migrated</span>
+                  <span>Progress toward ARR goal</span>
                   <button
                     className="migration__download-inline"
                     type="button"
@@ -384,40 +431,6 @@ export default function MigrationPage() {
                 <div className="migration__goal-track"><div style={{ width: progressWidth(data.goal.fiscalYearArrProgressPct) }} /></div>
                 <p>
                   {formatNumber(data.goal.fiscalYearArrProgressPct, 1)}% of ARR goal · {formatSignedMoney(data.fiscalYear.resultingExpansion, data.targetCurrency)} resulting expansion
-                </p>
-              </article>
-              <article className="migration__goal-progress migration__goal-progress--month">
-                <div className="migration__goal-progress-head">
-                  <span>Range-end month customers</span>
-                  <button
-                    className="migration__download-inline"
-                    type="button"
-                    disabled={!customerGroups?.currentMonthMigrations.length}
-                    onClick={() => downloadCustomers("range-end-month-migrated-customers", customerGroups?.currentMonthMigrations || [])}
-                    title="Download the migrated customers in the numerator"
-                  >
-                    {data.currentMonth.logosMigrated} / {formatNumber(data.goal.monthlyCustomerTarget)}
-                  </button>
-                </div>
-                <div className="migration__goal-track"><div style={{ width: progressWidth(data.goal.currentMonthCustomerProgressPct) }} /></div>
-                <p>{formatNumber(data.goal.currentMonthCustomerProgressPct, 1)}% of monthly target</p>
-              </article>
-              <article className="migration__goal-progress migration__goal-progress--month">
-                <div className="migration__goal-progress-head">
-                  <span>Range-end month legacy ARR migrated</span>
-                  <button
-                    className="migration__download-inline"
-                    type="button"
-                    disabled={!customerGroups?.currentMonthMigrations.length}
-                    onClick={() => downloadCustomers("range-end-month-migrated-arr-customers", customerGroups?.currentMonthMigrations || [])}
-                    title="Download the customers behind the migrated ARR"
-                  >
-                    {formatMoney(data.currentMonth.arrMigrated, data.targetCurrency)} / {formatMoney(data.goal.monthlyArrTarget, data.targetCurrency)}
-                  </button>
-                </div>
-                <div className="migration__goal-track"><div style={{ width: progressWidth(data.goal.currentMonthArrProgressPct) }} /></div>
-                <p>
-                  {formatNumber(data.goal.currentMonthArrProgressPct, 1)}% of monthly target · {formatSignedMoney(data.currentMonth.resultingExpansion, data.targetCurrency)} resulting expansion
                 </p>
               </article>
             </div>
@@ -464,36 +477,6 @@ export default function MigrationPage() {
                 <p className="stripe-ui__stat-label">Selected-range logos migrated</p>
                 <p className="stripe-ui__stat-value">{data.selectedRange.logosMigrated}</p>
               </button>
-              <button
-                className="stripe-ui__stat migration__headline-stat migration__headline-stat--month migration__download-card"
-                type="button"
-                disabled={!customerGroups?.currentMonthMigrations.length}
-                onClick={() => downloadCustomers("range-end-month-migrated-arr-customers", customerGroups?.currentMonthMigrations || [])}
-                title="Download the customers behind this ARR"
-              >
-                <p className="stripe-ui__stat-label">Range-end month ARR migrated before migration</p>
-                <p className="stripe-ui__stat-value">{formatMoney(data.currentMonth.arrMigrated, data.targetCurrency)}</p>
-              </button>
-              <button
-                className="stripe-ui__stat migration__headline-stat migration__headline-stat--month migration__headline-stat--expansion migration__download-card"
-                type="button"
-                disabled={!customerGroups?.currentMonthMigrations.length}
-                onClick={() => downloadCustomers("range-end-month-resulting-expansion-customers", customerGroups?.currentMonthMigrations || [])}
-                title="Download the customers behind this expansion"
-              >
-                <p className="stripe-ui__stat-label">Range-end month resulting expansion</p>
-                <p className="stripe-ui__stat-value">{formatSignedMoney(data.currentMonth.resultingExpansion, data.targetCurrency)}</p>
-              </button>
-              <button
-                className="stripe-ui__stat migration__headline-stat migration__headline-stat--month migration__download-card"
-                type="button"
-                disabled={!customerGroups?.currentMonthMigrations.length}
-                onClick={() => downloadCustomers("range-end-month-migrated-customers", customerGroups?.currentMonthMigrations || [])}
-                title="Download the customers behind this total"
-              >
-                <p className="stripe-ui__stat-label">Range-end month logos migrated</p>
-                <p className="stripe-ui__stat-value">{data.currentMonth.logosMigrated}</p>
-              </button>
             </div>
             {data.warnings.length ? (
               <div className="commissions-warning">
@@ -502,56 +485,103 @@ export default function MigrationPage() {
             ) : null}
           </section>
 
-          <section className="stripe-ui__panel ui-reveal ui-reveal-2">
-            <h2 className="stripe-ui__panel-title">By source</h2>
-            <p className="stripe-ui__panel-subtitle">Stripe / BigQuery and HubSpot Sales Default Pipeline customers are counted independently.</p>
-            <div className="migration__source-grid">
-              {data.sourceBreakdown.map((source) => {
-                const population = data.goal.sourcePopulations.find((item) => item.source === source.source);
-                const sourceOpeningRows = (customerGroups?.openingLegacy || []).filter((row) => row.source === source.source);
-                const sourceCurrentRows = (customerGroups?.currentLegacy || []).filter((row) => row.source === source.source);
-                const sourceSelectedRows = (customerGroups?.selectedRangeMigrations || []).filter((row) => row.source === source.source);
-                const sourceMonthRows = (customerGroups?.currentMonthMigrations || []).filter((row) => row.source === source.source);
-                return (
-                  <article className="migration__source-card" key={source.source}>
-                    <h3>{source.sourceLabel}</h3>
-                    <button className="migration__source-download" type="button" disabled={!sourceOpeningRows.length} onClick={() => downloadCustomers(`${source.source}-opening-v2-v3-customers`, sourceOpeningRows)}>
-                      <span>Opening V2/V3 customers</span><strong>{population?.opening.customers || 0}</strong>
-                    </button>
-                    <button className="migration__source-download" type="button" disabled={!sourceCurrentRows.length} onClick={() => downloadCustomers(`${source.source}-v2-v3-at-range-end`, sourceCurrentRows)}>
-                      <span>V2/V3 customers at range end</span><strong>{population?.current.customers || 0}</strong>
-                    </button>
-                    <button className="migration__source-download" type="button" disabled={!sourceSelectedRows.length} onClick={() => downloadCustomers(`${source.source}-selected-range-migrated-arr-customers`, sourceSelectedRows)}>
-                      <span>Selected-range ARR migrated before migration</span><strong>{formatMoney(source.selectedRange.arrMigrated, data.targetCurrency)}</strong>
-                    </button>
-                    <button className="migration__source-download" type="button" disabled={!sourceSelectedRows.length} onClick={() => downloadCustomers(`${source.source}-selected-range-resulting-expansion-customers`, sourceSelectedRows)}>
-                      <span>Selected-range resulting expansion</span><strong>{formatSignedMoney(source.selectedRange.resultingExpansion, data.targetCurrency)}</strong>
-                    </button>
-                    <button className="migration__source-download" type="button" disabled={!sourceSelectedRows.length} onClick={() => downloadCustomers(`${source.source}-selected-range-migrated-customers`, sourceSelectedRows)}>
-                      <span>Selected-range logos migrated</span><strong>{source.selectedRange.logosMigrated}</strong>
-                    </button>
-                    <button className="migration__source-download" type="button" disabled={!sourceMonthRows.length} onClick={() => downloadCustomers(`${source.source}-range-end-month-migrated-arr-customers`, sourceMonthRows)}>
-                      <span>Range-end month ARR migrated before migration</span><strong>{formatMoney(source.currentMonth.arrMigrated, data.targetCurrency)}</strong>
-                    </button>
-                    <button className="migration__source-download" type="button" disabled={!sourceMonthRows.length} onClick={() => downloadCustomers(`${source.source}-range-end-month-resulting-expansion-customers`, sourceMonthRows)}>
-                      <span>Range-end month resulting expansion</span><strong>{formatSignedMoney(source.currentMonth.resultingExpansion, data.targetCurrency)}</strong>
-                    </button>
-                    <button className="migration__source-download" type="button" disabled={!sourceMonthRows.length} onClick={() => downloadCustomers(`${source.source}-range-end-month-migrated-customers`, sourceMonthRows)}>
-                      <span>Range-end month logos</span><strong>{source.currentMonth.logosMigrated}</strong>
-                    </button>
-                  </article>
-                );
-              })}
+          <section className="stripe-ui__panel migration__performance ui-reveal">
+            <div className="stripe-ui__section-head">
+              <div>
+                <h2 className="stripe-ui__panel-title">Month-by-month migration performance</h2>
+                <p className="stripe-ui__panel-subtitle">
+                  Base revenue migrated is the V2/V3 ARR immediately before migration. ARR after migration adds the resulting expansion or contraction.
+                </p>
+              </div>
+              <div className="migration__chart-legend" aria-label="Chart legend">
+                <span><i className="migration__chart-key migration__chart-key--base" />Base revenue migrated</span>
+                <span><i className="migration__chart-key migration__chart-key--after" />ARR after migration</span>
+              </div>
             </div>
-          </section>
-
-          <section className="stripe-ui__panel ui-reveal">
-            <h2 className="stripe-ui__panel-title">Monthly migration pace</h2>
-            <p className="stripe-ui__panel-subtitle">Pre-migration ARR, resulting expansion, and customer logos migrated in each month of the selected range.</p>
-            <div className="migration__month-list">
+            <div className="migration__chart-wrap">
+              <svg
+                className="migration__chart"
+                viewBox={`0 0 ${monthlyChart.width} ${monthlyChart.height}`}
+                role="img"
+                aria-labelledby="migration-performance-title migration-performance-description"
+              >
+                <title id="migration-performance-title">Monthly pre-migration and post-migration ARR</title>
+                <desc id="migration-performance-description">
+                  Two lines compare V2/V3 ARR immediately before migration with V4 ARR immediately after migration for each month in the selected range.
+                </desc>
+                {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+                  const y = monthlyChart.top + monthlyChart.plotHeight - (ratio * monthlyChart.plotHeight);
+                  return (
+                    <g key={ratio}>
+                      <line
+                        className="migration__chart-grid-line"
+                        x1={monthlyChart.left}
+                        x2={monthlyChart.width - monthlyChart.right}
+                        y1={y}
+                        y2={y}
+                      />
+                      <text className="migration__chart-axis-label" x={monthlyChart.left - 14} y={y + 4} textAnchor="end">
+                        {formatCompactMoney(monthlyChart.axisMaximum * ratio, data.targetCurrency)}
+                      </text>
+                    </g>
+                  );
+                })}
+                {data.months.map((month, index) => {
+                  const point = monthlyChart.basePoints[index];
+                  return (
+                    <g key={month.monthKey}>
+                      <line
+                        className="migration__chart-month-line"
+                        x1={point.x}
+                        x2={point.x}
+                        y1={monthlyChart.top}
+                        y2={monthlyChart.top + monthlyChart.plotHeight}
+                      />
+                      <text
+                        className="migration__chart-month-label"
+                        x={point.x}
+                        y={monthlyChart.height - 20}
+                        textAnchor="middle"
+                      >
+                        {month.monthLabel}
+                      </text>
+                    </g>
+                  );
+                })}
+                <polyline
+                  className="migration__chart-line migration__chart-line--base"
+                  points={monthlyChart.basePoints.map((point) => `${point.x},${point.y}`).join(" ")}
+                />
+                <polyline
+                  className="migration__chart-line migration__chart-line--after"
+                  points={monthlyChart.postMigrationPoints.map((point) => `${point.x},${point.y}`).join(" ")}
+                />
+                {data.months.map((month, index) => (
+                  <g key={`${month.monthKey}-points`}>
+                    <circle
+                      className="migration__chart-point migration__chart-point--base"
+                      cx={monthlyChart.basePoints[index].x}
+                      cy={monthlyChart.basePoints[index].y}
+                      r="5"
+                    >
+                      <title>{`${month.monthLabel}: ${formatMoney(month.arrMigrated, data.targetCurrency)} base revenue migrated`}</title>
+                    </circle>
+                    <circle
+                      className="migration__chart-point migration__chart-point--after"
+                      cx={monthlyChart.postMigrationPoints[index].x}
+                      cy={monthlyChart.postMigrationPoints[index].y}
+                      r="5"
+                    >
+                      <title>{`${month.monthLabel}: ${formatMoney(month.arrMigrated + month.resultingExpansion, data.targetCurrency)} ARR after migration`}</title>
+                    </circle>
+                  </g>
+                ))}
+              </svg>
+            </div>
+            <div className="migration__chart-values">
               {data.months.map((month) => (
                 <button
-                  className="migration__month-row migration__download-row"
+                  className="migration__chart-value migration__download-row"
                   type="button"
                   key={month.monthKey}
                   disabled={!customerGroups?.selectedRangeMigrations.some((row) => row.migratedAt.slice(0, 7) === month.monthKey)}
@@ -561,17 +591,10 @@ export default function MigrationPage() {
                   )}
                   title="Download the customers behind this month"
                 >
-                  <div className="migration__month-label">
-                    <strong>{month.monthLabel}</strong>
-                    <span>{month.logosMigrated} logo{month.logosMigrated === 1 ? "" : "s"}</span>
-                  </div>
-                  <div className="migration__month-track" aria-label={`${month.monthLabel}: ${formatMoney(month.arrMigrated, data.targetCurrency)}`}>
-                    <div style={{ width: `${Math.max(0, (month.arrMigrated / maxMonthlyArr) * 100)}%` }} />
-                  </div>
-                  <div className="migration__month-amount">
-                    <strong>{formatMoney(month.arrMigrated, data.targetCurrency)} migrated</strong>
-                    <span>{formatSignedMoney(month.resultingExpansion, data.targetCurrency)} expansion</span>
-                  </div>
+                  <strong>{month.monthLabel}</strong>
+                  <span>{formatMoney(month.arrMigrated, data.targetCurrency)} base</span>
+                  <span>{formatMoney(month.arrMigrated + month.resultingExpansion, data.targetCurrency)} after migration</span>
+                  <small>{month.logosMigrated} logo{month.logosMigrated === 1 ? "" : "s"}</small>
                 </button>
               ))}
             </div>
@@ -637,6 +660,39 @@ export default function MigrationPage() {
             <h2 className="stripe-ui__panel-title">Methodology</h2>
             <div className="account-management__methodology">
               {data.methodology.map((line) => <p key={line}>{line}</p>)}
+            </div>
+          </section>
+
+          <section className="stripe-ui__panel ui-reveal ui-reveal-2">
+            <h2 className="stripe-ui__panel-title">By source</h2>
+            <p className="stripe-ui__panel-subtitle">Stripe / BigQuery and HubSpot Sales Default Pipeline customers are counted independently.</p>
+            <div className="migration__source-grid">
+              {data.sourceBreakdown.map((source) => {
+                const population = data.goal.sourcePopulations.find((item) => item.source === source.source);
+                const sourceOpeningRows = (customerGroups?.openingLegacy || []).filter((row) => row.source === source.source);
+                const sourceCurrentRows = (customerGroups?.currentLegacy || []).filter((row) => row.source === source.source);
+                const sourceSelectedRows = (customerGroups?.selectedRangeMigrations || []).filter((row) => row.source === source.source);
+                return (
+                  <article className="migration__source-card" key={source.source}>
+                    <h3>{source.sourceLabel}</h3>
+                    <button className="migration__source-download" type="button" disabled={!sourceOpeningRows.length} onClick={() => downloadCustomers(`${source.source}-opening-v2-v3-customers`, sourceOpeningRows)}>
+                      <span>Opening V2/V3 customers</span><strong>{population?.opening.customers || 0}</strong>
+                    </button>
+                    <button className="migration__source-download" type="button" disabled={!sourceCurrentRows.length} onClick={() => downloadCustomers(`${source.source}-v2-v3-at-range-end`, sourceCurrentRows)}>
+                      <span>V2/V3 customers at range end</span><strong>{population?.current.customers || 0}</strong>
+                    </button>
+                    <button className="migration__source-download" type="button" disabled={!sourceSelectedRows.length} onClick={() => downloadCustomers(`${source.source}-selected-range-migrated-arr-customers`, sourceSelectedRows)}>
+                      <span>Selected-range ARR migrated before migration</span><strong>{formatMoney(source.selectedRange.arrMigrated, data.targetCurrency)}</strong>
+                    </button>
+                    <button className="migration__source-download" type="button" disabled={!sourceSelectedRows.length} onClick={() => downloadCustomers(`${source.source}-selected-range-resulting-expansion-customers`, sourceSelectedRows)}>
+                      <span>Selected-range resulting expansion</span><strong>{formatSignedMoney(source.selectedRange.resultingExpansion, data.targetCurrency)}</strong>
+                    </button>
+                    <button className="migration__source-download" type="button" disabled={!sourceSelectedRows.length} onClick={() => downloadCustomers(`${source.source}-selected-range-migrated-customers`, sourceSelectedRows)}>
+                      <span>Selected-range logos migrated</span><strong>{source.selectedRange.logosMigrated}</strong>
+                    </button>
+                  </article>
+                );
+              })}
             </div>
           </section>
         </>
