@@ -368,6 +368,78 @@ export default function AccountManagementPage() {
             ) : null}
           </section>
 
+          <section className="stripe-ui__panel account-management__outside ui-reveal">
+            <div className="account-management__owner-heading">
+              <div>
+                <div className="stripe-ui__eyebrow">Coverage outside the AM team</div>
+                <h2 className="stripe-ui__panel-title">Companies outside Chloé, Sam &amp; Kieran</h2>
+                <p className="stripe-ui__panel-subtitle">
+                  {data.outsideTeam.baselineAccountCount} compan{data.outsideTeam.baselineAccountCount === 1 ? "y" : "ies"} in company-wide NRR but not in the three-manager cohort · owner snapshot {data.ownerSnapshotDate}
+                </p>
+              </div>
+              <div className="account-management__nrr account-management__nrr--outside">
+                <span>Outside-team NRR</span>
+                <strong>{formatPct(data.outsideTeam.nrrPct)}</strong>
+              </div>
+            </div>
+            <RetentionSummaryStats metrics={data.outsideTeam} currency={data.targetCurrency} />
+            <div className="stripe-ui__table-wrap">
+              <table className="stripe-ui__table">
+                <thead>
+                  <tr>
+                    <th>Company</th>
+                    <th>Deal owner at snapshot</th>
+                    <th>Deal(s)</th>
+                    <th>{data.previousMonthLabel} CARR</th>
+                    <th>{data.currentMonthLabel} CARR</th>
+                    <th>Change</th>
+                    <th>Account NRR</th>
+                    <th>Movement</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.outsideTeam.accounts.length ? data.outsideTeam.accounts.map((account) => (
+                    <tr key={account.companyId}>
+                      <td>
+                        <a href={account.companyUrl} target="_blank" rel="noreferrer" style={{ fontWeight: 700 }}>
+                          {account.companyName}
+                        </a>
+                        <div className="account-management__muted">Company {account.companyId}</div>
+                      </td>
+                      <td>
+                        <strong>{account.ownerName}</strong>
+                        <div className="account-management__muted">{account.ownerId ? `Owner ${account.ownerId}` : "No owner at snapshot"}</div>
+                      </td>
+                      <td>
+                        <div className="account-management__deals">
+                          {account.portfolioDealIds.length ? account.portfolioDealNames.map((dealName, index) => (
+                            <a
+                              href={account.portfolioDealUrls[index]}
+                              target="_blank"
+                              rel="noreferrer"
+                              key={account.portfolioDealIds[index]}
+                            >
+                              {dealName}
+                            </a>
+                          )) : "—"}
+                        </div>
+                      </td>
+                      <td>{formatMoney(account.previousArr, data.targetCurrency)}</td>
+                      <td>{formatMoney(account.currentArr, data.targetCurrency)}</td>
+                      <td style={{ color: account.netChange < 0 ? "#b91c1c" : account.netChange > 0 ? "#166534" : undefined }}>
+                        {signedMoney(account.netChange, data.targetCurrency)}
+                      </td>
+                      <td>{formatPct(account.nrrPct)}</td>
+                      <td><span className={movementClass(account.movement)}>{movementLabel(account.movement)}</span></td>
+                    </tr>
+                  )) : (
+                    <tr><td colSpan={8}>Every company in the company-wide NRR cohort is assigned to one of the three account managers.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
           {visibleOwners.map((owner) => <OwnerSection owner={owner} data={data} key={owner.ownerId} />)}
 
           <section className="stripe-ui__panel ui-reveal">
@@ -375,6 +447,7 @@ export default function AccountManagementPage() {
             <div className="account-management__methodology">
               <p><strong>Portfolio:</strong> {data.methodology.portfolioDealType}</p>
               <p><strong>Company-wide cohort:</strong> {data.methodology.allHubspotCohort}</p>
+              <p><strong>Outside-team cohort:</strong> {data.methodology.outsideTeamCohort}</p>
               <p><strong>Ownership:</strong> {data.methodology.ownerCohort}</p>
               <p><strong>CARR:</strong> {data.methodology.carrCalculation}</p>
               <p><strong>NRR:</strong> {data.methodology.nrrFormula}</p>

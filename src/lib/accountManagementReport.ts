@@ -12,7 +12,9 @@ import {
   batchReadDealPropertyHistory,
   fetchCompanyIdsForDeals,
   fetchDealsByDealType,
-  type HubspotPropertyHistoryValue,
+  fetchHubspotOwnersById,
+  type HubspotDealWithPropertyHistory,
+  type HubspotOwner,
 } from "@/lib/hubspot";
 import { FX_TARGET_CURRENCY, round2 } from "@/lib/logic";
 import { generateReport } from "@/lib/report";
@@ -43,6 +45,11 @@ export type AccountManagementOwnerRow = RetentionMetrics & {
   accounts: AccountManagementAccountRow[];
 };
 
+export type AccountManagementOutsideTeamRow = AccountManagementAccountRow & {
+  ownerId: string;
+  ownerName: string;
+};
+
 export type AccountManagementReportResponse = {
   month: string;
   monthLabel: string;
@@ -55,11 +62,13 @@ export type AccountManagementReportResponse = {
   generatedAt: string;
   allHubspot: RetentionMetrics;
   team: RetentionMetrics;
+  outsideTeam: RetentionMetrics & { accounts: AccountManagementOutsideTeamRow[] };
   owners: AccountManagementOwnerRow[];
   warnings: string[];
   methodology: {
     portfolioDealType: string;
     allHubspotCohort: string;
+    outsideTeamCohort: string;
     ownerCohort: string;
     carrCalculation: string;
     nrrFormula: string;
@@ -103,6 +112,21 @@ function timestampMs(value: unknown) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function winningOwnerCandidates(candidates: PortfolioCandidate[]) {
+  const sorted = candidates.slice().sort((a, b) => {
+    const effectiveA = timestampMs(a.ownerAssignedAt) || timestampMs(a.createdAt);
+    const effectiveB = timestampMs(b.ownerAssignedAt) || timestampMs(b.createdAt);
+    return effectiveB - effectiveA || b.dealId.localeCompare(a.dealId, undefined, { numeric: true });
+  });
+  const winningOwnerId = sorted[0]?.ownerId || "";
+  return sorted.filter((candidate) => candidate.ownerId === winningOwnerId);
+}
+
+function ownerDisplayName(owner: HubspotOwner | undefined, ownerId: string) {
+  const fullName = [owner?.firstName, owner?.lastName].map((value) => String(value || "").trim()).filter(Boolean).join(" ");
+  return fullName || String(owner?.email || "").trim() || (ownerId ? `Owner ${ownerId}` : "Unassigned");
+}
+
 function dealUrl(portalId: string, dealId: string) {
   return `https://app.hubspot.com/contacts/${portalId}/record/0-3/${dealId}?utm_source=arr_dashboard&utm_medium=internal&utm_campaign=account_management`;
 }
@@ -142,14 +166,12 @@ export async function generateAccountManagementReport(
     }),
   ]);
 
-  let historyByDealId = new Map<
-    string,
-    { propertiesWithHistory?: Record<string, HubspotPropertyHistoryValue[]> }
-  >();
+  let historyByDealId = new Map<string, HubspotDealWithPropertyHistory>();
   try {
+    const reportDealIds = carrReport.rows.map((row) => String(row.dealId || "").trim()).filter(Boolean);
     historyByDealId = await batchReadDealPropertyHistory(
-      portfolioDeals.map((deal) => String(deal.id || "")),
-      ["hubspot_owner_id"],
+      [...portfolioDeals.map((deal) => String(deal.id || "")), ...reportDealIds],
+      ["hubspot_owner_id", "hubspot_owner_assigneddate", "createdate", "dealname"],
     );
   } catch {
     warnings.add(
@@ -163,7 +185,6 @@ export async function generateAccountManagementReport(
   const companyIdsByPortfolioDeal = new Map(
     portfolioCompanyPairs.map((pair) => [pair.dealId, pair.ids]),
   );
-  const ownerConfigById = new Map(ACCOUNT_MANAGER_CONFIGS.map((owner) => [owner.ownerId, owner]));
   const candidatesByCompany = new Map<string, PortfolioCandidate[]>();
   let missingPortfolioCompanyCount = 0;
 
@@ -178,7 +199,7 @@ export async function generateAccountManagementReport(
       currentOwnerAssignedAt: currentProperty(deal, "hubspot_owner_assigneddate"),
       createdAt: currentProperty(deal, "createdate"),
     });
-    if (!ownerConfigById.has(ownerAtSnapshot.ownerId)) continue;
+    if (ownerAtSnapshot.source === "not_created") continue;
 
     const companyIds = companyIdsByPortfolioDeal.get(dealId) || [];
     const companyId = companyIds[0] || "";
@@ -207,17 +228,8 @@ export async function generateAccountManagementReport(
   const winningCandidatesByCompany = new Map<string, PortfolioCandidate[]>();
   let conflictingOwnerCount = 0;
   for (const [companyId, candidates] of candidatesByCompany.entries()) {
-    const sorted = candidates.slice().sort((a, b) => {
-      const effectiveA = timestampMs(a.ownerAssignedAt) || timestampMs(a.createdAt);
-      const effectiveB = timestampMs(b.ownerAssignedAt) || timestampMs(b.createdAt);
-      return effectiveB - effectiveA || b.dealId.localeCompare(a.dealId, undefined, { numeric: true });
-    });
-    const winningOwnerId = sorted[0].ownerId;
-    if (new Set(sorted.map((candidate) => candidate.ownerId)).size > 1) conflictingOwnerCount += 1;
-    winningCandidatesByCompany.set(
-      companyId,
-      sorted.filter((candidate) => candidate.ownerId === winningOwnerId),
-    );
+    if (new Set(candidates.map((candidate) => candidate.ownerId)).size > 1) conflictingOwnerCount += 1;
+    winningCandidatesByCompany.set(companyId, winningOwnerCandidates(candidates));
   }
 
   if (conflictingOwnerCount) {
@@ -241,6 +253,8 @@ export async function generateAccountManagementReport(
     fallbackReportCompanyPairs.map((pair) => [pair.dealId, pair.ids]),
   );
   const carrByCompany = new Map<string, CompanyCarr>();
+  const carrDealIdsByCompany = new Map<string, Set<string>>();
+  const carrDealNameById = new Map<string, string>();
   let unmappedCarrRowCount = 0;
 
   for (const row of carrReport.rows) {
@@ -258,6 +272,13 @@ export async function generateAccountManagementReport(
     if (!carrByCompany.has(companyId)) {
       carrByCompany.set(companyId, { companyName: String(row.accountName || "").trim(), previousArr: 0, currentArr: 0 });
     }
+    if (!carrDealIdsByCompany.has(companyId)) carrDealIdsByCompany.set(companyId, new Set());
+    if (dealId) {
+      carrDealIdsByCompany.get(companyId)!.add(dealId);
+      if (!carrDealNameById.has(dealId)) {
+        carrDealNameById.set(dealId, String(row.dealName || "").trim() || `Deal ${dealId}`);
+      }
+    }
     addCarrValue(carrByCompany.get(companyId)!, row, window.previousMonthKey, window.currentMonthKey);
   }
 
@@ -269,9 +290,43 @@ export async function generateAccountManagementReport(
 
   const allHubspot = calculateRetentionMetrics(Array.from(carrByCompany.values()));
 
-  const portfolioCompanyIds = Array.from(winningCandidatesByCompany.keys());
-  const companiesById = portfolioCompanyIds.length
-    ? await batchReadCompanies(portfolioCompanyIds, ["name"])
+  const carrCandidatesByCompany = new Map<string, PortfolioCandidate[]>();
+  for (const [companyId, dealIds] of carrDealIdsByCompany.entries()) {
+    for (const dealId of dealIds) {
+      const deal = historyByDealId.get(dealId);
+      const properties = deal?.properties || {};
+      const ownerAtSnapshot = dealOwnerAtCutoff({
+        history: deal?.propertiesWithHistory?.hubspot_owner_id,
+        cutoffIso: window.ownerCutoffIso,
+        currentOwnerId: String(properties.hubspot_owner_id || "").trim(),
+        currentOwnerAssignedAt: String(properties.hubspot_owner_assigneddate || "").trim(),
+        createdAt: String(properties.createdate || deal?.createdAt || "").trim(),
+      });
+      if (ownerAtSnapshot.source === "not_created") continue;
+      if (!carrCandidatesByCompany.has(companyId)) carrCandidatesByCompany.set(companyId, []);
+      carrCandidatesByCompany.get(companyId)!.push({
+        companyId,
+        ownerId: ownerAtSnapshot.ownerId,
+        ownerAssignedAt: ownerAtSnapshot.assignedAt,
+        createdAt: String(properties.createdate || deal?.createdAt || "").trim(),
+        dealId,
+        dealName: String(properties.dealname || "").trim() || carrDealNameById.get(dealId) || `Deal ${dealId}`,
+      });
+    }
+  }
+  const winningCarrCandidatesByCompany = new Map(
+    Array.from(carrCandidatesByCompany.entries()).map(([companyId, candidates]) => [
+      companyId,
+      winningOwnerCandidates(candidates),
+    ]),
+  );
+
+  const companyIdsToRead = Array.from(new Set([
+    ...winningCandidatesByCompany.keys(),
+    ...carrByCompany.keys(),
+  ]));
+  const companiesById = companyIdsToRead.length
+    ? await batchReadCompanies(companyIdsToRead, ["name"])
     : new Map();
   const accountsByOwnerId = new Map<string, AccountManagementAccountRow[]>(
     ACCOUNT_MANAGER_CONFIGS.map((owner) => [owner.ownerId, []]),
@@ -321,6 +376,46 @@ export async function generateAccountManagementReport(
     );
   }
 
+  const teamCompanyIds = new Set(allAccounts.map((account) => account.companyId));
+  const outsideDrafts = Array.from(carrByCompany.entries())
+    .filter(([companyId, carr]) => carr.previousArr > 0 && !teamCompanyIds.has(companyId))
+    .map(([companyId, carr]) => {
+      const candidates = winningCandidatesByCompany.get(companyId) || winningCarrCandidatesByCompany.get(companyId) || [];
+      return { companyId, carr, candidates, ownerId: candidates[0]?.ownerId || "" };
+    });
+  let hubspotOwnersById = new Map<string, HubspotOwner>();
+  try {
+    hubspotOwnersById = await fetchHubspotOwnersById(outsideDrafts.map((draft) => draft.ownerId));
+  } catch {
+    warnings.add("HubSpot owner names were unavailable for the outside-team list, so owner IDs are shown instead.");
+  }
+  const outsideAccounts: AccountManagementOutsideTeamRow[] = outsideDrafts
+    .map(({ companyId, carr, candidates, ownerId }) => {
+      const companyName =
+        String(companiesById.get(companyId)?.properties?.name || "").trim() ||
+        carr.companyName ||
+        `Company ${companyId}`;
+      const previousArr = round2(carr.previousArr);
+      const currentArr = round2(carr.currentArr);
+      const portfolioDealIds = candidates.map((candidate) => candidate.dealId);
+      return {
+        companyId,
+        companyName,
+        companyUrl: companyUrl(portalId, companyId),
+        ownerId,
+        ownerName: ownerDisplayName(hubspotOwnersById.get(ownerId), ownerId),
+        portfolioDealIds,
+        portfolioDealNames: candidates.map((candidate) => candidate.dealName),
+        portfolioDealUrls: portfolioDealIds.map((dealId) => dealUrl(portalId, dealId)),
+        previousArr,
+        currentArr,
+        netChange: round2(currentArr - previousArr),
+        nrrPct: previousArr > 0 ? round2((currentArr / previousArr) * 100) : null,
+        movement: retentionMovement(previousArr, currentArr),
+      };
+    })
+    .sort((a, b) => b.previousArr - a.previousArr || a.companyName.localeCompare(b.companyName));
+
   return {
     month: window.month,
     monthLabel: monthLabel(window.currentMonthKey),
@@ -333,12 +428,18 @@ export async function generateAccountManagementReport(
     generatedAt: new Date().toISOString(),
     allHubspot,
     team: calculateRetentionMetrics(allAccounts),
+    outsideTeam: {
+      ...calculateRetentionMetrics(outsideAccounts),
+      accounts: outsideAccounts,
+    },
     owners,
     warnings: Array.from(warnings),
     methodology: {
       portfolioDealType: "All HubSpot deals whose Deal Type is Existing Business, regardless of deal stage.",
       allHubspotCohort:
         "Company-wide NRR includes every company with prior-month CARR across all deals in the HubSpot CARR report, regardless of deal owner. It is separate from the three-person Account Management team cohort.",
+      outsideTeamCohort:
+        `The outside-team table is the company-wide prior-month NRR cohort minus companies assigned to Chloé, Sam, or Kieran on ${window.previousMonthEnd}. Deal owners use Existing Business ownership first, then the company's CARR-producing deal ownership when no Existing Business deal is available.`,
       ownerCohort: `Each company is assigned to Chloé, Sam, or Kieran using Existing Business deal-owner history as of ${window.previousMonthEnd}. If a company has conflicting managers, the most recently assigned deal wins.`,
       carrCalculation:
         "Previous and current ARR use the HubSpot CARR report's contracted-ARR engine: recurring line items are annualized, converted using close-month FX, and included when their contract window covers the month end.",
