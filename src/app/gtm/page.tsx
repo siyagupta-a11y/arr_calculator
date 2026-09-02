@@ -472,6 +472,7 @@ export default function GtmPage() {
             </p>
           </div>
           <div className="gtm__hero-links">
+            <Link href="/plg" className="stripe-ui__hero-link">PLG &amp; Sales NRR</Link>
             <Link href="/combined-all-subs" className="stripe-ui__hero-link">Combined All Subs</Link>
             <Link href="/scorecards" className="stripe-ui__hero-link">Team Scorecards</Link>
             <Link href="/tofu" className="stripe-ui__hero-link">ARR detail</Link>
