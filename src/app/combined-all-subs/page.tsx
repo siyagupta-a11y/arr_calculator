@@ -455,6 +455,9 @@ export default function CombinedAllSubsPage() {
             <Link href="/weekly-dashboard" className="stripe-ui__hero-link">
               Open Weekly Dashboard
             </Link>
+            <Link href="/gtm" className="stripe-ui__hero-link">
+              Open GTM
+            </Link>
             <Link href="/metrics-assistant" className="stripe-ui__hero-link">
               Open Metrics Assistant (Under maintenance, do not use)
             </Link>
