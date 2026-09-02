@@ -49,16 +49,6 @@ export type GtmArrBridgeRow = {
   netNewArr: number;
 };
 
-export type GtmWorkbookComparison = {
-  id: string;
-  label: string;
-  period: "Week" | "MTD";
-  workbookValue: number;
-  automatedValue: number;
-  variance: number;
-  matches: boolean;
-};
-
 export type GtmReportResponse = {
   monthKey: string;
   monthLabel: string;
@@ -73,20 +63,8 @@ export type GtmReportResponse = {
   metrics: GtmMetric[];
   arrBridge: GtmArrBridgeRow[];
   targetRows: ReturnType<typeof getGtmTargetRows>;
-  workbookComparison: GtmWorkbookComparison[];
   warnings: string[];
 };
-
-const WORKBOOK_AUGUST_30_REFERENCE = [
-  { id: "net_new_arr", label: "Net New ARR", week: 168048, mtd: 141277.05 },
-  { id: "selfserve_new", label: "PLG / self-serve ARR — new", week: 69540, mtd: 154727 },
-  { id: "sales_new", label: "Sales ARR — new", week: 14940, mtd: 56168.4 },
-  { id: "pipeline_created", label: "Pipeline $ created", week: 347896, mtd: 700109 },
-  { id: "selfserve_expansion", label: "Self-serve expansion", week: 36900, mtd: 111245.04 },
-  { id: "selfserve_churn", label: "Self-serve churn + contraction", week: -1068, mtd: -238292 },
-  { id: "sales_expansion", label: "Sales expansion", week: 57822, mtd: 197874 },
-  { id: "sales_churn", label: "Sales churn + contraction", week: -10086, mtd: -140445.39 },
-] as const;
 
 function parseIsoDate(value: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
@@ -344,19 +322,6 @@ export async function generateGtmReport(input: { weekEndDate?: string }): Promis
     buildMetric({ ...metricBase, id: "sales_churn", section: "Post-sales", label: "Sales churn + contraction", owner: "Frank Jessop", format: "currency", weekValue: sum([currentSales.churnArr, currentSales.contractionArr]), priorWeekValue: sum([priorSales.churnArr, priorSales.contractionArr]), mtdValue: sum([mtdSales.churnArr, mtdSales.contractionArr]), target: sum([target("sales_assist_churn"), target("sales_assist_contraction"), target("sales_led_churn"), target("sales_led_contraction")]), direction: "lower", source: "Weekly combined CARR model · BigQuery" }),
   ];
 
-  const metricById = new Map(metrics.map((metric) => [metric.id, metric]));
-  const workbookComparison = weekEndDate === "2026-08-30"
-    ? WORKBOOK_AUGUST_30_REFERENCE.flatMap((reference) => ([
-        { id: `${reference.id}_week`, label: reference.label, period: "Week" as const, workbookValue: reference.week, automatedValue: metricById.get(reference.id)?.weekValue || 0 },
-        { id: `${reference.id}_mtd`, label: reference.label, period: "MTD" as const, workbookValue: reference.mtd, automatedValue: metricById.get(reference.id)?.mtdValue || 0 },
-      ])).map((comparison) => {
-        const automatedValue = round2(comparison.automatedValue);
-        const variance = round2(automatedValue - comparison.workbookValue);
-        const tolerance = Math.max(1, Math.abs(comparison.workbookValue) * 0.005);
-        return { ...comparison, automatedValue, variance, matches: Math.abs(variance) <= tolerance };
-      })
-    : [];
-
   return {
     monthKey,
     monthLabel: monthLabel(monthKey),
@@ -371,7 +336,6 @@ export async function generateGtmReport(input: { weekEndDate?: string }): Promis
     metrics,
     arrBridge,
     targetRows: getGtmTargetRows(monthKey),
-    workbookComparison,
     warnings,
   };
 }
