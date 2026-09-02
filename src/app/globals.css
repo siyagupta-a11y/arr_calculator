@@ -1887,3 +1887,318 @@ textarea:focus-visible {
     border-radius: 0;
   }
 }
+
+/* Team scorecards */
+.team-scorecards {
+  --scorecard-cyan: #62d4ff;
+  --scorecard-cyan-soft: rgba(98, 212, 255, 0.1);
+}
+
+.team-scorecards__hero-links {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.team-scorecards__directory {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.team-scorecards__directory-card {
+  min-height: 190px;
+  display: flex;
+  flex-direction: column;
+  padding: 1.05rem;
+  border: 1px solid var(--stripe-border);
+  background: var(--stripe-card);
+  color: var(--stripe-text);
+  text-decoration: none;
+  transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.team-scorecards__directory-card:hover,
+.team-scorecards__directory-card:focus-visible {
+  transform: translateY(-2px);
+  border-color: #4d74ad;
+  background: #0e1a2e;
+}
+
+.team-scorecards__directory-index {
+  color: var(--scorecard-cyan);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+
+.team-scorecards__directory-card h2 {
+  margin: 1.1rem 0 0;
+  font-size: 1.18rem;
+}
+
+.team-scorecards__directory-card p {
+  margin: 0.5rem 0 1rem;
+  color: var(--stripe-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.team-scorecards__directory-meta {
+  margin-top: auto;
+  display: flex;
+  justify-content: space-between;
+  color: #cfe5ff;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.team-scorecards__tabs {
+  display: flex;
+  overflow-x: auto;
+  border: 1px solid var(--stripe-border);
+  background: #080f1b;
+  scrollbar-width: thin;
+}
+
+.team-scorecards__tab {
+  flex: 0 0 auto;
+  padding: 0.7rem 0.86rem;
+  border-right: 1px solid var(--stripe-border);
+  color: var(--stripe-muted);
+  text-decoration: none;
+  font-size: 0.76rem;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+}
+
+.team-scorecards__tab:last-child {
+  border-right: 0;
+}
+
+.team-scorecards__tab:hover,
+.team-scorecards__tab:focus-visible {
+  color: #eef6ff;
+  background: #101c31;
+}
+
+.team-scorecards__tab--active {
+  color: #effaff;
+  background: #12304a;
+  box-shadow: inset 0 -2px 0 var(--scorecard-cyan);
+}
+
+.team-scorecards__controls {
+  grid-template-columns: minmax(180px, 250px) minmax(180px, 250px) auto;
+  align-items: end;
+}
+
+.team-scorecards__load-action {
+  min-height: 42px;
+  align-items: flex-end;
+}
+
+.team-scorecards__loading {
+  color: var(--stripe-muted);
+  text-align: center;
+}
+
+.team-scorecards__summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.team-scorecards__summary article {
+  min-width: 0;
+  padding: 0.95rem 1rem;
+  border: 1px solid #2b456e;
+  background: #0c1729;
+}
+
+.team-scorecards__summary span,
+.team-scorecards__summary strong {
+  display: block;
+}
+
+.team-scorecards__summary span {
+  margin-bottom: 0.42rem;
+  color: #90a8cd;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.team-scorecards__summary strong {
+  color: #f0f7ff;
+  font-size: clamp(1rem, 1.6vw, 1.35rem);
+  overflow-wrap: anywhere;
+}
+
+.team-scorecards__summary small {
+  color: #7f99c1;
+  font-size: 0.78em;
+  font-weight: 600;
+}
+
+.team-scorecards__range-chip {
+  flex: 0 0 auto;
+  padding: 0.35rem 0.52rem;
+  border: 1px solid #385e88;
+  color: #cae9f7;
+  background: #0d2134;
+  font-size: 0.7rem;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.team-scorecards__table-wrap {
+  margin-top: 0.85rem;
+}
+
+.team-scorecards__table {
+  min-width: 1120px;
+}
+
+.team-scorecards__table th,
+.team-scorecards__table td {
+  vertical-align: top;
+}
+
+.team-scorecards__table th:nth-child(1),
+.team-scorecards__table td:nth-child(1) {
+  min-width: 245px;
+  white-space: normal;
+}
+
+.team-scorecards__table th:nth-child(2),
+.team-scorecards__table td:nth-child(2) {
+  min-width: 310px;
+  white-space: normal;
+}
+
+.team-scorecards__table th:nth-child(3),
+.team-scorecards__table td:nth-child(3),
+.team-scorecards__table th:nth-child(7),
+.team-scorecards__table td:nth-child(7) {
+  min-width: 190px;
+  white-space: normal;
+}
+
+.team-scorecards__metric-index {
+  display: block;
+  margin-bottom: 0.34rem;
+  color: #6c86ad;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+}
+
+.team-scorecards__actual {
+  position: relative;
+  background: rgba(38, 92, 132, 0.07);
+}
+
+.team-scorecards__actual--blank {
+  min-height: 58px;
+  background: repeating-linear-gradient(-45deg, rgba(91, 116, 151, 0.035) 0 4px, transparent 4px 9px);
+}
+
+.team-scorecards__values {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 0.42rem;
+}
+
+.team-scorecards__value {
+  min-width: 0;
+  padding: 0.5rem 0.56rem;
+  border: 1px solid #29466c;
+  background: #0a1728;
+}
+
+.team-scorecards__value span,
+.team-scorecards__value strong,
+.team-scorecards__value small {
+  display: block;
+}
+
+.team-scorecards__value span {
+  color: #90acd2;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.team-scorecards__value strong {
+  margin-top: 0.22rem;
+  color: #f3f8ff;
+  font-size: 0.94rem;
+  overflow-wrap: anywhere;
+}
+
+.team-scorecards__value small {
+  margin-top: 0.24rem;
+  color: #7894bb;
+  font-size: 0.66rem;
+  line-height: 1.35;
+}
+
+.team-scorecards__method {
+  grid-column: 1 / -1;
+  color: #8ca7cc;
+  font-size: 0.7rem;
+}
+
+.team-scorecards__method summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #acdff1;
+  font-weight: 750;
+}
+
+.team-scorecards__method p {
+  margin: 0.38rem 0 0.24rem;
+  max-width: 78ch;
+  line-height: 1.45;
+}
+
+.team-scorecards__method span {
+  color: #6f8aae;
+}
+
+.team-scorecards__warnings {
+  margin: 0.7rem 0 0;
+  padding-left: 1.1rem;
+  color: #ffd394;
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+
+@media (max-width: 1050px) {
+  .team-scorecards__directory {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .team-scorecards__directory,
+  .team-scorecards__summary,
+  .team-scorecards__controls {
+    grid-template-columns: 1fr;
+  }
+
+  .team-scorecards__hero-links {
+    justify-content: flex-start;
+  }
+
+  .team-scorecards__directory-card {
+    min-height: 160px;
+  }
+
+  .team-scorecards__values {
+    grid-template-columns: 1fr;
+  }
+}

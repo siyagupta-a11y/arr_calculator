@@ -473,6 +473,7 @@ export default function GtmPage() {
           </div>
           <div className="gtm__hero-links">
             <Link href="/combined-all-subs" className="stripe-ui__hero-link">Combined All Subs</Link>
+            <Link href="/scorecards" className="stripe-ui__hero-link">Team Scorecards</Link>
             <Link href="/tofu" className="stripe-ui__hero-link">ARR detail</Link>
             <button className="stripe-ui__hero-link gtm__link-button" type="button" onClick={downloadCsv} disabled={!data}>Download CSV</button>
           </div>

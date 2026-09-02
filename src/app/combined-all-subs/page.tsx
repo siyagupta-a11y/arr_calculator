@@ -458,6 +458,9 @@ export default function CombinedAllSubsPage() {
             <Link href="/gtm" className="stripe-ui__hero-link">
               Open GTM
             </Link>
+            <Link href="/scorecards" className="stripe-ui__hero-link">
+              Open Team Scorecards
+            </Link>
             <Link href="/metrics-assistant" className="stripe-ui__hero-link">
               Open Metrics Assistant (Under maintenance, do not use)
             </Link>

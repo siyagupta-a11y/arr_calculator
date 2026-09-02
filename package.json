@@ -12,7 +12,8 @@
     "test:commissions": "node --experimental-strip-types --test tests/commissions.test.mjs",
     "test:migration": "node --experimental-strip-types --test tests/migrationRules.test.mjs",
     "test:quota": "node --experimental-strip-types --test tests/salesQuotaRules.test.mjs",
-    "test:gtm": "node --experimental-strip-types --test tests/gtmTargets.test.mjs"
+    "test:gtm": "node --experimental-strip-types --test tests/gtmTargets.test.mjs",
+    "test:scorecards": "node --experimental-strip-types --test tests/teamScorecardDefinitions.test.mjs"
   },
   "dependencies": {
     "@vercel/blob": "^2.3.1",
