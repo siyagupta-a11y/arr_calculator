@@ -1531,7 +1531,7 @@ textarea:focus-visible {
 }
 
 .gtm__controls {
-  grid-template-columns: repeat(2, minmax(190px, 280px)) auto;
+  grid-template-columns: minmax(190px, 280px) auto;
   align-items: end;
 }
 
@@ -1584,7 +1584,7 @@ textarea:focus-visible {
 
 .gtm__summary-card--primary span,
 .gtm__summary-card--primary small {
-  color: #bbf7d0;
+  color: #dcfce7;
 }
 
 .gtm__summary-card strong {
