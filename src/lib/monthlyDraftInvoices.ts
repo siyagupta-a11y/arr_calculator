@@ -21,7 +21,7 @@ type DraftJobResult = {
   eligibleDeals: number;
   createdDrafts: Array<{ dealId: string; dealName: string; customerId: string; invoiceId: string; lineCount: number; amountMinor: number; currency: string }>;
   plannedDrafts: Array<{ dealId: string; dealName: string; customerId: string; lineCount: number; amountMinor: number; currency: string }>;
-  existingDrafts: Array<{ dealId: string; dealName: string; customerId: string; invoiceId: string }>;
+  existingDrafts: Array<{ dealId: string; dealName: string; customerId: string; invoiceId: string; lineCount: number; amountMinor: number; currency: string }>;
   skipped: Array<{ dealId: string; reason: string; detail?: string }>;
 };
 
@@ -93,7 +93,7 @@ async function findExistingInvoice(stripe: Stripe, customerId: string, dealId: s
     const exact = result.data.find((invoice) =>
       String(typeof invoice.customer === "string" ? invoice.customer : invoice.customer?.id || "") === customerId,
     );
-    if (exact) return exact.id;
+    if (exact) return exact;
   } catch {
     // Search is unavailable for some Stripe accounts. Fall back to a consistent customer invoice listing.
   }
@@ -102,12 +102,26 @@ async function findExistingInvoice(stripe: Stripe, customerId: string, dealId: s
   let inspected = 0;
   for await (const invoice of invoices) {
     if (invoice.metadata?.hubspot_deal_id === dealId && invoice.metadata?.billing_period === billingMonth) {
-      return invoice.id;
+      return invoice;
     }
     inspected += 1;
     if (inspected >= 1000) break;
   }
-  return "";
+  return null;
+}
+
+async function countInvoiceLines(stripe: Stripe, invoice: Stripe.Invoice) {
+  try {
+    let count = 0;
+    for await (const line of stripe.invoices.listLineItems(invoice.id, { limit: 100 })) {
+      void line;
+      count += 1;
+      if (count >= 1000) break;
+    }
+    return count;
+  } catch {
+    return invoice.lines.data.length;
+  }
 }
 
 async function createDraftInvoice(args: {
@@ -287,9 +301,9 @@ export async function runMonthlyDraftInvoiceJob(options: DraftJobOptions): Promi
       customerId = match.customerId;
     }
 
-    let existingInvoiceId = "";
+    let existingInvoice: Stripe.Invoice | null = null;
     try {
-      existingInvoiceId = await findExistingInvoice(stripe, customerId, dealId, billingMonth);
+      existingInvoice = await findExistingInvoice(stripe, customerId, dealId, billingMonth);
     } catch (error) {
       result.skipped.push({
         dealId,
@@ -298,8 +312,17 @@ export async function runMonthlyDraftInvoiceJob(options: DraftJobOptions): Promi
       });
       continue;
     }
-    if (existingInvoiceId) {
-      result.existingDrafts.push({ dealId, dealName, customerId, invoiceId: existingInvoiceId });
+    if (existingInvoice) {
+      const existingLineCount = await countInvoiceLines(stripe, existingInvoice);
+      result.existingDrafts.push({
+        dealId,
+        dealName,
+        customerId,
+        invoiceId: existingInvoice.id,
+        lineCount: existingLineCount,
+        amountMinor: existingInvoice.amount_due,
+        currency: existingInvoice.currency.toUpperCase(),
+      });
       continue;
     }
 

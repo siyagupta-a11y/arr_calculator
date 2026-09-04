@@ -124,6 +124,15 @@ export default function DraftInvoiceAdminControls() {
 
   const displayed = result || preview;
   const creationCompleted = Boolean(result && !result.dryRun);
+  const invoiceRows = displayed
+    ? [
+        ...(creationCompleted ? displayed.createdDrafts : displayed.plannedDrafts).map((draft) => ({
+          ...draft,
+          status: creationCompleted ? "Created" : "Will create",
+        })),
+        ...displayed.existingDrafts.map((draft) => ({ ...draft, status: "Already exists" })),
+      ].sort((a, b) => String(a.dealName || a.dealId).localeCompare(String(b.dealName || b.dealId)))
+    : [];
   const canCreate = Boolean(
     preview && preview.enabled && preview.billingMonth === month && preview.plannedDrafts.length > 0 && !loading,
   );
@@ -176,27 +185,27 @@ export default function DraftInvoiceAdminControls() {
         <div style={{ marginTop: "0.9rem" }} aria-live="polite">
           <div className="stripe-ui__stats">
             <div className="stripe-ui__stat"><p className="stripe-ui__stat-label">Deals scanned</p><p className="stripe-ui__stat-value">{displayed.scannedDeals}</p></div>
-            <div className="stripe-ui__stat"><p className="stripe-ui__stat-label">{creationCompleted ? "Drafts created" : "Drafts ready"}</p><p className="stripe-ui__stat-value">{creationCompleted ? displayed.createdDrafts.length : displayed.plannedDrafts.length}</p></div>
-            <div className="stripe-ui__stat"><p className="stripe-ui__stat-label">Already invoiced / skipped</p><p className="stripe-ui__stat-value">{displayed.existingDrafts.length} / {displayed.skipped.length}</p></div>
+            <div className="stripe-ui__stat"><p className="stripe-ui__stat-label">Invoices this month</p><p className="stripe-ui__stat-value">{invoiceRows.length}</p></div>
+            <div className="stripe-ui__stat"><p className="stripe-ui__stat-label">To create / already exists / skipped</p><p className="stripe-ui__stat-value">{creationCompleted ? displayed.createdDrafts.length : displayed.plannedDrafts.length} / {displayed.existingDrafts.length} / {displayed.skipped.length}</p></div>
           </div>
 
-          {(creationCompleted ? displayed.createdDrafts : displayed.plannedDrafts).length > 0 && (
+          {invoiceRows.length > 0 && (
             <div className="stripe-ui__table-wrap stripe-ui__table-wrap--compact">
               <table className="stripe-ui__table">
-                <thead><tr><th>HubSpot deal</th><th>Deal ID</th><th>Stripe customer</th>{creationCompleted && <th>Draft invoice</th>}<th>Lines</th><th className="stripe-ui__num">Amount</th></tr></thead>
+                <thead><tr><th>Status</th><th>HubSpot deal</th><th>Deal ID</th><th>Stripe customer</th><th>Stripe invoice</th><th>Lines</th><th className="stripe-ui__num">Amount</th></tr></thead>
                 <tbody>
-                  {(creationCompleted ? displayed.createdDrafts : displayed.plannedDrafts).map((draft) => (
-                    <tr key={`${draft.dealId}:${draft.invoiceId || "planned"}`}>
-                      <td>{draft.dealName || `Deal ${draft.dealId}`}</td><td>{draft.dealId}</td><td>{draft.customerId}</td>{creationCompleted && <td>{draft.invoiceId}</td>}<td>{draft.lineCount || 0}</td>
-                      <td className="stripe-ui__num">{formatMinorAmount(draft.amountMinor, draft.currency)}</td>
+                  {invoiceRows.map((invoice) => (
+                    <tr key={`${invoice.dealId}:${invoice.invoiceId || "planned"}`}>
+                      <td>{invoice.status}</td><td>{invoice.dealName || `Deal ${invoice.dealId}`}</td><td>{invoice.dealId}</td><td>{invoice.customerId}</td><td>{invoice.invoiceId || "—"}</td><td>{invoice.lineCount || 0}</td>
+                      <td className="stripe-ui__num">{formatMinorAmount(invoice.amountMinor, invoice.currency)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           )}
-          {!creationCompleted && displayed.plannedDrafts.length === 0 && (
-            <p className="stripe-ui__hint">No new draft invoices are due for {displayed.billingMonth}.</p>
+          {invoiceRows.length === 0 && (
+            <p className="stripe-ui__hint">No sales-led invoices are due for {displayed.billingMonth}.</p>
           )}
         </div>
       )}
