@@ -31,6 +31,7 @@ This is a Next.js ARR dashboard.
 - `POST /api/quickbooks/query` Run a QuickBooks SQL-like query
 - `POST /api/quickbooks/disconnect` Clear saved QuickBooks tokens
 - `GET|POST /api/slack/daily-arr-summary` Send daily Projected ARR metrics to Slack (DM/channel)
+- `GET|POST /api/billing/monthly-draft-invoices` Create review-only Stripe draft invoices from approved HubSpot deals
 
 ## Automatic Stripe Sync
 
@@ -43,6 +44,7 @@ Vercel cron runs Stripe sync automatically every 5 minutes:
 - `5 * * * *` (`/api/hubspot-current-metrics-sync`) hourly HubSpot deal metric property update
 - `0 */6 * * *` (`/api/quickbooks/keepalive`) QuickBooks OAuth token keepalive
 - `0 12 * * *` (`/api/slack/daily-arr-summary`) daily Slack message with projected ARR EOM stats
+- `5 9 1 * *` (`/api/billing/monthly-draft-invoices`) monthly Stripe draft-invoice generation at 09:05 UTC on the first day
 
 `/api/stripe-sync` accepts:
 
@@ -318,6 +320,31 @@ Recommended env values:
 - `BIGQUERY_TS_UNIT=milliseconds`
 
 ## Required Environment Variables
+
+### Monthly Stripe Draft Invoices
+
+The `GET|POST /api/billing/monthly-draft-invoices` job runs at `09:05 UTC` on the first day of each month. It reads Closed Won deals from HubSpot's default sales pipeline and creates Stripe invoices with `auto_advance=false`; it never finalizes, emails, or charges them.
+
+The job is forced into dry-run mode until `BILLING_DRAFTS_ENABLED=true` is set:
+
+- `BILLING_PIPELINE_ID` (optional; default `default`, HubSpot's default sales-pipeline internal ID)
+- `BILLING_DEALSTAGE` (optional; default `closedwon`, HubSpot's default Closed Won stage internal ID)
+- `BILLING_DRAFTS_ENABLED` (default false)
+- `BILLING_ALLOWED_CURRENCIES` (optional comma-separated allowlist; default `USD`)
+- `BILLING_DAYS_UNTIL_DUE` (optional; default `30`)
+- `BILLING_DAYS_UNTIL_DUE_PROPERTY` (optional HubSpot deal override)
+- `BILLING_STRIPE_CUSTOMER_ID_PROPERTY` (optional HubSpot deal property containing a `cus_...` ID)
+- `BILLING_STRIPE_CUSTOMER_METADATA_KEY` (optional Stripe customer metadata key; default `workspace_id`)
+- `BILLING_MAX_DEALS_PER_RUN` (optional; default `250`, maximum `1000`)
+
+Every deal in the configured Closed Won stage and pipeline is checked, but a draft is created only when at least one associated line item is due in the requested month. If the deal has no explicit Stripe customer ID, the job matches `DEAL_WORKSPACE_ID_PROP` to Stripe customer metadata. Missing or ambiguous matches are skipped. Recurring line items must have a start date, a supported monthly/quarterly/semiannual/annual frequency, a positive amount, and either an end date or term. One-time items are included only in their start month.
+
+Manual dry-run example:
+
+```bash
+curl -H "Authorization: Bearer $CRON_SECRET" \
+  "https://YOUR_DOMAIN/api/billing/monthly-draft-invoices?month=2026-09&dryRun=true"
+```
 
 HubSpot:
 

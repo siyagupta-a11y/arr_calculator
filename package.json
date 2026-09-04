@@ -10,6 +10,7 @@
     "test:access": "node --experimental-strip-types --test tests/accessRoles.test.mjs",
     "test:account-management": "node --experimental-strip-types --test tests/accountManagementRules.test.mjs",
     "test:commissions": "node --experimental-strip-types --test tests/commissions.test.mjs",
+    "test:billing-drafts": "node --experimental-strip-types --test tests/monthlyDraftInvoiceRules.test.mjs",
     "test:migration": "node --experimental-strip-types --test tests/migrationRules.test.mjs",
     "test:quota": "node --experimental-strip-types --test tests/salesQuotaRules.test.mjs",
     "test:gtm": "node --experimental-strip-types --test tests/gtmTargets.test.mjs",
@@ -20,7 +21,8 @@
     "next": "16.1.6",
     "next-auth": "^4.24.14",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "stripe": "^22.6.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
