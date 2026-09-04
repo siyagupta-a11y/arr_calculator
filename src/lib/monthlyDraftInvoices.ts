@@ -193,8 +193,8 @@ export async function runMonthlyDraftInvoiceJob(options: DraftJobOptions): Promi
   const billingMonth = String(options.billingMonth || currentBillingMonth()).trim();
   parseBillingMonth(billingMonth);
 
-  const pipelineId = String(process.env.BILLING_PIPELINE_ID || "default").trim();
-  const stageId = String(process.env.BILLING_DEALSTAGE || "closedwon").trim();
+  const pipelineId = String(process.env.BILLING_PIPELINE_ID || "0cbbc8c6-dccf-4601-8d59-b6a15ed5129b").trim();
+  const stageId = String(process.env.BILLING_DEALSTAGE || "f12c408f-f92b-4a95-8b59-9f801b19b105").trim();
   const workspaceProperty = String(process.env.DEAL_WORKSPACE_ID_PROP || "workspace_id").trim();
   const customerIdProperty = String(process.env.BILLING_STRIPE_CUSTOMER_ID_PROPERTY || "").trim();
   const customerMetadataKey = String(process.env.BILLING_STRIPE_CUSTOMER_METADATA_KEY || "workspace_id").trim();
@@ -206,7 +206,7 @@ export async function runMonthlyDraftInvoiceJob(options: DraftJobOptions): Promi
       .map((value) => value.trim().toUpperCase())
       .filter(Boolean),
   );
-  const maxDeals = boundedInteger(options.maxDeals ?? process.env.BILLING_MAX_DEALS_PER_RUN, 250, 1, 1000);
+  const maxDeals = boundedInteger(options.maxDeals ?? process.env.BILLING_MAX_DEALS_PER_RUN, 1000, 1, 1000);
 
   const dealProperties = Array.from(new Set([
     "dealname",

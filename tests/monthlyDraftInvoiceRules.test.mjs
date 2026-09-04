@@ -73,6 +73,66 @@ test("line is not billed after its contract ends", () => {
   assert.equal(result.reason, "contract_ended");
 });
 
+test("uses HubSpot's standard ISO recurring billing period as the contract term", () => {
+  const result = buildDraftInvoiceLine({
+    lineItemId: "li-standard-period",
+    billingMonth: "2026-09",
+    currency: "USD",
+    properties: properties({
+      hs_recurring_billing_start_date: "2026-01-15",
+      hs_term_in_months: "",
+      hs_recurring_billing_period: "P12M",
+    }),
+  });
+  assert.ok(result.line);
+});
+
+test("includes a standard HubSpot quarterly line that starts in the selected month", () => {
+  const result = buildDraftInvoiceLine({
+    lineItemId: "li-standard-quarterly",
+    billingMonth: "2026-09",
+    currency: "USD",
+    properties: properties({
+      amount: "8145.00",
+      recurringbillingfrequency: "quarterly",
+      hs_recurring_billing_start_date: "2026-09-02",
+      hs_term_in_months: "",
+      hs_recurring_billing_period: "P3M",
+      hs_recurring_billing_number_of_payments: "1",
+      hs_recurring_billing_terms: "FIXED",
+    }),
+  });
+  assert.equal(result.line?.amountMinor, 814500);
+});
+
+test("derives the contract term from HubSpot's number of payments", () => {
+  const result = buildDraftInvoiceLine({
+    lineItemId: "li-payment-count",
+    billingMonth: "2026-09",
+    currency: "USD",
+    properties: properties({
+      hs_recurring_billing_start_date: "2026-01-15",
+      hs_term_in_months: "",
+      hs_recurring_billing_number_of_payments: "12",
+    }),
+  });
+  assert.ok(result.line);
+});
+
+test("supports recurring billing that continues until cancelled", () => {
+  const result = buildDraftInvoiceLine({
+    lineItemId: "li-open-ended",
+    billingMonth: "2026-09",
+    currency: "USD",
+    properties: properties({
+      hs_recurring_billing_start_date: "2026-01-15",
+      hs_term_in_months: "",
+      hs_recurring_billing_terms: "AUTOMATICALLY_RENEW",
+    }),
+  });
+  assert.ok(result.line);
+});
+
 test("one-time line is included once in its start month", () => {
   const oneTime = properties({ recurringbillingfrequency: "one_time", hs_term_in_months: "" });
   assert.ok(buildDraftInvoiceLine({ lineItemId: "li_1", properties: oneTime, billingMonth: "2026-01", currency: "USD" }).line);

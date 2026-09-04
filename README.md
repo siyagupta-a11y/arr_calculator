@@ -31,7 +31,7 @@ This is a Next.js ARR dashboard.
 - `POST /api/quickbooks/query` Run a QuickBooks SQL-like query
 - `POST /api/quickbooks/disconnect` Clear saved QuickBooks tokens
 - `GET|POST /api/slack/daily-arr-summary` Send daily Projected ARR metrics to Slack (DM/channel)
-- `GET|POST /api/billing/monthly-draft-invoices` Create review-only Stripe draft invoices from approved HubSpot deals
+- `GET|POST /api/billing/monthly-draft-invoices` Create review-only Stripe draft invoices from Closed Won sales-led HubSpot deals
 
 ## Automatic Stripe Sync
 
@@ -327,15 +327,15 @@ The `GET|POST /api/billing/monthly-draft-invoices` job runs at `09:05 UTC` on th
 
 The job is forced into dry-run mode until `BILLING_DRAFTS_ENABLED=true` is set:
 
-- `BILLING_PIPELINE_ID` (optional; default `default`, HubSpot's default sales-pipeline internal ID)
-- `BILLING_DEALSTAGE` (optional; default `closedwon`, HubSpot's default Closed Won stage internal ID)
+- `BILLING_PIPELINE_ID` (optional; defaults to this portal's Sales Default Pipeline internal ID, `0cbbc8c6-dccf-4601-8d59-b6a15ed5129b`)
+- `BILLING_DEALSTAGE` (optional; defaults to this portal's Sales Default Pipeline Closed Won stage internal ID, `f12c408f-f92b-4a95-8b59-9f801b19b105`)
 - `BILLING_DRAFTS_ENABLED` (default false)
 - `BILLING_ALLOWED_CURRENCIES` (optional comma-separated allowlist; default `USD`)
 - `BILLING_DAYS_UNTIL_DUE` (optional; default `30`)
 - `BILLING_DAYS_UNTIL_DUE_PROPERTY` (optional HubSpot deal override)
 - `BILLING_STRIPE_CUSTOMER_ID_PROPERTY` (optional HubSpot deal property containing a `cus_...` ID)
 - `BILLING_STRIPE_CUSTOMER_METADATA_KEY` (optional Stripe customer metadata key; default `workspace_id`)
-- `BILLING_MAX_DEALS_PER_RUN` (optional; default `250`, maximum `1000`)
+- `BILLING_MAX_DEALS_PER_RUN` (optional; default and maximum `1000`)
 
 Every deal in the configured Closed Won stage and pipeline is checked, but a draft is created only when at least one associated line item is due in the requested month. If the deal has no explicit Stripe customer ID, the job matches `DEAL_WORKSPACE_ID_PROP` to Stripe customer metadata. Missing or ambiguous matches are skipped. Recurring line items must have a start date, a supported monthly/quarterly/semiannual/annual frequency, a positive amount, and either an end date or term. One-time items are included only in their start month.
 

@@ -93,12 +93,22 @@ export function majorAmountToMinor(amount: number, currency: string) {
   return Math.round(amount * 10 ** exponent);
 }
 
-function contractEndExclusive(properties: HubspotLineItemProps, start: Date) {
+function isoDurationMonths(value: unknown) {
+  const match = /^P(?:(\d+)Y)?(?:(\d+)M)?$/i.exec(String(value || "").trim());
+  if (!match) return 0;
+  return Number(match[1] || 0) * 12 + Number(match[2] || 0);
+}
+
+function contractEndExclusive(properties: HubspotLineItemProps, start: Date, cadenceMonths: number) {
   const explicitEnd =
     dateOnlyUtc(properties.hs_recurring_billing_end_date) ||
     dateOnlyUtc(properties.hs_billing_period_end_date);
   if (explicitEnd) return explicitEnd;
-  const termMonths = Math.floor(numeric(properties.hs_term_in_months));
+
+  const termMonths =
+    Math.floor(numeric(properties.hs_term_in_months)) ||
+    isoDurationMonths(properties.hs_recurring_billing_period) ||
+    Math.floor(numeric(properties.hs_recurring_billing_number_of_payments)) * cadenceMonths;
   return termMonths > 0 ? addMonthsClampedUtc(start, termMonths) : null;
 }
 
@@ -124,8 +134,10 @@ export function buildDraftInvoiceLine(args: {
   if (cadenceMonths === 0 && elapsedMonths !== 0) return { line: null, reason: "not_due" };
   if (cadenceMonths > 0 && elapsedMonths % cadenceMonths !== 0) return { line: null, reason: "not_due" };
 
-  const endExclusive = contractEndExclusive(properties, start);
-  if (cadenceMonths > 0 && !endExclusive) return { line: null, reason: "missing_contract_end" };
+  const endExclusive = contractEndExclusive(properties, start, cadenceMonths);
+  const billingTerms = String(properties.hs_recurring_billing_terms || "").trim().toUpperCase();
+  const isOpenEnded = billingTerms === "AUTOMATICALLY_RENEW" || billingTerms === "FOREVER" || billingTerms === "UNTIL_CANCELLED";
+  if (cadenceMonths > 0 && !endExclusive && !isOpenEnded) return { line: null, reason: "missing_contract_end" };
 
   const installmentStart = cadenceMonths === 0 ? start : addMonthsClampedUtc(start, elapsedMonths);
   if (endExclusive && installmentStart.getTime() >= endExclusive.getTime()) {
