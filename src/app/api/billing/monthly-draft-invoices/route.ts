@@ -1,4 +1,7 @@
+import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
+import { authOptions } from "@/lib/authOptions";
+import { normalizeAppRole } from "@/lib/accessRoles";
 import { monthlyDraftInvoicesEnabled, runMonthlyDraftInvoiceJob } from "@/lib/monthlyDraftInvoices";
 
 export const runtime = "nodejs";
@@ -10,10 +13,15 @@ type RequestBody = {
   maxDeals?: number;
 };
 
-function authorized(req: Request) {
+async function authorizationKind(req: Request) {
   const secret = String(process.env.CRON_SECRET || "").trim();
-  if (!secret) return false;
-  return req.headers.get("authorization") === `Bearer ${secret}`;
+  if (secret && req.headers.get("authorization") === `Bearer ${secret}`) return "cron" as const;
+  if (req.method !== "POST") return null;
+
+  const session = await getServerSession(authOptions);
+  if (!session?.user) return null;
+  const role = (session.user as { role?: string }).role;
+  return normalizeAppRole(role) === "admin" ? "admin" as const : "forbidden" as const;
 }
 
 function boolValue(value: unknown, fallback: boolean) {
@@ -22,7 +30,9 @@ function boolValue(value: unknown, fallback: boolean) {
 }
 
 async function handle(req: Request) {
-  if (!authorized(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const authorization = await authorizationKind(req);
+  if (!authorization) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (authorization === "forbidden") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   let body: RequestBody = {};
   if (req.method !== "GET") {

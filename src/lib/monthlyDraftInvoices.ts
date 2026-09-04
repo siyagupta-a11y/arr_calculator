@@ -19,9 +19,9 @@ type DraftJobResult = {
   billingMonth: string;
   scannedDeals: number;
   eligibleDeals: number;
-  createdDrafts: Array<{ dealId: string; customerId: string; invoiceId: string; lineCount: number; amountMinor: number; currency: string }>;
-  plannedDrafts: Array<{ dealId: string; customerId: string; lineCount: number; amountMinor: number; currency: string }>;
-  existingDrafts: Array<{ dealId: string; customerId: string; invoiceId: string }>;
+  createdDrafts: Array<{ dealId: string; dealName: string; customerId: string; invoiceId: string; lineCount: number; amountMinor: number; currency: string }>;
+  plannedDrafts: Array<{ dealId: string; dealName: string; customerId: string; lineCount: number; amountMinor: number; currency: string }>;
+  existingDrafts: Array<{ dealId: string; dealName: string; customerId: string; invoiceId: string }>;
   skipped: Array<{ dealId: string; reason: string; detail?: string }>;
 };
 
@@ -299,13 +299,13 @@ export async function runMonthlyDraftInvoiceJob(options: DraftJobOptions): Promi
       continue;
     }
     if (existingInvoiceId) {
-      result.existingDrafts.push({ dealId, customerId, invoiceId: existingInvoiceId });
+      result.existingDrafts.push({ dealId, dealName, customerId, invoiceId: existingInvoiceId });
       continue;
     }
 
     const amountMinor = lines.reduce((sum, line) => sum + line.amountMinor, 0);
     if (options.dryRun) {
-      result.plannedDrafts.push({ dealId, customerId, lineCount: lines.length, amountMinor, currency });
+      result.plannedDrafts.push({ dealId, dealName, customerId, lineCount: lines.length, amountMinor, currency });
       continue;
     }
 
@@ -323,7 +323,7 @@ export async function runMonthlyDraftInvoiceJob(options: DraftJobOptions): Promi
         daysUntilDue,
         lines,
       });
-      result.createdDrafts.push({ dealId, customerId, invoiceId: invoice.id, lineCount: lines.length, amountMinor, currency });
+      result.createdDrafts.push({ dealId, dealName, customerId, invoiceId: invoice.id, lineCount: lines.length, amountMinor, currency });
     } catch (error) {
       result.skipped.push({
         dealId,
