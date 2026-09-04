@@ -2400,6 +2400,12 @@ export default function Home() {
             <Link href="/quickbooks" className="stripe-ui__hero-link">
               Open QuickBooks
             </Link>
+            <Link href="/account-management" className="stripe-ui__hero-link">
+              Open Account Management
+            </Link>
+            <Link href="/migration" className="stripe-ui__hero-link">
+              Open Migration
+            </Link>
           </div>
         </div>
       </section>

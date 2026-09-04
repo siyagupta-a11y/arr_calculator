@@ -32,6 +32,9 @@ export default function HardRefreshButton() {
   const [syncLoading, setSyncLoading] = useState(false);
   const [backfillLoading, setBackfillLoading] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [isSales, setIsSales] = useState(false);
+  const [isAccountManagement, setIsAccountManagement] = useState(false);
+  const [sessionLoaded, setSessionLoaded] = useState(false);
   const [lastSyncAtUtc, setLastSyncAtUtc] = useState("");
   const [lastSyncSummary, setLastSyncSummary] = useState("");
   const [syncProgress, setSyncProgress] = useState("");
@@ -50,10 +53,17 @@ export default function HardRefreshButton() {
         if (!res.ok) return;
         const payload = (await res.json()) as { user?: { role?: string } };
         if (!active) return;
-        setIsAdmin(String(payload?.user?.role || "").trim().toLowerCase() === "admin");
+        const role = String(payload?.user?.role || "").trim().toLowerCase();
+        setIsAdmin(role === "admin");
+        setIsSales(role === "sales");
+        setIsAccountManagement(role === "account_management");
       } catch {
         if (!active) return;
         setIsAdmin(false);
+        setIsSales(false);
+        setIsAccountManagement(false);
+      } finally {
+        if (active) setSessionLoaded(true);
       }
     };
     void loadSession();
@@ -89,7 +99,7 @@ export default function HardRefreshButton() {
     };
   }, []);
 
-  if (shouldHide(pathname)) return null;
+  if (shouldHide(pathname) || !sessionLoaded || isSales || isAccountManagement) return null;
 
   async function hardRefresh() {
     setLoading(true);
