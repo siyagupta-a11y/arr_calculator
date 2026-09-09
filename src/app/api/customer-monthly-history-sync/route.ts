@@ -2,7 +2,7 @@ import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
 import { normalizeAppRole } from "@/lib/accessRoles";
 import { authOptions } from "@/lib/authOptions";
-import { refreshCustomerMonthlyHistory } from "@/lib/customerMonthlyHistory";
+import { startCustomerMonthlyHistoryRefresh } from "@/lib/customerMonthlyHistory";
 
 export const runtime = "nodejs";
 export const maxDuration = 800;
@@ -23,8 +23,8 @@ async function handle(req: Request) {
   if (!authorization) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (authorization === "forbidden") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  const result = await refreshCustomerMonthlyHistory();
-  return NextResponse.json({ ok: true, triggeredBy: authorization, ...result });
+  const result = await startCustomerMonthlyHistoryRefresh();
+  return NextResponse.json({ ok: true, status: "started", triggeredBy: authorization, ...result }, { status: 202 });
 }
 
 export async function GET(req: Request) {

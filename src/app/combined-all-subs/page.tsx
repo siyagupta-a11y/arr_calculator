@@ -10,11 +10,8 @@ type CombinedPlan = "enterprise" | "managed" | "team" | "plus" | "pay_as_you_go"
 
 type CustomerHistorySyncResult = {
   table?: string;
-  rowCount?: number;
-  customerCount?: number;
-  firstMonth?: string;
-  lastMonth?: string;
-  refreshedAtUtc?: string;
+  jobId?: string;
+  location?: string;
   error?: string;
 };
 
@@ -188,9 +185,8 @@ export default function CombinedAllSubsPage() {
       if (!response.ok) throw new Error(payload.error || text || `HTTP ${response.status}`);
 
       setCustomerHistoryMessage(
-        `Updated ${Number(payload.customerCount || 0).toLocaleString()} customers and ` +
-          `${Number(payload.rowCount || 0).toLocaleString()} customer-month rows` +
-          `${payload.firstMonth && payload.lastMonth ? ` (${payload.firstMonth} to ${payload.lastMonth})` : ""}.`,
+        `Refresh started${payload.jobId ? ` as BigQuery job ${payload.jobId}` : ""}. ` +
+          `The table will replace atomically when the job completes.`,
       );
     } catch (refreshError: unknown) {
       setCustomerHistoryError(

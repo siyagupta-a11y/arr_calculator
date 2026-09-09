@@ -353,12 +353,15 @@ curl -H "Authorization: Bearer $CRON_SECRET" \
 after the website's nightly precomputed-facts refresh. `GET` requires `Authorization: Bearer $CRON_SECRET`;
 signed-in admins can also trigger it with `POST`.
 
+The endpoint submits the rebuild as an asynchronous BigQuery job and returns HTTP `202` with its
+`jobId`; the existing table remains available until BigQuery atomically replaces it on completion.
+
 The table has one row per logical customer per calendar month, from the later of the customer's signup
 month or `CUSTOMER_MONTHLY_HISTORY_START` through the current month. It includes customers with zero ARR.
 Core columns are:
 
 - identity: `customer_month_key`, `month_start`, `customer_key`, `customer_id`, `stripe_customer_ids`
-- workspace/account: `workspace_id`, `workspace_ids`, `hubspot_company_id`, `customer_name`, `email`, `signup_date`
+- workspace/account: `workspace_id`, `workspace_ids`, `hubspot_company_id`, `customer_name`, `email`, `signup_date`, `deployment_type`, `deployment_types`
 - monthly state: `motion`, `pricing_plan`, `plan_family`, `plan_version`, `billing_interval`, `active_pricing_plans`, `arr`, `mrr`, `is_active`
 
 ARR and motion use `vw_fact_customer_arr_periodic_current`, so they stay aligned with the website's
@@ -368,6 +371,10 @@ HubSpot accounts. Stripe MRR events plus price/product metadata add detailed lab
 the job derives ARR directly from the cumulative Stripe MRR event history and classifies them as
 `selfserve`; HubSpot accounts default to `salesled`. Sales-assist flags from the website fact override
 both defaults.
+
+The customer population is not restricted to Cloud deployments. Every non-archived, Closed Won
+HubSpot company is included regardless of deployment type, and all observed deployment types are
+retained in `deployment_types`. Stripe customers are also included regardless of deployment type.
 
 Optional configuration:
 

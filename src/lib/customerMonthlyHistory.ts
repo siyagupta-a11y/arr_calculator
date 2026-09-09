@@ -101,14 +101,13 @@ function config() {
   };
 }
 
-export type CustomerMonthlyHistoryRefreshResult = {
+export type CustomerMonthlyHistoryStartedResult = {
   table: string;
   historyStart: string;
-  rowCount: number;
-  customerCount: number;
-  firstMonth: string;
-  lastMonth: string;
-  refreshedAtUtc: string;
+  projectId: string;
+  jobId: string;
+  location: string;
+  startedAtUtc: string;
 };
 
 export function customerMonthlyHistorySql() {
@@ -188,6 +187,8 @@ hubspot_accounts AS (
   SELECT
     company_id,
     ARRAY_AGG(DISTINCT NULLIF(workspace_id, '') IGNORE NULLS ORDER BY NULLIF(workspace_id, '')) AS workspace_ids,
+    ARRAY_AGG(DISTINCT NULLIF(deployment_type, '') IGNORE NULLS ORDER BY NULLIF(deployment_type, '')) AS deployment_types,
+    ARRAY_AGG(NULLIF(deployment_type, '') IGNORE NULLS ORDER BY deal_created_at DESC LIMIT 1)[SAFE_OFFSET(0)] AS deployment_type,
     ARRAY_AGG(NULLIF(account_name, '') IGNORE NULLS ORDER BY deal_created_at DESC LIMIT 1)[SAFE_OFFSET(0)] AS account_name,
     MIN(deal_created_at) AS first_deal_date
   FROM (
@@ -204,6 +205,12 @@ hubspot_accounts AS (
         ''
       )) AS workspace_id,
       COALESCE(
+        NULLIF(TRIM(JSON_VALUE(raw_json, '$.deployment_type')), ''),
+        NULLIF(TRIM(JSON_VALUE(raw_json, '$.deployment_type__c')), ''),
+        NULLIF(TRIM(JSON_VALUE(raw_json, '$.properties_deployment_type__c')), ''),
+        '(blank)'
+      ) AS deployment_type,
+      COALESCE(
         NULLIF(TRIM(JSON_VALUE(raw_json, '$.account_name')), ''),
         NULLIF(TRIM(JSON_VALUE(raw_json, '$.company_name')), ''),
         NULLIF(TRIM(JSON_VALUE(raw_json, '$.deal_name')), ''),
@@ -212,10 +219,11 @@ hubspot_accounts AS (
       COALESCE(
         SAFE_CAST(JSON_VALUE(raw_json, '$.deal_created_at') AS TIMESTAMP),
         SAFE_CAST(JSON_VALUE(raw_json, '$.createdate') AS TIMESTAMP)
-      ) AS deal_created_at
+      ) AS deal_created_at,
+      COALESCE(SAFE_CAST(JSON_VALUE(raw_json, '$.is_closed_won') AS BOOL), FALSE) AS is_closed_won
     FROM hubspot_deal_raw
   )
-  WHERE company_id <> ''
+  WHERE company_id <> '' AND is_closed_won
   GROUP BY company_id
 ),
 monthly_facts AS (
@@ -263,11 +271,12 @@ stripe_fact_match AS (
 hubspot_fact_match AS (
   SELECT
     d.customer_id,
-    MIN(f.customer_key) AS customer_key
+    MIN(COALESCE(f.customer_key, CONCAT('hubspot:', h.company_id))) AS customer_key
   FROM stripe_directory d
-  JOIN fact_customers f ON f.source = 'hubspot_account'
-  JOIN hubspot_accounts h ON h.company_id = f.hubspot_company_id
-  WHERE d.workspace_id <> '' AND d.workspace_id IN UNNEST(h.workspace_ids)
+  JOIN hubspot_accounts h
+    ON d.workspace_id <> '' AND d.workspace_id IN UNNEST(h.workspace_ids)
+  LEFT JOIN fact_customers f
+    ON f.source = 'hubspot_account' AND f.hubspot_company_id = h.company_id
   GROUP BY d.customer_id
 ),
 stripe_assignment AS (
@@ -304,6 +313,8 @@ logical_customers AS (
       WHERE workspace_id <> ''
       ORDER BY workspace_id
     ) AS workspace_ids,
+    COALESCE(h.deployment_type, '(blank)') AS deployment_type,
+    COALESCE(h.deployment_types, ARRAY<STRING>['(blank)']) AS deployment_types,
     COALESCE(sd.signup_date, DATE(h.first_deal_date), f.first_fact_month) AS signup_date,
     COALESCE(sd.email, '') AS email,
     f.hubspot_company_id,
@@ -322,12 +333,41 @@ logical_customers AS (
     sd.stripe_customer_ids,
     COALESCE(sd.workspace_ids[SAFE_OFFSET(0)], '') AS workspace_id,
     sd.workspace_ids,
+    '(blank)' AS deployment_type,
+    ARRAY<STRING>['(blank)'] AS deployment_types,
     sd.signup_date,
     COALESCE(sd.email, '') AS email,
     '' AS hubspot_company_id,
     sd.signup_date AS first_fact_month
   FROM stripe_dimensions sd
   LEFT JOIN fact_customers f USING (customer_key)
+  WHERE f.customer_key IS NULL AND NOT STARTS_WITH(sd.customer_key, 'hubspot:')
+
+  UNION ALL
+
+  SELECT
+    CONCAT('hubspot:', h.company_id) AS customer_key,
+    'hubspot_account' AS source,
+    COALESCE(NULLIF(h.account_name, ''), CONCAT('HubSpot company ', h.company_id)) AS customer_name,
+    COALESCE(sd.primary_customer_id, '') AS customer_id,
+    COALESCE(sd.stripe_customer_ids, ARRAY<STRING>[]) AS stripe_customer_ids,
+    COALESCE(sd.workspace_ids[SAFE_OFFSET(0)], h.workspace_ids[SAFE_OFFSET(0)], '') AS workspace_id,
+    ARRAY(
+      SELECT DISTINCT workspace_id
+      FROM UNNEST(ARRAY_CONCAT(COALESCE(sd.workspace_ids, ARRAY<STRING>[]), COALESCE(h.workspace_ids, ARRAY<STRING>[]))) AS workspace_id
+      WHERE workspace_id <> ''
+      ORDER BY workspace_id
+    ) AS workspace_ids,
+    COALESCE(h.deployment_type, '(blank)') AS deployment_type,
+    COALESCE(h.deployment_types, ARRAY<STRING>['(blank)']) AS deployment_types,
+    COALESCE(sd.signup_date, DATE(h.first_deal_date)) AS signup_date,
+    COALESCE(sd.email, '') AS email,
+    h.company_id AS hubspot_company_id,
+    DATE(h.first_deal_date) AS first_fact_month
+  FROM hubspot_accounts h
+  LEFT JOIN fact_customers f
+    ON f.source = 'hubspot_account' AND f.hubspot_company_id = h.company_id
+  LEFT JOIN stripe_dimensions sd ON sd.customer_key = CONCAT('hubspot:', h.company_id)
   WHERE f.customer_key IS NULL
 ),
 customer_month_spine AS (
@@ -576,6 +616,8 @@ final_rows AS (
     c.stripe_customer_ids,
     c.workspace_id,
     c.workspace_ids,
+    c.deployment_type,
+    c.deployment_types,
     c.hubspot_company_id,
     c.customer_name,
     c.email,
@@ -613,15 +655,15 @@ SELECT * FROM final_rows
 `;
 }
 
-export async function refreshCustomerMonthlyHistory(): Promise<CustomerMonthlyHistoryRefreshResult> {
-  const { runBigQuerySqlRows, runBigQuerySqlStatement } = await import("@/lib/stripeBigquery");
+export async function startCustomerMonthlyHistoryRefresh(): Promise<CustomerMonthlyHistoryStartedResult> {
+  const { startBigQuerySqlStatement } = await import("@/lib/stripeBigquery");
   const refs = config();
   const historyStart = String(process.env.CUSTOMER_MONTHLY_HISTORY_START || "2015-01-01").trim();
   const targetCurrency = String(process.env.FX_TARGET_CURRENCY || "USD").trim().toLowerCase() || "usd";
   if (!/^\d{4}-\d{2}-\d{2}$/.test(historyStart)) {
     throw new Error("CUSTOMER_MONTHLY_HISTORY_START must be YYYY-MM-DD");
   }
-  await runBigQuerySqlStatement(
+  const job = await startBigQuerySqlStatement(
     customerMonthlyHistorySql(),
     [
       { name: "history_start", type: "STRING", value: historyStart },
@@ -629,26 +671,10 @@ export async function refreshCustomerMonthlyHistory(): Promise<CustomerMonthlyHi
     ],
     { profile: PROFILE },
   );
-  const rows = await runBigQuerySqlRows(
-    `
-SELECT
-  COUNT(*) AS row_count,
-  COUNT(DISTINCT customer_key) AS customer_count,
-  COALESCE(FORMAT_DATE('%Y-%m', MIN(month_start)), '') AS first_month,
-  COALESCE(FORMAT_DATE('%Y-%m', MAX(month_start)), '') AS last_month
-FROM ${refs.outputRef}
-`,
-    [],
-    { profile: PROFILE },
-  );
-  const summary = rows[0] || {};
   return {
     table: `${refs.project}.${refs.dataset}.${refs.table}`,
     historyStart,
-    rowCount: Number(summary.row_count || 0),
-    customerCount: Number(summary.customer_count || 0),
-    firstMonth: String(summary.first_month || ""),
-    lastMonth: String(summary.last_month || ""),
-    refreshedAtUtc: new Date().toISOString(),
+    ...job,
+    startedAtUtc: new Date().toISOString(),
   };
 }

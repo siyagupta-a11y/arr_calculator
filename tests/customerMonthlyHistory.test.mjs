@@ -9,6 +9,8 @@ test("builds a partitioned customer-month history from website, Stripe, and HubS
   assert.match(sql, /vw_fact_customer_arr_periodic_current/);
   assert.match(sql, /subscription_item_change_events_v2_beta/);
   assert.match(sql, /stg_hubspot_deals/);
+  assert.match(sql, /is_closed_won/);
+  assert.match(sql, /AS deployment_types/);
   assert.match(sql, /GENERATE_DATE_ARRAY/);
   assert.match(sql, /@history_start/);
   assert.match(sql, /@target_currency/);

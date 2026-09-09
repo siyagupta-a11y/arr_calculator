@@ -10224,6 +10224,69 @@ export async function runBigQuerySqlStatement(
   await runBigQuerySqlRows(query, params, options);
 }
 
+export type BigQueryStartedJob = {
+  projectId: string;
+  jobId: string;
+  location: string;
+};
+
+export async function startBigQuerySqlStatement(
+  query: string,
+  params: BigQuerySqlParameter[] = [],
+  options?: StripeBigQueryOptions,
+): Promise<BigQueryStartedJob> {
+  const profile = normalizeProfile(options?.profile);
+  const sa = getServiceAccount(profile);
+  const projectId = readEnv("BIGQUERY_PROJECT_ID", profile) || sa.project_id;
+  if (!projectId) throw new Error("Missing BIGQUERY_PROJECT_ID (or project_id in service account JSON)");
+  const location = readEnv("BIGQUERY_LOCATION", profile) || "US";
+  const accessToken = await getAccessToken(sa);
+  const queryParameters = params.map((parameter) => ({
+    name: parameter.name,
+    parameterType: { type: parameter.type },
+    parameterValue: { value: parameter.value },
+  }));
+
+  const response = await fetch(
+    `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/jobs`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jobReference: { projectId, location },
+        configuration: {
+          query: {
+            query,
+            useLegacySql: false,
+            parameterMode: "NAMED",
+            queryParameters,
+          },
+        },
+      }),
+      cache: "no-store",
+    },
+  );
+  const text = await response.text();
+  if (!response.ok) throw new Error(`BigQuery start job error ${response.status}: ${text}`);
+  const payload = JSON.parse(text) as {
+    jobReference?: { projectId?: string; jobId?: string; location?: string };
+    status?: { errorResult?: { message?: string } };
+  };
+  if (payload.status?.errorResult) {
+    throw new Error(payload.status.errorResult.message || "BigQuery rejected the query job");
+  }
+  const jobId = String(payload.jobReference?.jobId || "").trim();
+  if (!jobId) throw new Error("BigQuery did not return a job ID");
+  return {
+    projectId: String(payload.jobReference?.projectId || projectId),
+    jobId,
+    location: String(payload.jobReference?.location || location),
+  };
+}
+
 export async function insertBigQueryRows(params: {
   projectId?: string;
   dataset: string;
