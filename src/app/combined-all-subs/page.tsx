@@ -8,6 +8,16 @@ type DisplayMode = "arr" | "plan";
 type PlanGrain = "daily" | "monthly";
 type CombinedPlan = "enterprise" | "managed" | "team" | "plus" | "pay_as_you_go" | "free";
 
+type CustomerHistorySyncResult = {
+  table?: string;
+  rowCount?: number;
+  customerCount?: number;
+  firstMonth?: string;
+  lastMonth?: string;
+  refreshedAtUtc?: string;
+  error?: string;
+};
+
 type CombinedAllSubsRow = {
   id: string;
   source: "hubspot_account" | "stripe_only_customer";
@@ -139,6 +149,9 @@ export default function CombinedAllSubsPage() {
   const [data, setData] = useState<CombinedAllSubsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [customerHistoryLoading, setCustomerHistoryLoading] = useState(false);
+  const [customerHistoryMessage, setCustomerHistoryMessage] = useState("");
+  const [customerHistoryError, setCustomerHistoryError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -153,6 +166,39 @@ export default function CombinedAllSubsPage() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  const refreshCustomerHistory = useCallback(async () => {
+    setCustomerHistoryLoading(true);
+    setCustomerHistoryMessage("");
+    setCustomerHistoryError("");
+    try {
+      const response = await fetch("/api/customer-monthly-history-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+      });
+      const text = await response.text();
+      let payload: CustomerHistorySyncResult = {};
+      try {
+        payload = text ? JSON.parse(text) as CustomerHistorySyncResult : {};
+      } catch {
+        payload = {};
+      }
+      if (!response.ok) throw new Error(payload.error || text || `HTTP ${response.status}`);
+
+      setCustomerHistoryMessage(
+        `Updated ${Number(payload.customerCount || 0).toLocaleString()} customers and ` +
+          `${Number(payload.rowCount || 0).toLocaleString()} customer-month rows` +
+          `${payload.firstMonth && payload.lastMonth ? ` (${payload.firstMonth} to ${payload.lastMonth})` : ""}.`,
+      );
+    } catch (refreshError: unknown) {
+      setCustomerHistoryError(
+        refreshError instanceof Error ? refreshError.message : "Customer history refresh failed",
+      );
+    } finally {
+      setCustomerHistoryLoading(false);
+    }
   }, []);
 
   const run = useCallback(async () => {
@@ -574,6 +620,41 @@ export default function CombinedAllSubsPage() {
           </div>
         </div>
       </section>
+
+      {isAdmin ? (
+        <section className="stripe-ui__panel ui-reveal ui-reveal-1" aria-labelledby="customer-history-sync-title">
+          <div className="stripe-ui__section-head">
+            <div>
+              <h2 id="customer-history-sync-title" className="stripe-ui__panel-title">Customer history table</h2>
+              <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                Rebuild the BigQuery customer-month table now using the latest website, HubSpot, and Stripe data.
+                The automatic refresh still runs daily at 10:30 UTC.
+              </p>
+            </div>
+            <span className="stripe-ui__chip">Admin</span>
+          </div>
+          <div className="stripe-ui__actions">
+            <button
+              type="button"
+              className="stripe-ui__btn stripe-ui__btn--primary"
+              onClick={() => void refreshCustomerHistory()}
+              disabled={customerHistoryLoading}
+            >
+              {customerHistoryLoading ? "Refreshing customer history..." : "Refresh customer history"}
+            </button>
+          </div>
+          {customerHistoryError ? (
+            <div className="stripe-ui__error" role="alert" style={{ marginTop: "0.8rem" }}>
+              {customerHistoryError}
+            </div>
+          ) : null}
+          {customerHistoryMessage ? (
+            <div className="stripe-ui__hint" aria-live="polite" style={{ marginTop: "0.8rem" }}>
+              {customerHistoryMessage}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       {loading && (
         <section className="stripe-ui__panel stripe-ui__loading-panel ui-reveal ui-reveal-2" aria-live="polite" aria-busy="true">
