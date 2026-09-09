@@ -23,6 +23,7 @@ const PUBLIC_API_PATH_PREFIXES = [
   "/api/stripe-bigquery-refresh",
   "/api/hubspot-current-metrics-sync",
   "/api/cache/nightly-sync",
+  "/api/customer-monthly-history-sync",
   "/api/billing/monthly-draft-invoices",
 ];
 const ADMIN_PAGE_PATH_PREFIXES = ["/model-update", "/lease-prediction"];

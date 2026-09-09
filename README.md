@@ -346,6 +346,46 @@ curl -H "Authorization: Bearer $CRON_SECRET" \
   "https://YOUR_DOMAIN/api/billing/monthly-draft-invoices?month=2026-09&dryRun=true"
 ```
 
+### Daily Customer Monthly History
+
+`GET|POST /api/customer-monthly-history-sync` rebuilds
+`botpress-stripe-data-pipeline.precomputed_tables.customer_monthly_history` every day at `10:30 UTC`,
+after the website's nightly precomputed-facts refresh. `GET` requires `Authorization: Bearer $CRON_SECRET`;
+signed-in admins can also trigger it with `POST`.
+
+The table has one row per logical customer per calendar month, from the later of the customer's signup
+month or `CUSTOMER_MONTHLY_HISTORY_START` through the current month. It includes customers with zero ARR.
+Core columns are:
+
+- identity: `customer_month_key`, `month_start`, `customer_key`, `customer_id`, `stripe_customer_ids`
+- workspace/account: `workspace_id`, `workspace_ids`, `hubspot_company_id`, `customer_name`, `email`, `signup_date`
+- monthly state: `motion`, `pricing_plan`, `plan_family`, `plan_version`, `billing_interval`, `active_pricing_plans`, `arr`, `mrr`, `is_active`
+
+ARR and motion use `vw_fact_customer_arr_periodic_current`, so they stay aligned with the website's
+combined-subscriptions heuristics. Stripe customer metadata connects customer IDs to workspaces and
+HubSpot accounts. Stripe MRR events plus price/product metadata add detailed labels such as
+`v3 plus annual` and `v4 plus monthly`. For Stripe customers that do not yet exist in the website fact,
+the job derives ARR directly from the cumulative Stripe MRR event history and classifies them as
+`selfserve`; HubSpot accounts default to `salesled`. Sales-assist flags from the website fact override
+both defaults.
+
+Optional configuration:
+
+- `CUSTOMER_MONTHLY_HISTORY_PROJECT` (default `PRECOMPUTED_TABLES_PROJECT`, then `botpress-stripe-data-pipeline`)
+- `CUSTOMER_MONTHLY_HISTORY_DATASET` (default `PRECOMPUTED_TABLES_DATASET`, then `precomputed_tables`)
+- `CUSTOMER_MONTHLY_HISTORY_TABLE` (default `customer_monthly_history`)
+- `CUSTOMER_MONTHLY_HISTORY_START` (default `2015-01-01`)
+- `STRIPE_SOURCE_PROJECT` / `STRIPE_SOURCE_DATASET` (fallback source location)
+- existing `BIGQUERY_STRIPE_*` source-table overrides are honored
+
+Manual run:
+
+```bash
+curl --fail-with-body \
+  -H "Authorization: Bearer $CRON_SECRET" \
+  "https://YOUR_DOMAIN/api/customer-monthly-history-sync"
+```
+
 HubSpot:
 
 - `HUBSPOT_PRIVATE_APP_TOKEN`
