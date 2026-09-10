@@ -99,7 +99,7 @@ export default function TeamScorecardClient({ teamKey }: { teamKey: TeamScorecar
         <div className="stripe-ui__hero-row">
           <div>
             <h1 className="stripe-ui__title">{definition.name}</h1>
-            <p className="stripe-ui__subtitle">{definition.description} Every V2 metric remains visible; unsupported actuals are intentionally blank.</p>
+            <p className="stripe-ui__subtitle">{definition.description} Every requested metric remains visible; unsupported actuals are intentionally blank.</p>
           </div>
           <div className="team-scorecards__hero-links">
             <Link href="/scorecards" className="stripe-ui__hero-link">All teams</Link>
@@ -160,7 +160,7 @@ export default function TeamScorecardClient({ teamKey }: { teamKey: TeamScorecar
             <div className="stripe-ui__section-head">
               <div>
                 <h2 className="stripe-ui__panel-title">{displayed.teamName} scorecard</h2>
-                <p className="stripe-ui__panel-subtitle">Targets, owners, cadence, tracking notes, and metric names are preserved from the V2 tab. Blank actual cells are not treated as zero.</p>
+                <p className="stripe-ui__panel-subtitle">Targets, owners, cadence, tracking notes, and metric names are preserved from the scorecard specification. Blank actual cells are not treated as zero.</p>
               </div>
               <span className="team-scorecards__range-chip">{displayed.startDate} → {displayed.endDate}</span>
             </div>

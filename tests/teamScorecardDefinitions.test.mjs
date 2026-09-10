@@ -7,28 +7,57 @@ import {
   isTeamScorecardKey,
 } from "../src/lib/teamScorecardDefinitions.ts";
 
-test("preserves the seven V2 team scorecards and all 47 metrics", () => {
+test("preserves the V2 scorecards and adds Finance and People Ops", () => {
   assert.deepEqual(TEAM_SCORECARD_DEFINITIONS.map((team) => team.key), [...TEAM_SCORECARD_KEYS]);
-  assert.deepEqual(TEAM_SCORECARD_DEFINITIONS.map((team) => team.metrics.length), [9, 7, 10, 4, 7, 4, 6]);
-  assert.equal(TEAM_SCORECARD_DEFINITIONS.reduce((sum, team) => sum + team.metrics.length, 0), 47);
+  assert.deepEqual(TEAM_SCORECARD_DEFINITIONS.map((team) => team.metrics.length), [9, 7, 10, 4, 7, 4, 6, 8, 6]);
+  assert.equal(TEAM_SCORECARD_DEFINITIONS.reduce((sum, team) => sum + team.metrics.length, 0), 61);
 });
 
-test("keeps workbook targets blank except for the six Marketing targets", () => {
+test("keeps the supplied Marketing and Finance targets", () => {
   const marketing = getTeamScorecardDefinition("marketing");
+  const finance = getTeamScorecardDefinition("finance");
   assert.equal(marketing.metrics.filter((metric) => metric.target).length, 6);
   assert.equal(marketing.metrics[0].target, "0% → 25%+ by EOQ4");
   assert.equal(marketing.metrics[5].target, "6 by EOQ3");
+  assert.deepEqual(finance.metrics.map((metric) => metric.target), [
+    "≤5 bd",
+    "≤10th",
+    "Weekly",
+    "±10%",
+    "TBD",
+    "TBD",
+    "0 errors",
+    "Weekly",
+  ]);
   assert.equal(
-    TEAM_SCORECARD_DEFINITIONS.filter((team) => team.key !== "marketing")
+    TEAM_SCORECARD_DEFINITIONS.filter((team) => team.key !== "marketing" && team.key !== "finance")
       .flatMap((team) => team.metrics)
       .every((metric) => metric.target === ""),
     true,
   );
 });
 
+test("keeps the supplied Finance and People Ops owners, cadence, and tracking flags", () => {
+  const finance = getTeamScorecardDefinition("finance");
+  const peopleOps = getTeamScorecardDefinition("people-ops");
+
+  assert.equal(finance.metrics.length, 8);
+  assert.equal(finance.metrics.every((metric) => metric.financeTracking === "yes"), true);
+  assert.equal(finance.metrics[0].owner, "Controller");
+  assert.equal(finance.metrics[6].frequency, "Quarterly");
+
+  assert.equal(peopleOps.metrics.length, 6);
+  assert.equal(peopleOps.metrics[0].owner, "Vlad");
+  assert.equal(peopleOps.metrics[1].owner, "Vlad/Lauren/Mathilde");
+  assert.equal(peopleOps.metrics[1].financeTracking, "yes");
+  assert.equal(peopleOps.metrics[2].frequency, "semi-annual");
+});
+
 test("validates team route keys", () => {
   assert.equal(isTeamScorecardKey("sales"), true);
   assert.equal(isTeamScorecardKey("account-management"), true);
   assert.equal(isTeamScorecardKey("Account-Management"), true);
-  assert.equal(isTeamScorecardKey("finance"), false);
+  assert.equal(isTeamScorecardKey("finance"), true);
+  assert.equal(isTeamScorecardKey("people-ops"), true);
+  assert.equal(isTeamScorecardKey("People-Ops"), true);
 });

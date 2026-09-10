@@ -6,6 +6,8 @@ export const TEAM_SCORECARD_KEYS = [
   "delivery",
   "support",
   "marketing",
+  "finance",
+  "people-ops",
 ] as const;
 
 export type TeamScorecardKey = (typeof TEAM_SCORECARD_KEYS)[number];
@@ -138,6 +140,34 @@ export const TEAM_SCORECARD_DEFINITIONS: TeamScorecardDefinition[] = [
       metric("brand-search-clicks", "Brand-search clicks (organic floor defense)", "Weekly", "no", { target: "20K floor; 25K by EOQ4", owner: "Head of Organic Growth" }),
       metric("new-channel-pipeline-share", "% of Marketing-sourced pipeline from new channels (non-organic, non-paid baseline)", "Monthly", "no", { target: "30%+ by EOQ4", owner: "Eva / Mathieu" }),
       metric("support-case-studies", "Heads-of-Support-named case studies in market", "Quarterly", "no", { target: "6 by EOQ3", owner: "Mathieu" }),
+    ],
+  },
+  {
+    key: "finance",
+    name: "Finance",
+    description: "Close execution, planning accuracy, working-capital cycles, and reporting discipline.",
+    metrics: [
+      metric("monthly-close-cycle", "Monthly close cycle (business days)", "Monthly", "yes", { target: "≤5 bd", owner: "Controller" }),
+      metric("bva-delivery-day", "BvA delivered by (day of month)", "Monthly", "yes", { target: "≤10th", owner: "Siya" }),
+      metric("cash-forecast-updated", "Cash forecast updated", "Weekly", "yes", { target: "Weekly", owner: "Controller" }),
+      metric("arr-forecast-accuracy", "Forecast accuracy — ARR variance (%)", "Monthly", "yes", { target: "±10%", owner: "Frank" }),
+      metric("ar-collection-cycle", "AR collection cycle (DSO, days)", "Monthly", "yes", { target: "TBD", owner: "Khai" }),
+      metric("ap-cycle-time", "AP cycle time (days)", "Monthly", "yes", { target: "TBD", owner: "Khai" }),
+      metric("payroll-commissions-cycle-accuracy", "Payroll & Commissions cycle accuracy (errors/payout)", "Quarterly", "yes", { target: "0 errors", owner: "Khai" }),
+      metric("dashboards-up-to-date", "Dashboards published and up to date", "Weekly", "yes", { target: "Weekly", owner: "Siya" }),
+    ],
+  },
+  {
+    key: "people-ops",
+    name: "People Ops",
+    description: "Hiring effectiveness, employee retention, manager enablement, and legal operations.",
+    metrics: [
+      metric("offer-acceptance-rate", "Offer acceptance rate", "monthly + YTD", "no", { owner: "Vlad" }),
+      metric("employee-retention-regrettable-attrition", "Employee retention rate + regrettable attrition", "monthly + YTD", "yes", { owner: "Vlad/Lauren/Mathilde" }),
+      metric("enps", "eNPS", "semi-annual", "no", { owner: "Mathilde" }),
+      metric("manager-training-completion", "% of managers who completed training", "monthly + YTD", "no", { owner: "Lauren" }),
+      metric("legal-questions-volume", "Inbound legal questions volume", "Weekly", "no", { owner: "Mathilde" }),
+      metric("contract-turnaround-time", "Contract turnaround time", "Monthly", "no", { owner: "Mathilde" }),
     ],
   },
 ];

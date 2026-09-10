@@ -10,7 +10,7 @@ export default function TeamScorecardsPage() {
           <div>
             <h1 className="stripe-ui__title">Team Scorecards</h1>
             <p className="stripe-ui__subtitle">
-              One page per team, preserving every metric from the V2 scorecard. Supported actuals are calculated from BigQuery; the rest stay blank.
+              One page per team, preserving the V2 scorecard and the added Finance and People Ops metrics. Supported actuals are calculated from connected sources; the rest stay blank.
             </p>
           </div>
           <div className="team-scorecards__hero-links">
