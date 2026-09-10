@@ -32,8 +32,7 @@ export default function HardRefreshButton() {
   const [syncLoading, setSyncLoading] = useState(false);
   const [backfillLoading, setBackfillLoading] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [isSales, setIsSales] = useState(false);
-  const [isAccountManagement, setIsAccountManagement] = useState(false);
+  const [isAssignedAreaOnly, setIsAssignedAreaOnly] = useState(false);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [lastSyncAtUtc, setLastSyncAtUtc] = useState("");
   const [lastSyncSummary, setLastSyncSummary] = useState("");
@@ -51,17 +50,18 @@ export default function HardRefreshButton() {
       try {
         const res = await fetch("/api/auth/session", { cache: "no-store" });
         if (!res.ok) return;
-        const payload = (await res.json()) as { user?: { role?: string } };
+        const payload = (await res.json()) as { user?: { role?: string; roles?: string[] } };
         if (!active) return;
-        const role = String(payload?.user?.role || "").trim().toLowerCase();
-        setIsAdmin(role === "admin");
-        setIsSales(role === "sales");
-        setIsAccountManagement(role === "account_management");
+        const roles = Array.isArray(payload?.user?.roles)
+          ? payload.user.roles.map((role) => String(role || "").trim().toLowerCase())
+          : [String(payload?.user?.role || "").trim().toLowerCase()];
+        const admin = roles.includes("admin");
+        setIsAdmin(admin);
+        setIsAssignedAreaOnly(!admin && !roles.includes("viewer"));
       } catch {
         if (!active) return;
         setIsAdmin(false);
-        setIsSales(false);
-        setIsAccountManagement(false);
+        setIsAssignedAreaOnly(true);
       } finally {
         if (active) setSessionLoaded(true);
       }
@@ -99,7 +99,7 @@ export default function HardRefreshButton() {
     };
   }, []);
 
-  if (shouldHide(pathname) || !sessionLoaded || isSales || isAccountManagement) return null;
+  if (shouldHide(pathname) || !sessionLoaded || isAssignedAreaOnly) return null;
 
   async function hardRefresh() {
     setLoading(true);

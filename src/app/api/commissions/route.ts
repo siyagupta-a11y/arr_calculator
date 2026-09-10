@@ -12,8 +12,8 @@ const CACHE_TTL_MS = readTtlMs("API_COMMISSIONS_CACHE_TTL_MS", 5 * 60 * 1000);
 
 export async function POST(request: Request) {
   const session = await getServerSession(authOptions);
-  const role = (session?.user as { role?: string } | undefined)?.role;
-  if (!canViewCommissions(role)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const user = session?.user as { role?: string; roles?: string[] } | undefined;
+  if (!canViewCommissions(user?.roles || user?.role)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   try {
     const body = (await request.json()) as CommissionReportRequest;

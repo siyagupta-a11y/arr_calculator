@@ -139,7 +139,7 @@ export default function MigrationPage() {
   const [endDate, setEndDate] = useState(() => todayInToronto());
   const [appliedStartDate, setAppliedStartDate] = useState(MIN_MIGRATION_DATE);
   const [appliedEndDate, setAppliedEndDate] = useState(() => todayInToronto());
-  const [sessionRole, setSessionRole] = useState("");
+  const [sessionRoles, setSessionRoles] = useState<string[]>([]);
   const maximumDate = todayInToronto();
 
   const load = useCallback(async (nextStartDate: string, nextEndDate: string) => {
@@ -169,10 +169,15 @@ export default function MigrationPage() {
       try {
         const response = await fetch("/api/auth/session", { cache: "no-store" });
         if (!response.ok) return;
-        const payload = (await response.json()) as { user?: { role?: string } };
-        if (active) setSessionRole(String(payload.user?.role || "").trim().toLowerCase());
+        const payload = (await response.json()) as { user?: { role?: string; roles?: string[] } };
+        if (active) {
+          const roles = Array.isArray(payload.user?.roles)
+            ? payload.user.roles
+            : [String(payload.user?.role || "")];
+          setSessionRoles(roles.map((role) => String(role || "").trim().toLowerCase()).filter(Boolean));
+        }
       } catch {
-        if (active) setSessionRole("");
+        if (active) setSessionRoles([]);
       }
     };
     void loadSession();
@@ -269,11 +274,21 @@ export default function MigrationPage() {
               Customers and ARR migrated from V2/V3 to V4 plans since April 2026, combining Stripe BigQuery and closed-won HubSpot Sales Default Pipeline deals.
             </p>
           </div>
-          {sessionRole && sessionRole !== "account_management" ? (
+          {sessionRoles.some((role) => ["admin", "viewer", "sales", "gtm"].includes(role)) ? (
             <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <Link href="/account-management" className="stripe-ui__hero-link">Open Account Management</Link>
-              <Link href="/hubspot" className="stripe-ui__hero-link">Open HubSpot report</Link>
-              <Link href="/combined-all-subs" className="stripe-ui__hero-link">Open Combined All Subs</Link>
+              {sessionRoles.includes("admin") || sessionRoles.includes("viewer") ? (
+                <>
+                  <Link href="/account-management" className="stripe-ui__hero-link">Open Account Management</Link>
+                  <Link href="/hubspot" className="stripe-ui__hero-link">Open HubSpot report</Link>
+                  <Link href="/combined-all-subs" className="stripe-ui__hero-link">Open Combined All Subs</Link>
+                </>
+              ) : null}
+              {!sessionRoles.includes("admin") && sessionRoles.includes("sales") ? (
+                <Link href="/commissions" className="stripe-ui__hero-link">Open Commissions</Link>
+              ) : null}
+              {!sessionRoles.includes("admin") && sessionRoles.includes("gtm") ? (
+                <Link href="/gtm" className="stripe-ui__hero-link">Open GTM</Link>
+              ) : null}
             </div>
           ) : null}
         </div>

@@ -74,7 +74,7 @@ export default function CommissionsPage() {
   const [month, setMonth] = useState(initialMonth);
   const [data, setData] = useState<CommissionReportResponse | null>(null);
   const [ownerFilter, setOwnerFilter] = useState("");
-  const [sessionRole, setSessionRole] = useState<"admin" | "sales" | "">("");
+  const [sessionRoles, setSessionRoles] = useState<string[]>([]);
   const [quotaData, setQuotaData] = useState<SalesQuotaReportResponse | null>(null);
   const [quotaLoading, setQuotaLoading] = useState(true);
   const [quotaError, setQuotaError] = useState("");
@@ -86,13 +86,15 @@ export default function CommissionsPage() {
     let cancelled = false;
     fetch("/api/auth/session", { cache: "no-store" })
       .then((response) => response.json())
-      .then((session: { user?: { role?: string } } | null) => {
+      .then((session: { user?: { role?: string; roles?: string[] } } | null) => {
         if (cancelled) return;
-        const role = String(session?.user?.role || "").trim().toLowerCase();
-        setSessionRole(role === "admin" ? "admin" : role === "sales" ? "sales" : "");
+        const roles = Array.isArray(session?.user?.roles)
+          ? session.user.roles
+          : [String(session?.user?.role || "")];
+        setSessionRoles(roles.map((role) => String(role || "").trim().toLowerCase()).filter(Boolean));
       })
       .catch(() => {
-        if (!cancelled) setSessionRole("");
+        if (!cancelled) setSessionRoles([]);
       });
     return () => {
       cancelled = true;
@@ -178,20 +180,30 @@ export default function CommissionsPage() {
               churn and downgrade clawbacks plus deal-backed plan replacements.
             </p>
           </div>
-          {sessionRole === "admin" ? (
+          {sessionRoles.includes("admin") || sessionRoles.includes("gtm") || sessionRoles.includes("account_management") ? (
             <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <Link href="/combined-all-subs" className="stripe-ui__hero-link">
-                Open Combined All Subs
-              </Link>
-              <Link href="/hubspot" className="stripe-ui__hero-link">
-                Open HubSpot report
-              </Link>
-              <Link href="/account-management" className="stripe-ui__hero-link">
-                Open Account Management
-              </Link>
-              <Link href="/migration" className="stripe-ui__hero-link">
-                Open Migration
-              </Link>
+              {sessionRoles.includes("admin") ? (
+                <>
+                  <Link href="/combined-all-subs" className="stripe-ui__hero-link">
+                    Open Combined All Subs
+                  </Link>
+                  <Link href="/hubspot" className="stripe-ui__hero-link">
+                    Open HubSpot report
+                  </Link>
+                  <Link href="/account-management" className="stripe-ui__hero-link">
+                    Open Account Management
+                  </Link>
+                  <Link href="/migration" className="stripe-ui__hero-link">
+                    Open Migration
+                  </Link>
+                </>
+              ) : null}
+              {sessionRoles.includes("admin") || sessionRoles.includes("gtm") ? (
+                <Link href="/gtm" className="stripe-ui__hero-link">Open GTM</Link>
+              ) : null}
+              {!sessionRoles.includes("admin") && sessionRoles.includes("account_management") ? (
+                <Link href="/migration" className="stripe-ui__hero-link">Open Migration</Link>
+              ) : null}
             </div>
           ) : null}
         </div>

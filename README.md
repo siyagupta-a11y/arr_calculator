@@ -414,7 +414,11 @@ Authentication (Google SSO):
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
 - `AUTH_ALLOWED_DOMAINS` (comma-separated company domains, e.g. `botpress.com,example.com`)
+- `AUTH_ALLOWED_EMAILS` (optional comma-separated Viewer email allowlist)
 - `AUTH_ADMIN_EMAILS` (optional comma-separated admin email allowlist)
+- `AUTH_SALES_EMAILS` (optional comma-separated Sales email allowlist)
+- `AUTH_ACCOUNT_MANAGEMENT_EMAILS` (optional comma-separated Account Management email allowlist)
+- `AUTH_GTM_EMAILS` (optional comma-separated GTM email allowlist; role lists may overlap)
 
 Stripe:
 

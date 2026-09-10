@@ -3,11 +3,12 @@ import type { NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
 import {
   canViewCommissions,
-  isAccountManagementAllowedApplicationPath,
-  isAccountManagementOnlyRole,
-  isSalesAllowedApplicationPath,
-  isSalesOnlyRole,
-  normalizeAppRole,
+  canViewGtm,
+  defaultApplicationPathForRoles,
+  hasAppRole,
+  isAssignedAreaOnlyUser,
+  isAssignedRoleAllowedApplicationPath,
+  normalizeAppRoles,
 } from "@/lib/accessRoles";
 
 const PUBLIC_PAGE_PATHS = new Set<string>(["/login", "/privacy-policy", "/eula"]);
@@ -30,6 +31,8 @@ const ADMIN_PAGE_PATH_PREFIXES = ["/model-update", "/lease-prediction"];
 const ADMIN_API_PATH_PREFIXES = ["/api/model-update", "/api/lease-prediction"];
 const COMMISSIONS_PAGE_PATH_PREFIXES = ["/commissions"];
 const COMMISSIONS_API_PATH_PREFIXES = ["/api/commissions"];
+const GTM_PAGE_PATH_PREFIXES = ["/gtm"];
+const GTM_API_PATH_PREFIXES = ["/api/gtm"];
 
 function isPublicApiPath(pathname: string) {
   return PUBLIC_API_PATH_PREFIXES.some(
@@ -62,19 +65,13 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  const role = normalizeAppRole(token.role);
-  const isAdmin = role === "admin";
-  if (isSalesOnlyRole(role) && !isSalesAllowedApplicationPath(pathname)) {
+  const roles = normalizeAppRoles(token.roles || token.role);
+  const isAdmin = hasAppRole(roles, "admin");
+  if (isAssignedAreaOnlyUser(roles) && !isAssignedRoleAllowedApplicationPath(roles, pathname)) {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
-    return NextResponse.redirect(new URL("/commissions", request.nextUrl.origin));
-  }
-  if (isAccountManagementOnlyRole(role) && !isAccountManagementAllowedApplicationPath(pathname)) {
-    if (pathname.startsWith("/api/")) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
-    return NextResponse.redirect(new URL("/migration", request.nextUrl.origin));
+    return NextResponse.redirect(new URL(defaultApplicationPathForRoles(roles), request.nextUrl.origin));
   }
 
   const requiresAdminPage = matchesAnyPrefix(pathname, ADMIN_PAGE_PATH_PREFIXES);
@@ -92,11 +89,22 @@ export async function middleware(request: NextRequest) {
   const requiresCommissionsApi = pathname.startsWith("/api/")
     ? matchesAnyPrefix(pathname, COMMISSIONS_API_PATH_PREFIXES)
     : false;
-  if ((requiresCommissionsPage || requiresCommissionsApi) && !canViewCommissions(role)) {
+  if ((requiresCommissionsPage || requiresCommissionsApi) && !canViewCommissions(roles)) {
     if (requiresCommissionsApi) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
     return NextResponse.redirect(new URL("/combined-all-subs?error=admin_required", request.nextUrl.origin));
+  }
+
+  const requiresGtmPage = matchesAnyPrefix(pathname, GTM_PAGE_PATH_PREFIXES);
+  const requiresGtmApi = pathname.startsWith("/api/")
+    ? matchesAnyPrefix(pathname, GTM_API_PATH_PREFIXES)
+    : false;
+  if ((requiresGtmPage || requiresGtmApi) && !canViewGtm(roles)) {
+    if (requiresGtmApi) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    return NextResponse.redirect(new URL("/combined-all-subs?error=gtm_required", request.nextUrl.origin));
   }
 
   return NextResponse.next();

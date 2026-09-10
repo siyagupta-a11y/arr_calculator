@@ -3,12 +3,13 @@ import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "@/lib/authOptions";
 import {
+  accessRolesForEmail,
   loadAccessControlPolicy,
   removeAccessEmail,
-  setEmailRole,
+  setEmailRoles,
   upsertAccessEmail,
 } from "@/lib/accessControlStore";
-import { normalizeAppRole, type AppRole } from "@/lib/accessRoles";
+import { normalizeAppRoles, type AppRole } from "@/lib/accessRoles";
 
 const REQUIRED_ADMINS = new Set<string>(["hany.safwat@botpress.com", "siya.gupta@botpress.com"]);
 
@@ -32,20 +33,20 @@ async function addAccessEmailAction(formData: FormData) {
   const email = String(formData.get("email") || "")
     .trim()
     .toLowerCase();
-  const role = normalizeAppRole(formData.get("role"));
-  await upsertAccessEmail(email, role);
+  const roles = normalizeAppRoles(formData.getAll("roles"));
+  await upsertAccessEmail(email, roles);
   redirect("/access-control?updated=1");
 }
 
-async function setEmailRoleAction(formData: FormData) {
+async function setEmailRolesAction(formData: FormData) {
   "use server";
   const { isAdmin } = await requireAdminUser();
   if (!isAdmin) redirect("/access-control?error=admin_required");
   const email = String(formData.get("email") || "")
     .trim()
     .toLowerCase();
-  const role = normalizeAppRole(formData.get("role"));
-  await setEmailRole(email, role);
+  const roles = normalizeAppRoles(formData.getAll("roles"));
+  await setEmailRoles(email, roles);
   redirect("/access-control?updated=1");
 }
 
@@ -74,7 +75,35 @@ function errorMessage(raw: string) {
 
 function roleLabel(role: AppRole) {
   if (role === "account_management") return "Account Management";
+  if (role === "gtm") return "GTM";
   return role.charAt(0).toUpperCase() + role.slice(1);
+}
+
+const ROLE_OPTIONS: Array<{ role: AppRole; label: string }> = [
+  { role: "viewer", label: "Viewer" },
+  { role: "sales", label: "Sales" },
+  { role: "account_management", label: "Account Management" },
+  { role: "gtm", label: "GTM" },
+  { role: "admin", label: "Admin" },
+];
+
+function RoleChecklist({ defaultRoles = [], disabled = false }: { defaultRoles?: AppRole[]; disabled?: boolean }) {
+  return (
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+      {ROLE_OPTIONS.map(({ role, label }) => (
+        <label key={role} style={{ display: "inline-flex", gap: 6, alignItems: "center", color: "#374151" }}>
+          <input
+            type="checkbox"
+            name="roles"
+            value={role}
+            defaultChecked={defaultRoles.includes(role)}
+            disabled={disabled}
+          />
+          {label}
+        </label>
+      ))}
+    </div>
+  );
 }
 
 export default async function AccessControlPage(props: { searchParams: AccessControlSearchParams }) {
@@ -82,9 +111,6 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
   const { email: currentEmail, isAdmin, policy } = await requireAdminUser();
   const updated = String(searchParams.updated || "") === "1";
   const error = errorMessage(String(searchParams.error || ""));
-  const adminSet = new Set(policy.adminEmails);
-  const salesSet = new Set(policy.salesEmails);
-  const accountManagementSet = new Set(policy.accountManagementEmails);
 
   if (!isAdmin) {
     return (
@@ -129,7 +155,7 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Add Access Email</h2>
         <p className="stripe-ui__panel-subtitle">
-          Viewers can access the standard dashboards, Sales users can access only Commissions, Account Management users can access only Migration, and Admins can access everything.
+          Assign one or more roles. Viewer grants the standard dashboards, Sales grants Commissions, Account Management grants Migration, GTM grants the GTM scorecard, and Admin grants everything.
         </p>
         {updated ? (
           <p style={{ color: "#166534", background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 8, padding: "10px 12px" }}>
@@ -150,62 +176,45 @@ export default async function AccessControlPage(props: { searchParams: AccessCon
             required
             style={{ maxWidth: 360 }}
           />
-          <label style={{ display: "inline-flex", gap: 8, alignItems: "center", color: "#374151" }}>
-            Role
-            <select className="stripe-ui__control" name="role" defaultValue="viewer">
-              <option value="viewer">Viewer</option>
-              <option value="sales">Sales</option>
-              <option value="account_management">Account Management</option>
-              <option value="admin">Admin</option>
-            </select>
-          </label>
+          <RoleChecklist />
           <button type="submit" className="stripe-ui__btn stripe-ui__btn--primary">
             Add email
           </button>
         </form>
+        <p className="stripe-ui__panel-subtitle" style={{ marginTop: 10 }}>
+          If no role is selected, Viewer is assigned. Admin already includes access to every area.
+        </p>
       </section>
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-2">
         <h2 className="stripe-ui__panel-title">Allowed Emails</h2>
         <p className="stripe-ui__panel-subtitle">
-          Sales users are restricted to Commissions; Account Management users are restricted to Migration. Required admins cannot be changed or removed.
+          Area roles can be combined—for example, Sales + GTM grants both Commissions and GTM. Required admins cannot be changed or removed.
         </p>
         <div className="stripe-ui__table-wrap">
           <table className="stripe-ui__table">
             <thead>
               <tr>
                 <th>Email</th>
-                <th>Role</th>
+                <th>Roles</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {policy.allowedEmails.map((email) => {
-                const isRowAdmin = adminSet.has(email);
-                const role: AppRole = isRowAdmin
-                  ? "admin"
-                  : salesSet.has(email)
-                    ? "sales"
-                    : accountManagementSet.has(email)
-                      ? "account_management"
-                      : "viewer";
+                const roles = accessRolesForEmail(policy, email);
                 const isRequired = REQUIRED_ADMINS.has(email);
                 return (
                   <tr key={email}>
                     <td>{email}</td>
-                    <td>{roleLabel(role)}</td>
+                    <td>{roles.map(roleLabel).join(" + ")}</td>
                     <td>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        <form action={setEmailRoleAction} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <form action={setEmailRolesAction} style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
                           <input type="hidden" name="email" value={email} />
-                          <select className="stripe-ui__control" name="role" defaultValue={role} disabled={isRequired}>
-                            <option value="viewer">Viewer</option>
-                            <option value="sales">Sales</option>
-                            <option value="account_management">Account Management</option>
-                            <option value="admin">Admin</option>
-                          </select>
+                          <RoleChecklist defaultRoles={roles} disabled={isRequired} />
                           <button type="submit" className="stripe-ui__btn" disabled={isRequired}>
-                            Save role
+                            Save roles
                           </button>
                         </form>
                         <form action={removeAccessEmailAction}>

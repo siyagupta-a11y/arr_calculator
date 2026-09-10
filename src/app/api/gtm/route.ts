@@ -1,4 +1,7 @@
+import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
+import { authOptions } from "@/lib/authOptions";
+import { canViewGtm } from "@/lib/accessRoles";
 import { generateGtmReport } from "@/lib/gtmReport";
 import { getOrSetCache, readTtlMs } from "@/lib/serverResponseCache";
 
@@ -29,7 +32,14 @@ function errorResponse(error: unknown) {
   return NextResponse.json({ error: message }, { status });
 }
 
+async function hasGtmAccess() {
+  const session = await getServerSession(authOptions);
+  const user = session?.user as { role?: string; roles?: string[] } | undefined;
+  return canViewGtm(user?.roles || user?.role);
+}
+
 export async function POST(req: Request) {
+  if (!(await hasGtmAccess())) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   try {
     const raw = await req.text();
     const body = (raw ? JSON.parse(raw) : {}) as Partial<RequestBody>;
@@ -40,6 +50,7 @@ export async function POST(req: Request) {
 }
 
 export async function GET(req: Request) {
+  if (!(await hasGtmAccess())) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   try {
     const { searchParams } = new URL(req.url);
     return NextResponse.json(
