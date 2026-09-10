@@ -70,11 +70,14 @@ export default function TeamScorecardClient({
     setLoading(true);
     setError("");
     try {
-      const response = tvMode
-        ? await fetch(
-            `/api/tv/team-scorecards?${new URLSearchParams({ team: teamKey, startDate, endDate })}`,
-            { cache: "no-store", credentials: "same-origin" },
-          )
+      const tvEndpoint = tvMode
+        ? new URL("/api/tv/team-scorecards", window.location.origin)
+        : null;
+      if (tvEndpoint) {
+        tvEndpoint.search = new URLSearchParams({ team: teamKey, startDate, endDate }).toString();
+      }
+      const response = tvEndpoint
+        ? await fetch(tvEndpoint, { cache: "no-store", credentials: "same-origin" })
         : await fetch("/api/team-scorecards", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -95,6 +98,15 @@ export default function TeamScorecardClient({
       setLoading(false);
     }
   }, [teamKey, startDate, endDate, tvMode]);
+
+  useEffect(() => {
+    if (!tvMode) return;
+    const currentUrl = new URL(window.location.href);
+    if (!currentUrl.username && !currentUrl.password) return;
+    currentUrl.username = "";
+    currentUrl.password = "";
+    window.history.replaceState(window.history.state, "", currentUrl.toString());
+  }, [tvMode]);
 
   useEffect(() => {
     void load();

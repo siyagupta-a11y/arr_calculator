@@ -11,9 +11,14 @@ import {
   normalizeAppRoles,
 } from "@/lib/accessRoles";
 import {
+  createTvDashboardSessionToken,
   isTvDashboardPath,
   readTvDashboardCredentials,
+  readTvDashboardSigningSecret,
+  TV_DASHBOARD_SESSION_COOKIE,
+  TV_DASHBOARD_SESSION_MAX_AGE_SECONDS,
   verifyTvDashboardAuthorization,
+  verifyTvDashboardSessionToken,
 } from "@/lib/tvDashboardAuth";
 
 const PUBLIC_PAGE_PATHS = new Set<string>(["/login", "/privacy-policy", "/eula"]);
@@ -49,22 +54,33 @@ function matchesAnyPrefix(pathname: string, prefixes: string[]) {
   return prefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
-function tvDashboardResponse(request: NextRequest) {
+async function tvDashboardResponse(request: NextRequest) {
   const credentials = readTvDashboardCredentials();
+  const signingSecret = readTvDashboardSigningSecret();
   const securityHeaders = {
     "Cache-Control": "private, no-store, max-age=0",
     "Referrer-Policy": "no-referrer",
     "X-Robots-Tag": "noindex, nofollow, noarchive",
   };
 
-  if (!credentials) {
+  if (!credentials || !signingSecret) {
     return new NextResponse("TV dashboard access is not configured.", {
       status: 503,
       headers: securityHeaders,
     });
   }
 
-  if (!verifyTvDashboardAuthorization(request.headers.get("authorization"), credentials)) {
+  const authorizedByBasic = verifyTvDashboardAuthorization(
+    request.headers.get("authorization"),
+    credentials,
+  );
+  const authorizedBySession = await verifyTvDashboardSessionToken(
+    request.cookies.get(TV_DASHBOARD_SESSION_COOKIE)?.value,
+    credentials,
+    signingSecret,
+  );
+
+  if (!authorizedByBasic && !authorizedBySession) {
     return new NextResponse("Authentication required.", {
       status: 401,
       headers: {
@@ -75,6 +91,17 @@ function tvDashboardResponse(request: NextRequest) {
   }
 
   const response = NextResponse.next();
+  if (authorizedByBasic) {
+    response.cookies.set({
+      name: TV_DASHBOARD_SESSION_COOKIE,
+      value: await createTvDashboardSessionToken(credentials, signingSecret),
+      httpOnly: true,
+      secure: request.nextUrl.protocol === "https:",
+      sameSite: "strict",
+      path: "/",
+      maxAge: TV_DASHBOARD_SESSION_MAX_AGE_SECONDS,
+    });
+  }
   for (const [name, value] of Object.entries(securityHeaders)) response.headers.set(name, value);
   return response;
 }
@@ -82,7 +109,7 @@ function tvDashboardResponse(request: NextRequest) {
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
-  if (isTvDashboardPath(pathname)) return tvDashboardResponse(request);
+  if (isTvDashboardPath(pathname)) return await tvDashboardResponse(request);
   if (PUBLIC_PAGE_PATHS.has(pathname)) return NextResponse.next();
   if (pathname.startsWith("/api/") && isPublicApiPath(pathname)) return NextResponse.next();
 

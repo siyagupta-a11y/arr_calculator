@@ -49,7 +49,7 @@ Use a dedicated, randomly generated password containing only URL-safe ASCII char
 https://TV_USERNAME:TV_PASSWORD@YOUR_DOMAIN/tv/scorecards/sales
 ```
 
-Available team slugs are `engineering`, `product`, `sales`, `account-management`, `delivery`, `support`, `marketing`, `finance`, and `people-ops`. TV pages use a separate GET-only scorecard API, disable management controls, prevent search indexing and browser caching, and refresh calculated data every five minutes.
+Available team slugs are `engineering`, `product`, `sales`, `account-management`, `delivery`, `support`, `marketing`, `finance`, and `people-ops`. After Basic Auth succeeds, the app exchanges it for a signed, HTTP-only TV session cookie and removes the credentials from the visible browser URL. Both the page and the separate GET-only scorecard API remain authenticated. TV pages disable management controls, prevent search indexing and browser caching, and refresh calculated data every five minutes.
 
 ## Automatic Stripe Sync
 
