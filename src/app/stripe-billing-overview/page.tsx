@@ -3,6 +3,7 @@
 import Link from "next/link";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { downloadSvgAsPng } from "@/lib/chartDownload";
+import DraftInvoiceAdminControls from "./DraftInvoiceAdminControls";
 
 type Grain = "daily" | "weekly" | "monthly" | "quarterly";
 type ChartGroupBy = "none" | "product_id" | "price_id" | "subscription_item_id" | "subscription_id" | "customer_id";
@@ -1454,6 +1455,8 @@ export default function StripeBillingOverviewPage() {
           </div>
         </div>
       </section>
+
+      <DraftInvoiceAdminControls />
 
       <section className="stripe-ui__panel ui-reveal ui-reveal-1">
         <h2 className="stripe-ui__panel-title">Controls</h2>

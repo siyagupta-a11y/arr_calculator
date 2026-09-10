@@ -1,12 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 type CombineMode = "grouped" | "simple";
 type DisplayMode = "arr" | "plan";
 type PlanGrain = "daily" | "monthly";
 type CombinedPlan = "enterprise" | "managed" | "team" | "plus" | "pay_as_you_go" | "free";
+
+type CustomerHistorySyncResult = {
+  table?: string;
+  jobId?: string;
+  location?: string;
+  error?: string;
+};
 
 type CombinedAllSubsRow = {
   id: string;
@@ -138,6 +145,57 @@ export default function CombinedAllSubsPage() {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<CombinedAllSubsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [customerHistoryLoading, setCustomerHistoryLoading] = useState(false);
+  const [customerHistoryMessage, setCustomerHistoryMessage] = useState("");
+  const [customerHistoryError, setCustomerHistoryError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/auth/session", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((session: { user?: { role?: string } } | null) => {
+        if (!cancelled) setIsAdmin(String(session?.user?.role || "") === "admin");
+      })
+      .catch(() => {
+        if (!cancelled) setIsAdmin(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const refreshCustomerHistory = useCallback(async () => {
+    setCustomerHistoryLoading(true);
+    setCustomerHistoryMessage("");
+    setCustomerHistoryError("");
+    try {
+      const response = await fetch("/api/customer-monthly-history-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+      });
+      const text = await response.text();
+      let payload: CustomerHistorySyncResult = {};
+      try {
+        payload = text ? JSON.parse(text) as CustomerHistorySyncResult : {};
+      } catch {
+        payload = {};
+      }
+      if (!response.ok) throw new Error(payload.error || text || `HTTP ${response.status}`);
+
+      setCustomerHistoryMessage(
+        `Refresh started${payload.jobId ? ` as BigQuery job ${payload.jobId}` : ""}. ` +
+          `The table will replace atomically when the job completes.`,
+      );
+    } catch (refreshError: unknown) {
+      setCustomerHistoryError(
+        refreshError instanceof Error ? refreshError.message : "Customer history refresh failed",
+      );
+    } finally {
+      setCustomerHistoryLoading(false);
+    }
+  }, []);
 
   const run = useCallback(async () => {
     setLoading(true);
@@ -439,12 +497,29 @@ export default function CombinedAllSubsPage() {
             <Link href="/weekly-dashboard" className="stripe-ui__hero-link">
               Open Weekly Dashboard
             </Link>
+            <Link href="/gtm" className="stripe-ui__hero-link">
+              Open GTM
+            </Link>
+            <Link href="/scorecards" className="stripe-ui__hero-link">
+              Open Team Scorecards
+            </Link>
             <Link href="/metrics-assistant" className="stripe-ui__hero-link">
               Open Metrics Assistant (Under maintenance, do not use)
+            </Link>
+            <Link href="/account-management" className="stripe-ui__hero-link">
+              Open Account Management
+            </Link>
+            <Link href="/migration" className="stripe-ui__hero-link">
+              Open Migration
             </Link>
             <Link href="/access-control" className="stripe-ui__hero-link">
               Open Access Control
             </Link>
+            {isAdmin ? (
+              <Link href="/commissions" className="stripe-ui__hero-link">
+                Open Commissions
+              </Link>
+            ) : null}
           </div>
         </div>
       </section>
@@ -541,6 +616,41 @@ export default function CombinedAllSubsPage() {
           </div>
         </div>
       </section>
+
+      {isAdmin ? (
+        <section className="stripe-ui__panel ui-reveal ui-reveal-1" aria-labelledby="customer-history-sync-title">
+          <div className="stripe-ui__section-head">
+            <div>
+              <h2 id="customer-history-sync-title" className="stripe-ui__panel-title">Customer history table</h2>
+              <p className="stripe-ui__panel-subtitle" style={{ marginBottom: 0 }}>
+                Rebuild the BigQuery customer-month table now using the latest website, HubSpot, and Stripe data.
+                The automatic refresh still runs daily at 10:30 UTC.
+              </p>
+            </div>
+            <span className="stripe-ui__chip">Admin</span>
+          </div>
+          <div className="stripe-ui__actions">
+            <button
+              type="button"
+              className="stripe-ui__btn stripe-ui__btn--primary"
+              onClick={() => void refreshCustomerHistory()}
+              disabled={customerHistoryLoading}
+            >
+              {customerHistoryLoading ? "Refreshing customer history..." : "Refresh customer history"}
+            </button>
+          </div>
+          {customerHistoryError ? (
+            <div className="stripe-ui__error" role="alert" style={{ marginTop: "0.8rem" }}>
+              {customerHistoryError}
+            </div>
+          ) : null}
+          {customerHistoryMessage ? (
+            <div className="stripe-ui__hint" aria-live="polite" style={{ marginTop: "0.8rem" }}>
+              {customerHistoryMessage}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       {loading && (
         <section className="stripe-ui__panel stripe-ui__loading-panel ui-reveal ui-reveal-2" aria-live="polite" aria-busy="true">
