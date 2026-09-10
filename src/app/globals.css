@@ -1901,6 +1901,24 @@ textarea:focus-visible {
   gap: 0.5rem;
 }
 
+.team-scorecards__tv-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0.42rem 0.65rem;
+  border: 1px solid #385e88;
+  color: #cfefff;
+  background: #0d2134;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.team-scorecards--tv {
+  min-height: 100vh;
+}
+
 .team-scorecards__directory {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

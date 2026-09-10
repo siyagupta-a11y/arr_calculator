@@ -4,7 +4,13 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 function shouldHide(pathname: string) {
-  return pathname === "/login" || pathname === "/privacy-policy" || pathname === "/eula";
+  return (
+    pathname === "/login" ||
+    pathname === "/privacy-policy" ||
+    pathname === "/eula" ||
+    pathname === "/tv" ||
+    pathname.startsWith("/tv/")
+  );
 }
 
 function formatMontrealTime(isoUtc: string) {

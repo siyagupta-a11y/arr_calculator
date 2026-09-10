@@ -15,7 +15,8 @@
     "test:migration": "node --experimental-strip-types --test tests/migrationRules.test.mjs",
     "test:quota": "node --experimental-strip-types --test tests/salesQuotaRules.test.mjs",
     "test:gtm": "node --experimental-strip-types --test tests/gtm*.test.mjs",
-    "test:scorecards": "node --experimental-strip-types --test tests/teamScorecardDefinitions.test.mjs"
+    "test:scorecards": "node --experimental-strip-types --test tests/teamScorecardDefinitions.test.mjs",
+    "test:tv-auth": "node --experimental-strip-types --test tests/tvDashboardAuth.test.mjs"
   },
   "dependencies": {
     "@vercel/blob": "^2.3.1",

@@ -52,7 +52,13 @@ function responseError(payload: unknown, status: number) {
   return `Scorecard request failed (${status})`;
 }
 
-export default function TeamScorecardClient({ teamKey }: { teamKey: TeamScorecardKey }) {
+export default function TeamScorecardClient({
+  teamKey,
+  tvMode = false,
+}: {
+  teamKey: TeamScorecardKey;
+  tvMode?: boolean;
+}) {
   const today = useMemo(todayIso, []);
   const [startDate, setStartDate] = useState(() => monthStart(today));
   const [endDate, setEndDate] = useState(today);
@@ -64,11 +70,16 @@ export default function TeamScorecardClient({ teamKey }: { teamKey: TeamScorecar
     setLoading(true);
     setError("");
     try {
-      const response = await fetch("/api/team-scorecards", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ team: teamKey, startDate, endDate }),
-      });
+      const response = tvMode
+        ? await fetch(
+            `/api/tv/team-scorecards?${new URLSearchParams({ team: teamKey, startDate, endDate })}`,
+            { cache: "no-store", credentials: "same-origin" },
+          )
+        : await fetch("/api/team-scorecards", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ team: teamKey, startDate, endDate }),
+          });
       const text = await response.text();
       let payload: unknown = null;
       try {
@@ -83,27 +94,33 @@ export default function TeamScorecardClient({ teamKey }: { teamKey: TeamScorecar
     } finally {
       setLoading(false);
     }
-  }, [teamKey, startDate, endDate]);
+  }, [teamKey, startDate, endDate, tvMode]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (!tvMode) return;
+    const refreshTimer = window.setInterval(() => void load(), 5 * 60 * 1000);
+    return () => window.clearInterval(refreshTimer);
+  }, [load, tvMode]);
+
   const definition = TEAM_SCORECARD_DEFINITIONS.find((team) => team.key === teamKey)!;
   const displayed = data?.teamKey === teamKey ? data : null;
 
   return (
-    <div className="stripe-ui team-scorecards">
+    <div className={`stripe-ui team-scorecards${tvMode ? " team-scorecards--tv" : ""}`}>
       <section className="stripe-ui__hero ui-reveal">
-        <div className="stripe-ui__eyebrow">Team scorecard</div>
+        <div className="stripe-ui__eyebrow">{tvMode ? "Read-only performance dashboard" : "Team scorecard"}</div>
         <div className="stripe-ui__hero-row">
           <div>
             <h1 className="stripe-ui__title">{definition.name}</h1>
             <p className="stripe-ui__subtitle">{definition.description} Every requested metric remains visible; unsupported actuals are intentionally blank.</p>
           </div>
           <div className="team-scorecards__hero-links">
-            <Link href="/scorecards" className="stripe-ui__hero-link">All teams</Link>
-            <Link href="/gtm" className="stripe-ui__hero-link">Open GTM</Link>
+            <Link href={tvMode ? "/tv/scorecards" : "/scorecards"} className="stripe-ui__hero-link">All teams</Link>
+            {tvMode ? <span className="team-scorecards__tv-status">TV view · auto-refreshes</span> : <Link href="/gtm" className="stripe-ui__hero-link">Open GTM</Link>}
           </div>
         </div>
       </section>
@@ -112,7 +129,7 @@ export default function TeamScorecardClient({ teamKey }: { teamKey: TeamScorecar
         {TEAM_SCORECARD_DEFINITIONS.map((team) => (
           <Link
             key={team.key}
-            href={`/scorecards/${team.key}`}
+            href={`${tvMode ? "/tv" : ""}/scorecards/${team.key}`}
             className={`team-scorecards__tab${team.key === teamKey ? " team-scorecards__tab--active" : ""}`}
             aria-current={team.key === teamKey ? "page" : undefined}
           >
@@ -125,7 +142,7 @@ export default function TeamScorecardClient({ teamKey }: { teamKey: TeamScorecar
         <div className="stripe-ui__section-head">
           <div>
             <h2 className="stripe-ui__panel-title">Reporting period</h2>
-            <p className="stripe-ui__panel-subtitle">Daily CARR metrics use the exact range. Cadence-specific quota metrics are calculated as of the selected end date.</p>
+            <p className="stripe-ui__panel-subtitle">Daily CARR metrics use the exact range. Cadence-specific quota metrics are calculated as of the selected end date.{tvMode ? " This display reloads its data every five minutes." : ""}</p>
           </div>
         </div>
         <div className="stripe-ui__control-grid team-scorecards__controls">

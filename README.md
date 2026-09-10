@@ -7,6 +7,8 @@ This is a Next.js ARR dashboard.
 - `/stripe-arr-correct` Stripe ARR (Correct) report
 - `/combined-all-subs` Combined ARR by customer (HubSpot cloud C-ARR + Stripe through-MRR merge)
 - `/commissions` Admin-only owner commission and Stripe clawback report
+- `/scorecards` Google-authenticated team performance dashboards
+- `/tv/scorecards/[team]` Read-only, HTTP Basic Auth performance dashboard for Yodeck
 - `/tofu` Monthly TOFU ARR bridge (Beginning/New/Expansion/Contraction/Churn/Ending)
 - `/quickbooks` QuickBooks OAuth + data access page
 - `POST /api/report` HubSpot report API
@@ -16,6 +18,7 @@ This is a Next.js ARR dashboard.
 - `GET /api/stripe-arr-correct-report/export` Stripe ARR (Correct) CSV export API
 - `GET|POST /api/combined-all-subs-report` Combined HubSpot+Stripe customer ARR API
 - `POST /api/commissions` Admin-only monthly commissions API
+- `GET /api/tv/team-scorecards` Read-only, HTTP Basic Auth scorecard API for Yodeck
 - `GET|POST /api/tofu-report` Monthly TOFU ARR bridge API based on Combined All Subs
 - `GET|POST /api/hubspot-current-metrics-sync` Push current ARR/contracted ARR values into HubSpot deal properties
 - `GET|POST /api/stripe-sync` Stripe sync API
@@ -32,6 +35,21 @@ This is a Next.js ARR dashboard.
 - `POST /api/quickbooks/disconnect` Clear saved QuickBooks tokens
 - `GET|POST /api/slack/daily-arr-summary` Send daily Projected ARR metrics to Slack (DM/channel)
 - `GET|POST /api/billing/monthly-draft-invoices` Create review-only Stripe draft invoices from Closed Won sales-led HubSpot deals
+
+## Yodeck TV Performance Dashboards
+
+The `/tv/scorecards` directory and every `/tv/scorecards/[team]` page use HTTP Basic Authentication instead of Google sign-in. Configure both variables in Vercel:
+
+- `TV_DASHBOARD_USERNAME`
+- `TV_DASHBOARD_PASSWORD`
+
+Use a dedicated, randomly generated password containing only URL-safe ASCII characters. Add a Yodeck Web Page using this format, percent-encoding the credentials when necessary:
+
+```text
+https://TV_USERNAME:TV_PASSWORD@YOUR_DOMAIN/tv/scorecards/sales
+```
+
+Available team slugs are `engineering`, `product`, `sales`, `account-management`, `delivery`, `support`, `marketing`, `finance`, and `people-ops`. TV pages use a separate GET-only scorecard API, disable management controls, prevent search indexing and browser caching, and refresh calculated data every five minutes.
 
 ## Automatic Stripe Sync
 

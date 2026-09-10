@@ -10,6 +10,11 @@ import {
   isAssignedRoleAllowedApplicationPath,
   normalizeAppRoles,
 } from "@/lib/accessRoles";
+import {
+  isTvDashboardPath,
+  readTvDashboardCredentials,
+  verifyTvDashboardAuthorization,
+} from "@/lib/tvDashboardAuth";
 
 const PUBLIC_PAGE_PATHS = new Set<string>(["/login", "/privacy-policy", "/eula"]);
 const PUBLIC_API_PATH_PREFIXES = [
@@ -44,9 +49,40 @@ function matchesAnyPrefix(pathname: string, prefixes: string[]) {
   return prefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
+function tvDashboardResponse(request: NextRequest) {
+  const credentials = readTvDashboardCredentials();
+  const securityHeaders = {
+    "Cache-Control": "private, no-store, max-age=0",
+    "Referrer-Policy": "no-referrer",
+    "X-Robots-Tag": "noindex, nofollow, noarchive",
+  };
+
+  if (!credentials) {
+    return new NextResponse("TV dashboard access is not configured.", {
+      status: 503,
+      headers: securityHeaders,
+    });
+  }
+
+  if (!verifyTvDashboardAuthorization(request.headers.get("authorization"), credentials)) {
+    return new NextResponse("Authentication required.", {
+      status: 401,
+      headers: {
+        ...securityHeaders,
+        "WWW-Authenticate": 'Basic realm="Performance Dashboards", charset="UTF-8"',
+      },
+    });
+  }
+
+  const response = NextResponse.next();
+  for (const [name, value] of Object.entries(securityHeaders)) response.headers.set(name, value);
+  return response;
+}
+
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
+  if (isTvDashboardPath(pathname)) return tvDashboardResponse(request);
   if (PUBLIC_PAGE_PATHS.has(pathname)) return NextResponse.next();
   if (pathname.startsWith("/api/") && isPublicApiPath(pathname)) return NextResponse.next();
 
