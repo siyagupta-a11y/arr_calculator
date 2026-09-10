@@ -573,7 +573,7 @@ export default function GtmPage() {
 
           <section className="stripe-ui__panel ui-reveal ui-reveal-2">
             <h2 className="stripe-ui__panel-title">ARR by motion — MTD through {dateLabel(data.weekEndDate)}</h2>
-            <p className="stripe-ui__panel-subtitle">The bridge aggregates Sunday-ending weekly rows from the combined CARR-by-motion model in BigQuery. No live HubSpot API call is made.</p>
+            <p className="stripe-ui__panel-subtitle">The bridge aggregates Sunday-ending weekly rows from the combined CARR-by-motion model plus legacy HubSpot ARR (deployment type is not Cloud) in BigQuery. No live HubSpot API call is made.</p>
             <div className="stripe-ui__table-wrap">
               <table className="stripe-ui__table gtm__table">
                 <thead><tr><th>Motion</th>{BRIDGE_FIELDS.map((item) => <th key={item.field} className="stripe-ui__num">{item.label}</th>)}</tr></thead>

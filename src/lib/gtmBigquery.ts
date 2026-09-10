@@ -1,4 +1,5 @@
 import { runBigQuerySqlRows, type BigQuerySqlParameter, type StripeBigQueryProfile } from "@/lib/stripeBigquery";
+import { buildGtmLegacyArrCtes } from "@/lib/gtmLegacyArrSql";
 
 const PROFILE: StripeBigQueryProfile = "stripe_arr_correct";
 const BIGQUERY_PROJECT = String(process.env.GTM_BIGQUERY_PROJECT || "botpress-stripe-data-pipeline").trim() || "botpress-stripe-data-pipeline";
@@ -310,8 +311,25 @@ FROM overall CROSS JOIN cs
 }
 
 export async function queryGtmArrRows(input: { startWeekEndDate: string; endWeekEndDate: string }): Promise<GtmBigQueryArrRow[]> {
+  const waterfallTable = tableRef(TRANSFORMED_DATASET, "rpt_carr_waterfall_by_period_and_motion");
+  const legacyCtes = buildGtmLegacyArrCtes({
+    tables: {
+      deals: tableRef(TRANSFORMED_DATASET, "stg_hubspot_deals"),
+      dealLineItems: tableRef(TRANSFORMED_DATASET, "stg_hubspot_deal_line_items"),
+      lineItems: tableRef(TRANSFORMED_DATASET, "stg_hubspot_line_items"),
+      fxRates: tableRef(TRANSFORMED_DATASET, "int_fx_monthly_rates"),
+      companies: tableRef(TRANSFORMED_DATASET, "stg_hubspot_companies"),
+    },
+    requestedPeriodsSql: `
+  SELECT DISTINCT period_start, period_end
+  FROM ${waterfallTable}
+  WHERE grain = 'week'
+    AND period_end BETWEEN DATE(@start_week_end) AND DATE(@end_week_end)
+`,
+  });
   const rows = await runBigQuerySqlRows(
     `
+WITH existing_arr AS (
 SELECT
   period_start, period_end, motion,
   beginning_carr AS beginning_arr,
@@ -321,15 +339,36 @@ SELECT
   churn_carr AS churn_arr,
   COALESCE(transfer_in_carr, 0) + COALESCE(transfer_out_carr, 0) AS transfer_arr,
   ending_carr AS ending_arr
-FROM ${tableRef(TRANSFORMED_DATASET, "rpt_carr_waterfall_by_period_and_motion")}
+FROM ${waterfallTable}
 WHERE grain = 'week'
   AND period_end BETWEEN DATE(@start_week_end) AND DATE(@end_week_end)
   AND motion IN ('self_serve', 'sales_assist', 'sales_led')
+),
+${legacyCtes},
+combined_arr AS (
+  SELECT * FROM existing_arr
+  UNION ALL
+  SELECT * FROM legacy_arr_waterfall
+)
+SELECT
+  period_start,
+  period_end,
+  motion,
+  ROUND(SUM(beginning_arr), 2) AS beginning_arr,
+  ROUND(SUM(new_arr), 2) AS new_arr,
+  ROUND(SUM(expansion_arr), 2) AS expansion_arr,
+  ROUND(SUM(contraction_arr), 2) AS contraction_arr,
+  ROUND(SUM(churn_arr), 2) AS churn_arr,
+  ROUND(SUM(transfer_arr), 2) AS transfer_arr,
+  ROUND(SUM(ending_arr), 2) AS ending_arr
+FROM combined_arr
+GROUP BY period_start, period_end, motion
 ORDER BY period_end, motion
 `,
     [
       { name: "start_week_end", type: "STRING", value: input.startWeekEndDate },
       { name: "end_week_end", type: "STRING", value: input.endWeekEndDate },
+      { name: "target_currency", type: "STRING", value: String(process.env.FX_TARGET_CURRENCY || "USD").trim().toUpperCase() || "USD" },
     ],
     { profile: PROFILE },
   );

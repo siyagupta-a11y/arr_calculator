@@ -1,4 +1,5 @@
 import { runBigQuerySqlRows, type BigQuerySqlParameter, type StripeBigQueryProfile } from "@/lib/stripeBigquery";
+import { buildGtmLegacyArrCtes } from "@/lib/gtmLegacyArrSql";
 import { normalizeGtmWeekEndDate } from "@/lib/gtmReport";
 
 const PROFILE: StripeBigQueryProfile = "stripe_arr_correct";
@@ -189,6 +190,23 @@ async function queryArrMovementDetails(input: {
   field: GtmBridgeField | "churnAndContraction";
   title: string;
 }): Promise<GtmDetailResponse> {
+  const movementDetailsTable = tableRef(TRANSFORMED_DATASET, "rpt_logo_movement_details_by_period_and_motion");
+  const legacyCtes = buildGtmLegacyArrCtes({
+    tables: {
+      deals: tableRef(TRANSFORMED_DATASET, "stg_hubspot_deals"),
+      dealLineItems: tableRef(TRANSFORMED_DATASET, "stg_hubspot_deal_line_items"),
+      lineItems: tableRef(TRANSFORMED_DATASET, "stg_hubspot_line_items"),
+      fxRates: tableRef(TRANSFORMED_DATASET, "int_fx_monthly_rates"),
+      companies: tableRef(TRANSFORMED_DATASET, "stg_hubspot_companies"),
+    },
+    requestedPeriodsSql: `
+  SELECT DISTINCT period_start, period_end
+  FROM ${movementDetailsTable}
+  WHERE movement_scope = 'motion'
+    AND grain = 'week'
+    AND period_end BETWEEN DATE(@start_date) AND DATE(@end_date)
+`,
+  });
   const stockField = input.field === "beginningArr" || input.field === "endingArr";
   const stockBoundary = input.field === "beginningArr" ? "MIN" : "MAX";
   const stockValue = input.field === "beginningArr" ? "m.previous_segment_carr" : "m.current_segment_carr";
@@ -213,19 +231,67 @@ async function queryArrMovementDetails(input: {
     `
 WITH boundary AS (
   SELECT ${stockBoundary}(period_end) AS boundary_end
-  FROM ${tableRef(TRANSFORMED_DATASET, "rpt_logo_movement_details_by_period_and_motion")}
+  FROM ${movementDetailsTable}
   WHERE movement_scope = 'motion'
     AND grain = 'week'
     AND period_end BETWEEN DATE(@start_date) AND DATE(@end_date)
+),
+${legacyCtes},
+base_movements AS (
+  SELECT
+    m.period_start,
+    m.period_end,
+    m.customer_key,
+    m.customer_label,
+    m.company_name,
+    m.hubspot_company_id,
+    m.company_workspace_id,
+    m.hubspot_company_url,
+    m.motion,
+    m.bucket,
+    m.previous_customer_carr,
+    m.current_customer_carr,
+    m.previous_segment_carr,
+    m.current_segment_carr,
+    m.previous_motion_plans,
+    m.current_motion_plans,
+    FALSE AS is_legacy
+  FROM ${movementDetailsTable} m
+  WHERE m.movement_scope = 'motion'
+    AND m.grain = 'week'
+    AND m.period_end BETWEEN DATE(@start_date) AND DATE(@end_date)
+
+  UNION ALL
+
+  SELECT
+    m.period_start,
+    m.period_end,
+    m.customer_key,
+    m.customer_label,
+    m.company_name,
+    m.hubspot_company_id,
+    m.company_workspace_id,
+    IF(
+      NULLIF(m.hubspot_company_id, '') IS NULL,
+      NULL,
+      CONCAT('https://app.hubspot.com/contacts/${HUBSPOT_PORTAL_ID}/record/0-2/', m.hubspot_company_id)
+    ) AS hubspot_company_url,
+    m.motion,
+    m.bucket,
+    m.previous_customer_carr,
+    m.current_customer_carr,
+    m.previous_segment_carr,
+    m.current_segment_carr,
+    m.previous_motion_plans,
+    m.current_motion_plans,
+    m.is_legacy
+  FROM legacy_movements m
 ), raw_movements AS (
   SELECT
     m.*,
     m.current_customer_carr - m.previous_customer_carr AS customer_delta,
     m.current_segment_carr - m.previous_segment_carr AS segment_delta
-  FROM ${tableRef(TRANSFORMED_DATASET, "rpt_logo_movement_details_by_period_and_motion")} m
-  WHERE m.movement_scope = 'motion'
-    AND m.grain = 'week'
-    AND m.period_end BETWEEN DATE(@start_date) AND DATE(@end_date)
+  FROM base_movements m
 ), classified AS (
   SELECT
     m.*,
@@ -272,6 +338,7 @@ WITH boundary AS (
   FROM filtered f
   LEFT JOIN ${tableRef(TRANSFORMED_DATASET, "stg_hubspot_deals")} d
     ON ${stockField ? "FALSE" : "COALESCE(d.is_archived, FALSE) = FALSE"}
+   AND (NOT f.is_legacy OR LOWER(TRIM(COALESCE(d.deployment_type, ''))) <> 'cloud')
    AND (
      (NULLIF(f.hubspot_company_id, '') IS NOT NULL AND d.primary_company_id = f.hubspot_company_id)
      OR (NULLIF(d.deal_workspace_id, '') IS NOT NULL AND STRPOS(COALESCE(f.company_workspace_id, ''), d.deal_workspace_id) > 0)
@@ -294,6 +361,7 @@ SELECT
   f.previous_motion_plans,
   f.current_motion_plans,
   f.contribution,
+  f.is_legacy,
   dc.deal_id,
   dc.deal_name,
   dc.deal_date,
@@ -307,7 +375,10 @@ LEFT JOIN deal_candidates dc
  AND dc.motion = f.motion
  AND dc.match_rank = 1
 ORDER BY ABS(f.contribution) DESC, f.customer_label, f.period_end
-`, commonParams(input.range), { profile: PROFILE },
+`, [
+      ...commonParams(input.range),
+      { name: "target_currency", type: "STRING", value: String(process.env.FX_TARGET_CURRENCY || "USD").trim().toUpperCase() || "USD" },
+    ], { profile: PROFILE },
   );
 
   const details: GtmDetailRow[] = rows.map((row) => {
@@ -317,11 +388,14 @@ ORDER BY ABS(f.contribution) DESC, f.customer_label, f.period_end
     const dealDate = valueString(row.deal_date);
     const currentArr = valueNumber(row.current_segment_carr);
     const dealArr = valueNumber(row.deal_arr);
+    const isLegacy = valueBoolean(row.is_legacy);
     let matchBasis: string | null = null;
     if (dealId) {
       if (closedWon && dealDate && movementEnd && dealDate >= valueString(row.period_start) && dealDate <= movementEnd) matchBasis = "Closed won in movement week";
       else if (currentArr != null && dealArr != null && Math.abs(currentArr - dealArr) < 0.01) matchBasis = "Deal ARR matches resulting ARR";
-      else matchBasis = closedWon ? "Most relevant closed-won company deal" : "Related company deal";
+      else matchBasis = closedWon
+        ? isLegacy ? "Most relevant non-cloud closed-won company deal" : "Most relevant closed-won company deal"
+        : "Related company deal";
     }
     return {
       customer: optionalString(row.customer_label) || optionalString(row.company_name) || valueString(row.customer_key),
@@ -367,14 +441,14 @@ ORDER BY ABS(f.contribution) DESC, f.customer_label, f.period_end
   return {
     title: input.title,
     periodLabel: input.range.label,
-    source: "Customer-level combined CARR model · BigQuery",
+    source: "Customer-level combined + legacy CARR model · BigQuery",
     aggregation: stockField ? "snapshot" : "sum",
     detailValue: sumRows(details, "contribution"),
     columns,
     rows: details,
     note: stockField
-      ? "Each row is a customer-level CARR record in the selected beginning or ending weekly snapshot."
-      : "Each row is a customer-level CARR record. When a customer changes motion and ARR in the same week, the row contribution separates the true expansion or contraction from the transferred ARR, matching the aggregate bridge. The matched deal is ranked from HubSpot deals sharing the company or workspace; the Deal match column states the match basis.",
+      ? "Each row is a customer-level CARR record in the selected beginning or ending weekly snapshot, including non-cloud HubSpot ARR."
+      : "Each row is a customer-level CARR record, including non-cloud HubSpot ARR. When a customer changes motion and ARR in the same week, the row contribution separates the true expansion or contraction from the transferred ARR, matching the aggregate bridge. The matched deal is ranked from HubSpot deals sharing the company or workspace; the Deal match column states the match basis.",
   };
 }
 
