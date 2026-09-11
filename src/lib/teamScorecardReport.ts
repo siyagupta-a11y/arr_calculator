@@ -18,7 +18,7 @@ import {
   type ScorecardQuotaMetric,
 } from "@/lib/teamScorecardBigquery";
 
-export type TeamScorecardValueFormat = "currency" | "percent" | "count" | "text";
+export type TeamScorecardValueFormat = "currency" | "percent" | "count" | "number" | "text";
 
 export type TeamScorecardValue = {
   label: string;
@@ -31,6 +31,10 @@ export type TeamScorecardMetric = TeamScorecardMetricDefinition & {
   values: TeamScorecardValue[];
   source: string;
   calculation: string;
+  valueKind: "calculated" | "manual" | "blank";
+  manualValue?: number;
+  manualUpdatedAt?: string;
+  manualUpdatedBy?: string;
 };
 
 export type TeamScorecardReportResponse = {
@@ -43,6 +47,7 @@ export type TeamScorecardReportResponse = {
   generatedAt: string;
   populatedMetricCount: number;
   totalMetricCount: number;
+  canEditManualValues: boolean;
   metrics: TeamScorecardMetric[];
   warnings: string[];
 };
@@ -103,7 +108,7 @@ function percent(label: string, value: number, context?: string): TeamScorecardV
 }
 
 function reportMetric(definition: TeamScorecardMetricDefinition): TeamScorecardMetric {
-  return { ...definition, values: [], source: "", calculation: "" };
+  return { ...definition, values: [], source: "", calculation: "", valueKind: "blank" };
 }
 
 function populateMetric(
@@ -118,6 +123,7 @@ function populateMetric(
   row.values = values;
   row.source = source;
   row.calculation = calculation;
+  row.valueKind = "calculated";
 }
 
 function populateProduct(metrics: TeamScorecardMetric[], carr: ScorecardCarrMetrics | null) {
@@ -266,6 +272,7 @@ export async function generateTeamScorecardReport(rawRequest: TeamScorecardRepor
     generatedAt: new Date().toISOString(),
     populatedMetricCount: metrics.filter((metric) => metric.values.length > 0).length,
     totalMetricCount: metrics.length,
+    canEditManualValues: false,
     metrics,
     warnings,
   };

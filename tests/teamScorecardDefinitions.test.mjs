@@ -6,6 +6,7 @@ import {
   getTeamScorecardDefinition,
   isTeamScorecardKey,
 } from "../src/lib/teamScorecardDefinitions.ts";
+import { applyTeamScorecardManualValues } from "../src/lib/teamScorecardManualValues.ts";
 
 test("preserves the V2 scorecards and adds Finance and People Ops", () => {
   assert.deepEqual(TEAM_SCORECARD_DEFINITIONS.map((team) => team.key), [...TEAM_SCORECARD_KEYS]);
@@ -60,4 +61,25 @@ test("validates team route keys", () => {
   assert.equal(isTeamScorecardKey("finance"), true);
   assert.equal(isTeamScorecardKey("people-ops"), true);
   assert.equal(isTeamScorecardKey("People-Ops"), true);
+});
+
+test("manual scorecard values fill blanks without overriding calculated metrics", () => {
+  const report = {
+    populatedMetricCount: 1,
+    metrics: [
+      { id: "blank", values: [], valueKind: "blank", source: "", calculation: "" },
+      { id: "calculated", values: [{ label: "Actual", value: 10, format: "count" }], valueKind: "calculated", source: "BigQuery", calculation: "Query" },
+    ],
+  };
+  const result = applyTeamScorecardManualValues(report, {
+    blank: { value: 12.5, updatedAt: "2026-09-11T12:00:00.000Z", updatedBy: "admin@example.com" },
+    calculated: { value: 99, updatedAt: "2026-09-11T12:00:00.000Z", updatedBy: "admin@example.com" },
+  });
+
+  assert.equal(result.populatedMetricCount, 2);
+  assert.equal(result.metrics[0].valueKind, "manual");
+  assert.equal(result.metrics[0].manualValue, 12.5);
+  assert.equal(result.metrics[0].values[0].format, "number");
+  assert.equal(result.metrics[1].values[0].value, 10);
+  assert.equal(result.metrics[1].valueKind, "calculated");
 });

@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { applyTeamScorecardManualValues } from "@/lib/teamScorecardManualValues";
+import { loadTeamScorecardManualValues } from "@/lib/teamScorecardManualValuesStore";
 import {
   generateTeamScorecardReport,
   type TeamScorecardReportRequest,
@@ -18,8 +20,10 @@ export async function GET(request: Request) {
       startDate: url.searchParams.get("startDate") || "",
       endDate: url.searchParams.get("endDate") || "",
     };
-    const cacheKey = `api:team-scorecards:v2:${stableStringify(input)}`;
-    const report = await getOrSetCache(cacheKey, CACHE_TTL_MS, () => generateTeamScorecardReport(input));
+    const cacheKey = `api:team-scorecards:v3:${stableStringify(input)}`;
+    const baseReport = await getOrSetCache(cacheKey, CACHE_TTL_MS, () => generateTeamScorecardReport(input));
+    const manualValues = await loadTeamScorecardManualValues(baseReport.teamKey, baseReport.endDate.slice(0, 7));
+    const report = applyTeamScorecardManualValues(baseReport, manualValues);
     return NextResponse.json(report, {
       headers: {
         "Cache-Control": "private, no-store, max-age=0",

@@ -33,6 +33,9 @@ function formatValue(value: TeamScorecardValue, currency: string) {
   if (value.format === "count") {
     return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(Number(value.value || 0));
   }
+  if (value.format === "number") {
+    return new Intl.NumberFormat("en-US", { maximumFractionDigits: 4 }).format(Number(value.value || 0));
+  }
   return String(value.value || "");
 }
 
@@ -65,6 +68,9 @@ export default function TeamScorecardClient({
   const [data, setData] = useState<TeamScorecardReportResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [manualDrafts, setManualDrafts] = useState<Record<string, string>>({});
+  const [savingMetricId, setSavingMetricId] = useState("");
+  const [manualStatus, setManualStatus] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -91,7 +97,11 @@ export default function TeamScorecardClient({
         throw new Error(`Scorecard returned a non-JSON response (${response.status}).`);
       }
       if (!response.ok) throw new Error(responseError(payload, response.status));
-      setData(payload as TeamScorecardReportResponse);
+      const report = payload as TeamScorecardReportResponse;
+      setData(report);
+      setManualDrafts(Object.fromEntries(report.metrics
+        .filter((metric) => metric.valueKind === "manual" && metric.manualValue != null)
+        .map((metric) => [metric.id, String(metric.manualValue)])));
     } catch (requestError: unknown) {
       setError(requestError instanceof Error ? requestError.message : "Unable to load scorecard");
     } finally {
@@ -120,6 +130,44 @@ export default function TeamScorecardClient({
 
   const definition = TEAM_SCORECARD_DEFINITIONS.find((team) => team.key === teamKey)!;
   const displayed = data?.teamKey === teamKey ? data : null;
+  const calculationSource = displayed
+    ? displayed.metrics.some((metric) => metric.valueKind === "calculated")
+      ? displayed.metrics.some((metric) => metric.valueKind === "manual") ? "BigQuery + manual" : "BigQuery"
+      : displayed.metrics.some((metric) => metric.valueKind === "manual") ? "Manual entries" : "Awaiting integrations"
+    : "Awaiting integrations";
+
+  const saveManualValue = useCallback(async (metricId: string, clear = false) => {
+    const rawValue = manualDrafts[metricId] ?? "";
+    if (!clear && rawValue.trim() === "") {
+      setManualStatus((current) => ({ ...current, [metricId]: "Enter a number." }));
+      return;
+    }
+    const value = clear ? null : Number(rawValue);
+    if (!clear && !Number.isFinite(value)) {
+      setManualStatus((current) => ({ ...current, [metricId]: "Enter a valid number." }));
+      return;
+    }
+    setSavingMetricId(metricId);
+    setManualStatus((current) => ({ ...current, [metricId]: "" }));
+    try {
+      const response = await fetch("/api/team-scorecards", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ team: teamKey, startDate, endDate, metricId, value }),
+      });
+      const payload = await response.json().catch(() => null) as unknown;
+      if (!response.ok) throw new Error(responseError(payload, response.status));
+      await load();
+      setManualStatus((current) => ({ ...current, [metricId]: clear ? "Cleared." : "Saved." }));
+    } catch (saveError: unknown) {
+      setManualStatus((current) => ({
+        ...current,
+        [metricId]: saveError instanceof Error ? saveError.message : "Unable to save value.",
+      }));
+    } finally {
+      setSavingMetricId("");
+    }
+  }, [endDate, load, manualDrafts, startDate, teamKey]);
 
   return (
     <div className={`stripe-ui team-scorecards${tvMode ? " team-scorecards--tv" : ""}`}>
@@ -128,7 +176,7 @@ export default function TeamScorecardClient({
         <div className="stripe-ui__hero-row">
           <div>
             <h1 className="stripe-ui__title">{definition.name}</h1>
-            <p className="stripe-ui__subtitle">{definition.description} Every requested metric remains visible; unsupported actuals are intentionally blank.</p>
+            <p className="stripe-ui__subtitle">{definition.description} Every requested metric remains visible; actuals come from calculated data or saved monthly entries.</p>
           </div>
           <div className="team-scorecards__hero-links">
             <Link href={tvMode ? "/tv/scorecards" : "/scorecards"} className="stripe-ui__hero-link">All teams</Link>
@@ -182,14 +230,14 @@ export default function TeamScorecardClient({
           <section className="team-scorecards__summary ui-reveal ui-reveal-2">
             <article><span>Reporting range</span><strong>{displayDate(displayed.startDate)} – {displayDate(displayed.endDate)}</strong></article>
             <article><span>Metrics populated</span><strong>{displayed.populatedMetricCount} <small>/ {displayed.totalMetricCount}</small></strong></article>
-            <article><span>Calculation source</span><strong>{displayed.populatedMetricCount ? "BigQuery" : "Awaiting integrations"}</strong></article>
+            <article><span>Calculation source</span><strong>{calculationSource}</strong></article>
           </section>
 
           <section className="stripe-ui__panel ui-reveal ui-reveal-3">
             <div className="stripe-ui__section-head">
               <div>
                 <h2 className="stripe-ui__panel-title">{displayed.teamName} scorecard</h2>
-                <p className="stripe-ui__panel-subtitle">Targets, owners, cadence, tracking notes, and metric names are preserved from the scorecard specification. Blank actual cells are not treated as zero.</p>
+                <p className="stripe-ui__panel-subtitle">Targets, owners, cadence, notes, and metric names are preserved from the scorecard specification. Blank actual cells are not treated as zero.{displayed.canEditManualValues && !tvMode ? " Admins can enter an actual when no calculated value is available." : ""}</p>
               </div>
               <span className="team-scorecards__range-chip">{displayed.startDate} → {displayed.endDate}</span>
             </div>
@@ -202,7 +250,6 @@ export default function TeamScorecardClient({
                     <th>Target</th>
                     <th>Owner</th>
                     <th>Frequency</th>
-                    <th>Can finance track?</th>
                     <th>Notes</th>
                   </tr>
                 </thead>
@@ -214,7 +261,30 @@ export default function TeamScorecardClient({
                         <strong>{metric.label}</strong>
                       </td>
                       <td className={`team-scorecards__actual${metric.values.length ? "" : " team-scorecards__actual--blank"}`}>
-                        {metric.values.length ? (
+                        {metric.valueKind !== "calculated" && displayed.canEditManualValues && !tvMode ? (
+                          <div className="team-scorecards__manual-editor">
+                            <label htmlFor={`manual-${metric.id}`}>{metric.valueKind === "manual" ? "Manual actual" : "Enter actual"}</label>
+                            <div className="team-scorecards__manual-row">
+                              <input
+                                id={`manual-${metric.id}`}
+                                className="stripe-ui__control team-scorecards__manual-input"
+                                type="number"
+                                step="any"
+                                value={manualDrafts[metric.id] ?? ""}
+                                onChange={(event) => setManualDrafts((current) => ({ ...current, [metric.id]: event.target.value }))}
+                                disabled={savingMetricId === metric.id}
+                              />
+                              <button type="button" className="stripe-ui__btn stripe-ui__btn--primary" onClick={() => void saveManualValue(metric.id)} disabled={savingMetricId === metric.id}>
+                                {savingMetricId === metric.id ? "Saving…" : "Save"}
+                              </button>
+                              {metric.valueKind === "manual" ? (
+                                <button type="button" className="stripe-ui__btn" onClick={() => void saveManualValue(metric.id, true)} disabled={savingMetricId === metric.id}>Clear</button>
+                              ) : null}
+                            </div>
+                            {metric.manualUpdatedAt ? <small>Last updated {new Date(metric.manualUpdatedAt).toLocaleString()}</small> : null}
+                            {manualStatus[metric.id] ? <span className="team-scorecards__manual-status" role="status">{manualStatus[metric.id]}</span> : null}
+                          </div>
+                        ) : metric.values.length ? (
                           <div className="team-scorecards__values">
                             {metric.values.map((value) => (
                               <div className="team-scorecards__value" key={`${metric.id}-${value.label}`}>
@@ -234,7 +304,6 @@ export default function TeamScorecardClient({
                       <td>{metric.target}</td>
                       <td>{metric.owner}</td>
                       <td>{metric.frequency}</td>
-                      <td>{metric.financeTracking}</td>
                       <td>{metric.notes}</td>
                     </tr>
                   ))}

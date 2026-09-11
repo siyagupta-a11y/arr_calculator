@@ -2077,7 +2077,7 @@ textarea:focus-visible {
 }
 
 .team-scorecards__table {
-  min-width: 1120px;
+  min-width: 1000px;
 }
 
 .team-scorecards__table th,
@@ -2099,8 +2099,8 @@ textarea:focus-visible {
 
 .team-scorecards__table th:nth-child(3),
 .team-scorecards__table td:nth-child(3),
-.team-scorecards__table th:nth-child(7),
-.team-scorecards__table td:nth-child(7) {
+.team-scorecards__table th:nth-child(6),
+.team-scorecards__table td:nth-child(6) {
   min-width: 190px;
   white-space: normal;
 }
@@ -2121,6 +2121,41 @@ textarea:focus-visible {
 .team-scorecards__actual--blank {
   min-height: 58px;
   background: repeating-linear-gradient(-45deg, rgba(91, 116, 151, 0.035) 0 4px, transparent 4px 9px);
+}
+
+.team-scorecards__manual-editor {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.team-scorecards__manual-editor > label {
+  color: #90acd2;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.team-scorecards__manual-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.team-scorecards__manual-input {
+  min-width: 100px;
+  max-width: 170px;
+}
+
+.team-scorecards__manual-editor small {
+  color: #7894bb;
+  font-size: 0.66rem;
+}
+
+.team-scorecards__manual-status {
+  color: #b9e8c4;
+  font-size: 0.7rem;
+  font-weight: 700;
 }
 
 .team-scorecards__values {
